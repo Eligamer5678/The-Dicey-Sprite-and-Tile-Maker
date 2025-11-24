@@ -1,0 +1,75 @@
+/* Reset default margins */
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #303030;
+    position: relative;
+    overscroll-behavior-x:none;
+}
+#screen {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+}
+
+/* Container for all draw layers
+   Keep these full-screen; canvases will be positioned/sized by JS */
+#layers {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none; /* layer canvases should not capture input */
+}
+#ui {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    /* UI should be able to receive events (buttons, etc). You can adjust per-layer. */
+    pointer-events: auto;
+    overscroll-behavior-x:none;
+    z-index: 100;
+}
+
+/* All layer canvases */
+#layers canvas.layer,
+#ui canvas.layer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    background: transparent;
+    image-rendering: pixelated;
+    overflow: hidden;
+    touch-action: none;
+    overscroll-behavior-x:none;
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    /* width/height intentionally controlled by JS */
+    /* Prevent canvases from intercepting pointer events so HTML UI children receive input */
+    pointer-events: none;
+}
+
+/* debug box */
+#debug {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100px;
+    height: 20px;
+    font-family: monospace;
+    white-space: pre; /* preserves spacing and newlines exactly */
+    background: #ffffff;
+    z-index: 9999;
+    font-size:13px;
+    color:#FFF;
+    user-select: none;
+}
