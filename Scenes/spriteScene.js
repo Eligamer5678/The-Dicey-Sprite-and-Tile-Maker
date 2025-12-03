@@ -614,6 +614,86 @@ export class SpriteScene extends Scene {
                 console.warn('clipboard op failed', e);
             }
 
+            // Fill bucket: on 'f' release, flood-fill the area under the mouse
+            try {
+                if (this.keys && typeof this.keys.released === 'function' && this.keys.released('f')) {
+                    const pos = this.getPos(this.mouse && this.mouse.pos);
+                    if (!pos || !pos.inside) return;
+                    const sheet = this.currentSprite;
+                    const anim = this.selectedAnimation;
+                    const frameIdx = this.selectedFrame;
+                    if (!sheet) return;
+                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                    if (!frameCanvas) return;
+                    try {
+                        const w = frameCanvas.width;
+                        const h = frameCanvas.height;
+                        const ctx = frameCanvas.getContext('2d');
+                        const img = ctx.getImageData(0, 0, w, h);
+                        const data = img.data;
+                        const sx = pos.x;
+                        const sy = pos.y;
+                        if (sx < 0 || sy < 0 || sx >= w || sy >= h) return;
+                        const startIdx = (sy * w + sx) * 4;
+                        const srcR = data[startIdx], srcG = data[startIdx+1], srcB = data[startIdx+2], srcA = data[startIdx+3];
+                        // target fill color from penColor (convert to rgba 0..255)
+                        const fillCol = Color.convertColor(this.penColor || '#000000');
+                        const fRgb = fillCol.toRgb();
+                        const fillR = Math.round(fRgb.a || 0);
+                        const fillG = Math.round(fRgb.b || 0);
+                        const fillB = Math.round(fRgb.c || 0);
+                        const fillA = Math.round((fRgb.d || 1) * 255);
+                        // If target color equals fill color, nothing to do
+                        if (srcR === fillR && srcG === fillG && srcB === fillB && srcA === fillA) return;
+
+                        const shiftHeld = this.keys.held('a');
+                        if (shiftHeld) {
+                            // Global exact replace: replace every pixel matching src color
+                            for (let p = 0; p < w * h; p++) {
+                                const idx = p * 4;
+                                if (data[idx] === srcR && data[idx+1] === srcG && data[idx+2] === srcB && data[idx+3] === srcA) {
+                                    data[idx] = fillR;
+                                    data[idx+1] = fillG;
+                                    data[idx+2] = fillB;
+                                    data[idx+3] = fillA;
+                                }
+                            }
+                        } else {
+                            // Local flood-fill (4-connected) starting at mouse pixel
+                            const wStride = w;
+                            const stack = [];
+                            stack.push(sy * w + sx);
+                            while (stack.length) {
+                                const p = stack.pop();
+                                const y = Math.floor(p / wStride);
+                                const x = p % wStride;
+                                const idx = (y * wStride + x) * 4;
+                                // match source color exactly
+                                if (data[idx] !== srcR || data[idx+1] !== srcG || data[idx+2] !== srcB || data[idx+3] !== srcA) continue;
+                                // set to fill
+                                data[idx] = fillR;
+                                data[idx+1] = fillG;
+                                data[idx+2] = fillB;
+                                data[idx+3] = fillA;
+                                // push neighbors
+                                if (x > 0) stack.push(p - 1);
+                                if (x < wStride - 1) stack.push(p + 1);
+                                if (y > 0) stack.push(p - wStride);
+                                if (y < h - 1) stack.push(p + wStride);
+                            }
+                        }
+
+                        // write back and rebuild sheet
+                        ctx.putImageData(img, 0, 0);
+                        if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                    } catch (e) {
+                        // ignore image read/write errors
+                    }
+                }
+            } catch (e) {
+                console.warn('fill bucket (f) failed', e);
+            }
+
             // Average selected pixels into current pen color when 'j' released
             try {
                 if (this.keys && typeof this.keys.released === 'function' && this.keys.released('j')) {
