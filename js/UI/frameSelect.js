@@ -26,6 +26,8 @@ export default class FrameSelect {
         this._previewSize = 256;
         this._previewBuffer = 16;
         this._animName = null;
+        // multi-frame selection (store indices)
+        this._multiSelected = new Set();
         // Create a fps slider
         const sliderPos = new Vector(1920 - this._previewBuffer * 3 - this._previewSize, this._previewBuffer + (this._previewSize + this._previewBuffer * 2) + 8);
         const sliderSize = new Vector(this._previewSize+this._previewBuffer*2, 20);
@@ -346,12 +348,26 @@ export default class FrameSelect {
                     // clicked an existing frame
                     if (!anim) break;
                     if (i < framesArr.length) {
-                        if (this.scene) this.scene.selectedFrame = i;
+                        // If Shift held, toggle multi-selection of this frame
+                        try {
+                            if (this.keys && this.keys.held && this.keys.held('Shift')) {
+                                if (this._multiSelected.has(i)) this._multiSelected.delete(i);
+                                else this._multiSelected.add(i);
+                                // also set primary selection to last clicked
+                                if (this.scene) this.scene.selectedFrame = i;
+                            } else {
+                                // normal single select: clear any multi-selection
+                                if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
+                                if (this.scene) this.scene.selectedFrame = i;
+                            }
+                        } catch (e) { if (this.scene) this.scene.selectedFrame = i; }
                     } else {
                         // add new frame and select it
                         if (typeof this.sprite.insertFrame === 'function') {
                             this.sprite.insertFrame(anim);
                             if (this.scene) this.scene.selectedFrame = framesArr.length; // previous length -> new index
+                            // clear multi selection when adding
+                            if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
                         }
                     }
                     // prevent input "leak" to underlying UI by masking this layer (use addMask to avoid region conflicts)
@@ -360,6 +376,38 @@ export default class FrameSelect {
                 }
             }
         }
+
+        // Handle merge key: press 'm' to merge multiple selected frames into one new frame (keep originals)
+        try {
+            if (this.keys && typeof this.keys.released === 'function' && this.keys.released('m')) {
+                if (this._multiSelected && this._multiSelected.size >= 2) {
+                    const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                    if (!anim || !this.sprite || !this.sprite._frames || !this.sprite._frames.has(anim)) return;
+                    const arr = this.sprite._frames.get(anim);
+                    // compute indices in ascending order
+                    const idxs = Array.from(this._multiSelected).filter(i => typeof i === 'number' && i >= 0 && i < arr.length).sort((a,b)=>a-b);
+                    if (idxs.length < 2) return;
+                    try {
+                        const px = this.sprite.slicePx || 16;
+                        const out = document.createElement('canvas'); out.width = px; out.height = px;
+                        const ctx = out.getContext('2d'); ctx.clearRect(0,0,px,px);
+                        for (const idx of idxs) {
+                            try {
+                                const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
+                                if (src) ctx.drawImage(src, 0, 0);
+                            } catch (e) { /* ignore per-frame draw error */ }
+                        }
+                        // append merged frame and rebuild
+                        arr.push(out);
+                        if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                        if (this.scene) this.scene.selectedFrame = arr.length - 1;
+                        // clear multi selection after merge
+                        this._multiSelected.clear();
+                        try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                    } catch (e) { console.warn('FrameSelect merge failed', e); }
+                }
+            }
+        } catch (e) { console.warn('FrameSelect merge key handling failed', e); }
         // handle backspace: remove selected frame when hovering over the menu
         try {
             if (this.keys && this.keys.pressed && this.keys.released && this.keys.released('Backspace')) {
@@ -513,6 +561,8 @@ export default class FrameSelect {
                         } else {
                             // select animation
                             if (this.scene) this.scene.selectedAnimation = name;
+                            // clear any multi-frame selection when switching animations
+                            if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
                             // materialize frames for the selected animation (lazy-load)
                             try { if (this.sprite && typeof this.sprite._materializeAnimation === 'function') this.sprite._materializeAnimation(name); } catch(e) {}
                         }
@@ -541,12 +591,40 @@ export default class FrameSelect {
             this.UIDraw.rect(outerPos, outerSize, '#111111CC');
             const contentPos = outerPos.clone().add(new Vector(this._previewBuffer, this._previewBuffer));
             const contentSize = new Vector(this._previewSize, this._previewSize);
-            // draw current frame if available
+            // draw current frame if available (or merged preview when multi-selected)
             const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
             const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
             if (framesArr.length > 0 && anim) {
-                const fi = Math.max(0, Math.min(this._animIndex, framesArr.length - 1));
-                this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                // If multiple frames are selected, show a merged preview (composited)
+                if (this._multiSelected && this._multiSelected.size >= 2) {
+                    const idxs = Array.from(this._multiSelected).filter(i => typeof i === 'number' && i >= 0 && i < framesArr.length).sort((a,b)=>a-b);
+                    if (idxs.length >= 2) {
+                        try {
+                            const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                            const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
+                            const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
+                            for (const idx of idxs) {
+                                try {
+                                    const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
+                                    if (src) tctx.drawImage(src, 0, 0);
+                                } catch (e) { /* ignore per-frame draw error */ }
+                            }
+                            this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
+                            // small label indicating merged preview
+                            this.UIDraw.text('Merged Preview', new Vector(contentPos.x + 8, contentPos.y + 18), '#FFFFFF', 0, 12, { align: 'left', font: 'monospace' });
+                        } catch (e) {
+                            // fallback to normal sheet draw on error
+                            const fi = Math.max(0, Math.min(this._animIndex, framesArr.length - 1));
+                            this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                        }
+                    } else {
+                        const fi = Math.max(0, Math.min(this._animIndex, framesArr.length - 1));
+                        this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                    }
+                } else {
+                    const fi = Math.max(0, Math.min(this._animIndex, framesArr.length - 1));
+                    this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                }
             } else {
                 // empty area (checker or placeholder)
                 this.UIDraw.rect(contentPos, contentSize, '#00000000', false, true, 2, '#444444AA');
@@ -604,7 +682,9 @@ export default class FrameSelect {
         const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
         const slotCount = framesArr.length + 1; // extra slot for "add new frame"
         for (let i = 0; i < slotCount; i++){
-            this.UIDraw.rect(new Vector(5,100 + (180+20) * i + this.scrollPos),new Vector(190,190),'#333030ff')
+                const slotPos = new Vector(5,100 + (180+20) * i + this.scrollPos);
+                const slotSize = new Vector(190,190);
+                this.UIDraw.rect(slotPos, slotSize, '#333030ff')
             // only draw an existing frame; the final slot is the "add" placeholder
             if (i < framesArr.length && anim) {
                 this.UIDraw.sheet(this.sprite, new Vector(10,100 + (180+20) * i + this.scrollPos), new Vector(180,180), anim, i)
@@ -625,13 +705,20 @@ export default class FrameSelect {
                     this.UIDraw.rect(hPos, hSize, '#FFFFFFFF', true);
                 } catch (e) {}
             }
-            // draw selected outline if this is the selected frame
+            // draw selected outline if this is the selected frame (primary) or multi-selected
             try {
-                if (this.scene && typeof this.scene.selectedFrame !== 'undefined' && this.scene.selectedFrame === i) {
-                    const selPos = new Vector(5,100 + (180+20) * i + this.scrollPos);
-                    const selSize = new Vector(190,190);
-                    // stroke only, no fill: pass fill=false, stroke=true
+                const isPrimary = (this.scene && typeof this.scene.selectedFrame !== 'undefined' && this.scene.selectedFrame === i);
+                const isMulti = this._multiSelected && this._multiSelected.has(i);
+                // draw primary first (yellow), then multi (green) so green appears above yellow
+                if (isPrimary) {
+                    const selPos = slotPos;
+                    const selSize = slotSize;
                     this.UIDraw.rect(selPos, selSize, '#00000000', false, true, 4, '#FFFF00FF');
+                }
+                if (isMulti) {
+                    const selPos = slotPos;
+                    const selSize = slotSize;
+                    this.UIDraw.rect(selPos, selSize, '#00000000', false, true, 4, '#00FF00FF');
                 }
             } catch (e) {
                 // ignore drawing errors
