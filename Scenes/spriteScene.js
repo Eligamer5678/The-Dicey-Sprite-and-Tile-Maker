@@ -110,6 +110,10 @@ export class SpriteScene extends Scene {
         this.selectedFrame = 0
         // brush size: 1..4 (mapped to square sizes 1,3,5,7)
         this.brushSize = 1;
+        // which channel to adjust with h/k: 'h'|'s'|'v'|'a'
+        this.adjustChannel = 'v';
+        // linear adjustment amount (0-1 for S/V/A, wrapped for H)
+        this.adjustAmount = 0.05;
         // zoom limits and smoothing params
         this.minZoom = 0.25;
         this.maxZoom = 16;
@@ -351,6 +355,11 @@ export class SpriteScene extends Scene {
                 if (this.keys.released('2')) this.brushSize = 2;
                 if (this.keys.released('3')) this.brushSize = 3;
                 if (this.keys.released('4')) this.brushSize = 4;
+                // choose which channel to adjust with h/k: 6->H, 7->S, 8->V, 9->A
+                if (this.keys.released('6')) this.adjustChannel = 'h';
+                if (this.keys.released('7')) this.adjustChannel = 's';
+                if (this.keys.released('8')) this.adjustChannel = 'v';
+                if (this.keys.released('9')) this.adjustChannel = 'a';
             }
         } catch (e) { /* ignore */ }
         try {
@@ -604,6 +613,170 @@ export class SpriteScene extends Scene {
             } catch (e) {
                 console.warn('clipboard op failed', e);
             }
+
+            // Average selected pixels into current pen color when 'j' released
+            try {
+                if (this.keys && typeof this.keys.released === 'function' && this.keys.released('j')) {
+                    const sheet = this.currentSprite;
+                    const anim = this.selectedAnimation;
+                    const frameIdx = this.selectedFrame;
+                    if (!sheet) return;
+                    const samples = [];
+                    // explicit point selection
+                    if (this.selectionPoints && this.selectionPoints.length > 0) {
+                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                        if (frameCanvas) {
+                            const ctx = frameCanvas.getContext('2d');
+                            for (const p of this.selectionPoints) {
+                                try {
+                                    const d = ctx.getImageData(p.x, p.y, 1, 1).data;
+                                    samples.push(d);
+                                } catch (e) { /* ignore per-pixel errors */ }
+                            }
+                        }
+                    } else if (this.selectionRegion) {
+                        // rectangular region selection
+                        const sr = this.selectionRegion;
+                        const minX = Math.min(sr.start.x, sr.end.x);
+                        const minY = Math.min(sr.start.y, sr.end.y);
+                        const maxX = Math.max(sr.start.x, sr.end.x);
+                        const maxY = Math.max(sr.start.y, sr.end.y);
+                        const w = maxX - minX + 1;
+                        const h = maxY - minY + 1;
+                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                        if (frameCanvas) {
+                            const ctx = frameCanvas.getContext('2d');
+                            try {
+                                const img = ctx.getImageData(minX, minY, w, h).data;
+                                for (let yy = 0; yy < h; yy++) {
+                                    for (let xx = 0; xx < w; xx++) {
+                                        const idx = (yy * w + xx) * 4;
+                                        samples.push([img[idx], img[idx+1], img[idx+2], img[idx+3]]);
+                                    }
+                                }
+                            } catch (e) { /* ignore region read errors */ }
+                        }
+                    }
+
+                    if (samples.length > 0) {
+                        let r = 0, g = 0, b = 0, a = 0;
+                        for (const s of samples) { r += (s[0] || 0); g += (s[1] || 0); b += (s[2] || 0); a += (s[3] || 0); }
+                        const n = samples.length;
+                        r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n); a = Math.round(a / n);
+                        const hex8 = this.rgbaToHex(r, g, b, a);
+                        this.penColor = hex8;
+                        // update HTML color input (drop alpha)
+                        if (this._colorInput) {
+                            const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
+                            try { this._colorInput.value = '#' + toHex(r) + toHex(g) + toHex(b); } catch (e) {}
+                        }
+                    }
+                }
+            } catch (e) { console.warn('average color (j) failed', e); }
+
+            // Lighten (h) / Darken (k) selected pixels by a linear amount on
+            // the currently-selected channel (this.adjustChannel). Use additive
+            // deltas (this.adjustAmount) instead of multiplicative scaling.
+            try {
+                const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+                const applyAdjust = (delta) => {
+                    const sheet = this.currentSprite;
+                    const anim = this.selectedAnimation;
+                    const frameIdx = this.selectedFrame;
+                    if (!sheet) return;
+                    const channel = this.adjustChannel || 'v';
+                    // Reduce hue adjustments to a smaller fraction so keys change hue more finely
+                    const channelMultiplier = (channel === 'h') ? 0.2 : 1.0;
+                    const appliedDelta = delta * channelMultiplier;
+
+                    // point selection
+                    if (this.selectionPoints && this.selectionPoints.length > 0) {
+                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                        if (!frameCanvas) return;
+                        const ctx = frameCanvas.getContext('2d');
+                        for (const p of this.selectionPoints) {
+                            try {
+                                const d = ctx.getImageData(p.x, p.y, 1, 1).data;
+                                const col = Color.convertColor(this.rgbaToHex(d[0], d[1], d[2], d[3]));
+                                const hsv = col.toHsv();
+                                // hsv: a=h, b=s, c=v, d=alpha (0-1)
+                                switch (channel) {
+                                    case 'h':
+                                        hsv.a = (hsv.a + appliedDelta) % 1; if (hsv.a < 0) hsv.a += 1;
+                                        break;
+                                    case 's':
+                                        hsv.b = clamp(hsv.b + appliedDelta, 0, 1);
+                                        break;
+                                    case 'v':
+                                        hsv.c = clamp(hsv.c + appliedDelta, 0, 1);
+                                        break;
+                                    case 'a':
+                                        hsv.d = clamp(hsv.d + appliedDelta, 0, 1);
+                                        break;
+                                }
+                                const rgb = hsv.toRgb();
+                                const newHex = this.rgbaToHex(Math.round(rgb.a), Math.round(rgb.b), Math.round(rgb.c), Math.round((rgb.d || 1) * 255));
+                                if (typeof sheet.setPixel === 'function') sheet.setPixel(anim, frameIdx, p.x, p.y, newHex, 'replace');
+                            } catch (e) { /* ignore per-pixel errors */ }
+                        }
+                        if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch(e){}
+                        return;
+                    }
+
+                    // region selection
+                    if (this.selectionRegion) {
+                        const sr = this.selectionRegion;
+                        const minX = Math.min(sr.start.x, sr.end.x);
+                        const minY = Math.min(sr.start.y, sr.end.y);
+                        const maxX = Math.max(sr.start.x, sr.end.x);
+                        const maxY = Math.max(sr.start.y, sr.end.y);
+                        const w = maxX - minX + 1;
+                        const h = maxY - minY + 1;
+                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                        if (!frameCanvas) return;
+                        const ctx = frameCanvas.getContext('2d');
+                        try {
+                            const img = ctx.getImageData(minX, minY, w, h);
+                            const data = img.data;
+                            for (let yy = 0; yy < h; yy++) {
+                                for (let xx = 0; xx < w; xx++) {
+                                    const idx = (yy * w + xx) * 4;
+                                    const r = data[idx], g = data[idx+1], b = data[idx+2], a = data[idx+3];
+                                    try {
+                                        const col = Color.convertColor(this.rgbaToHex(r, g, b, a));
+                                        const hsv = col.toHsv();
+                                        switch (channel) {
+                                            case 'h':
+                                                hsv.a = (hsv.a + appliedDelta) % 1; if (hsv.a < 0) hsv.a += 1; break;
+                                            case 's':
+                                                hsv.b = clamp(hsv.b + appliedDelta, 0, 1); break;
+                                            case 'v':
+                                                hsv.c = clamp(hsv.c + appliedDelta, 0, 1); break;
+                                            case 'a':
+                                                hsv.d = clamp(hsv.d + appliedDelta, 0, 1); break;
+                                        }
+                                        const rgb = hsv.toRgb();
+                                        data[idx] = Math.round(rgb.a);
+                                        data[idx+1] = Math.round(rgb.b);
+                                        data[idx+2] = Math.round(rgb.c);
+                                        data[idx+3] = Math.round((rgb.d || 1) * 255);
+                                    } catch (e) { /* ignore per-pixel errors */ }
+                                }
+                            }
+                            ctx.putImageData(img, minX, minY);
+                            if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch(e){}
+                        } catch (e) { /* ignore region read/write errors */ }
+                    }
+                };
+                if (this.keys && typeof this.keys.released === 'function') {
+                    if (this.keys.released('h')) {
+                        applyAdjust(this.adjustAmount); // additive lighten on selected channel
+                    }
+                    if (this.keys.released('k')) {
+                        applyAdjust(-this.adjustAmount); // additive darken on selected channel
+                    }
+                }
+            } catch (e) { console.warn('lighten/darken (h/k) failed', e); }
 
             // If clipboard preview is active, allow left-click (press+hold) inside the preview
             // to pick a new origin inside the clipboard. We freeze the preview placement on
@@ -1042,6 +1215,19 @@ export class SpriteScene extends Scene {
         this.UIDraw.useCtx('UI');
         this.UIDraw.clear()
         this.FrameSelect.draw()
+        // Draw a small bottom-right label showing the current adjust channel
+        try {
+            const uctx = this.UIDraw && this.UIDraw.ctx;
+            if (uctx && uctx.canvas) {
+                const uiW = uctx.canvas.width / (this.Draw ? this.Draw.Scale.x : 1);
+                const uiH = uctx.canvas.height / (this.Draw ? this.Draw.Scale.y : 1);
+                const ch = (this.adjustChannel || 'v').toUpperCase();
+                const effMult = (this.adjustChannel === 'h') ? 0.2 : 1.0;
+                const pct = Math.round((this.adjustAmount || 0.05) * 100 * effMult);
+                const label = `Adjust: ${ch}  ${pct}%`;
+                this.UIDraw.text(label, new Vector(uiW - 12, uiH - 8), '#FFFFFFFF', 1, 14, { align: 'right', baseline: 'bottom', font: 'monospace' });
+            }
+        } catch (e) {}
     }
 
     /**
@@ -1112,7 +1298,7 @@ export class SpriteScene extends Scene {
                 for (const point of this.selectionPoints) {
                     const cellX = dstPos.x + point.x * cellW;
                     const cellY = dstPos.y + point.y * cellH;
-                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#00FFFF55', true); // Aqua fill
+                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW/3, cellH/3), '#00FFFF55', true); // Aqua fill
                     this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#00FFFFFF', false, true, 1, '#00FFFFFF'); // Aqua outline
                 }
             }
