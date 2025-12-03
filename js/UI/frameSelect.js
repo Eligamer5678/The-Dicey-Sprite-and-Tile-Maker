@@ -268,12 +268,12 @@ export default class FrameSelect {
             const uiCanvas = document.getElementById('UI');
             if (!uiCanvas || !uiCanvas.parentNode) return;
             // Button positions: ~300px left from right edge (1920 - 300 = 1620)
-            const importPos = new Vector(1620, this._previewBuffer + 4);
+            const importPos = new Vector(1480, this._previewBuffer + 4);
             const btnSize = new Vector(140, 28);
             this._importBtn = createHButton('import-spritesheet-btn', importPos, btnSize, '#334455', { color: '#fff', borderRadius: '4px', fontSize: 14 }, uiCanvas.parentNode);
             this._importBtn.textContent = 'Import Spritesheet';
 
-            const exportPos = new Vector(1620, this._previewBuffer + 4 + btnSize.y + 6);
+            const exportPos = new Vector(1480, this._previewBuffer + 4 + btnSize.y + 6);
             this._exportBtn = createHButton('export-spritesheet-btn', exportPos, btnSize, '#225522', { color: '#fff', borderRadius: '4px', fontSize: 14 }, uiCanvas.parentNode);
             this._exportBtn.textContent = 'Export Spritesheet';
 
@@ -417,6 +417,65 @@ export default class FrameSelect {
             console.warn('FrameSelect undo handling failed', e);
         }
 
+        // Duplicate selected frame with 'v', and move frames with ArrowUp/ArrowDown
+        try {
+            if (this.keys && this.keys.released) {
+                const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                const sel = (this.scene && typeof this.scene.selectedFrame === 'number') ? this.scene.selectedFrame : null;
+                const arr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
+
+                // Duplicate (press 'v') -> insert a copy after the selected frame
+                if (this.keys.released('/')) {
+                    if (anim && sel !== null && arr && sel >= 0 && sel < arr.length) {
+                        try {
+                            const src = this.sprite.getFrame(anim, sel);
+                            const clone = document.createElement('canvas');
+                            clone.width = this.sprite.slicePx || (src ? src.width : 16);
+                            clone.height = this.sprite.slicePx || (src ? src.height : 16);
+                            const ctx = clone.getContext('2d');
+                            if (src) ctx.drawImage(src, 0, 0);
+                            // insert after current
+                            arr.splice(sel + 1, 0, clone);
+                            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                            if (this.scene) this.scene.selectedFrame = sel + 1;
+                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                        } catch (e) { console.warn('FrameSelect duplicate failed', e); }
+                    }
+                }
+
+                // Move frame earlier (ArrowUp)
+                if (this.keys.released('ArrowUp')) {
+                    if (anim && sel !== null && arr && sel > 0 && sel < arr.length) {
+                        try {
+                            const prev = arr[sel - 1];
+                            const cur = arr[sel];
+                            arr[sel - 1] = cur;
+                            arr[sel] = prev;
+                            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                            if (this.scene) this.scene.selectedFrame = sel - 1;
+                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                        } catch (e) { console.warn('FrameSelect move up failed', e); }
+                    }
+                }
+
+                // Move frame later (ArrowDown)
+                if (this.keys.released('ArrowDown')) {
+                    if (anim && sel !== null && arr && sel >= 0 && sel < arr.length - 1) {
+                        try {
+                            const next = arr[sel + 1];
+                            const cur = arr[sel];
+                            arr[sel + 1] = cur;
+                            arr[sel] = next;
+                            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                            if (this.scene) this.scene.selectedFrame = sel + 1;
+                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                        } catch (e) { console.warn('FrameSelect move down failed', e); }
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('FrameSelect key handlers failed', e);
+        }
 
         
         // update text input if open

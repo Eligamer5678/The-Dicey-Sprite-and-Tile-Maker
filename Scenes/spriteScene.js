@@ -108,6 +108,8 @@ export class SpriteScene extends Scene {
         this.zoomVlos = new Vector(0,0)
         this.selectedAnimation = 'idle'
         this.selectedFrame = 0
+        // brush size: 1..4 (mapped to square sizes 1,3,5,7)
+        this.brushSize = 1;
         // zoom limits and smoothing params
         this.minZoom = 0.25;
         this.maxZoom = 16;
@@ -122,10 +124,10 @@ export class SpriteScene extends Scene {
         this.selectionPoints = [];
         this.currentTool = null;
 
-    // region-based selection (for cut/copy/paste)
-    this.selectionRegion = null;
-    // clipboard stores { w, h, data(Uint8ClampedArray), originOffset: {ox,oy} }
-    this.clipboard = null;
+        // region-based selection (for cut/copy/paste)
+        this.selectionRegion = null;
+        // clipboard stores { w, h, data(Uint8ClampedArray), originOffset: {ox,oy} }
+        this.clipboard = null;
 
         this.FrameSelect = new FrameSelect(this,this.currentSprite,this.mouse,this.keys,this.UIDraw,1)
         // create a simple color picker input positioned to the right of the left menu (shifted 200px)
@@ -342,6 +344,15 @@ export class SpriteScene extends Scene {
         this.mouse.setMask(0)
         this.FrameSelect.update()
         this.mouse.setPower(0)
+        // handle numeric keys to change brush size (1..4)
+        try {
+            if (this.keys && this.keys.released) {
+                if (this.keys.released('1')) this.brushSize = 1;
+                if (this.keys.released('2')) this.brushSize = 2;
+                if (this.keys.released('3')) this.brushSize = 3;
+                if (this.keys.released('4')) this.brushSize = 4;
+            }
+        } catch (e) { /* ignore */ }
         try {
             // handle ctrl+wheel zoom (adds velocity impulses)
             this.zoomScreen(tickDelta);
@@ -431,11 +442,34 @@ export class SpriteScene extends Scene {
             if (!pos || !pos.inside) return;
             const sheet = this.currentSprite;
             const color = this.penColor || '#000000';
-            if (this.mouse.held('left')) { // early return as requested
-                sheet.setPixel(this.selectedAnimation, this.selectedFrame, pos.x, pos.y, color, 'replace');
+            const side = Math.max(1, Math.min(4, this.brushSize || 1));
+            const half = Math.floor((side - 1) / 2);
+            if (this.mouse.held('left')) { // draw an NxN square centered on cursor (top-left bias for even sizes)
+                const sx = pos.x - half;
+                const sy = pos.y - half;
+                if (typeof sheet.fillRect === 'function') {
+                    sheet.fillRect(this.selectedAnimation, this.selectedFrame, sx, sy, side, side, color, 'replace');
+                } else {
+                    for (let yy = 0; yy < side; yy++) {
+                        for (let xx = 0; xx < side; xx++) {
+                            try { sheet.setPixel(this.selectedAnimation, this.selectedFrame, sx + xx, sy + yy, color, 'replace'); } catch (e) {}
+                        }
+                    }
+                }
             }
-            if (this.mouse.held('right')) { // early return as requested
-                sheet.setPixel(this.selectedAnimation, this.selectedFrame, pos.x, pos.y, '#00000000', 'replace');
+            if (this.mouse.held('right')) { // erase NxN square
+                const eraseColor = '#00000000';
+                const sx = pos.x - half;
+                const sy = pos.y - half;
+                if (typeof sheet.fillRect === 'function') {
+                    sheet.fillRect(this.selectedAnimation, this.selectedFrame, sx, sy, side, side, eraseColor, 'replace');
+                } else {
+                    for (let yy = 0; yy < side; yy++) {
+                        for (let xx = 0; xx < side; xx++) {
+                            try { sheet.setPixel(this.selectedAnimation, this.selectedFrame, sx + xx, sy + yy, eraseColor, 'replace'); } catch (e) {}
+                        }
+                    }
+                }
             }
             
         } catch (e) {
@@ -1182,11 +1216,24 @@ export class SpriteScene extends Scene {
                     this.drawBox(this.selectionPoints[0], mousePixelPos, '#FFFFFF88', this.keys.held('Alt'));
                 }
 
-                const cellX = dstPos.x + posInfo.x * cellW;
-                const cellY = dstPos.y + posInfo.y * cellH;
-                // translucent fill + stroked outline
-                this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFF22', true);
-                this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFFEE', false, true, 2, '#FFFFFFEE');
+                // draw brush-sized cursor (NxN where N is this.brushSize)
+                try {
+                    const side = Math.max(1, Math.min(4, this.brushSize || 1));
+                    const half = Math.floor((side - 1) / 2);
+                    const sx = posInfo.x - half;
+                    const sy = posInfo.y - half;
+                    const drawX = dstPos.x + sx * cellW;
+                    const drawY = dstPos.y + sy * cellH;
+                    const drawW = side * cellW;
+                    const drawH = side * cellH;
+                    this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), '#FFFFFF22', true);
+                    this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), '#FFFFFFEE', false, true, 2, '#FFFFFFEE');
+                } catch (e) {
+                    const cellX = dstPos.x + posInfo.x * cellW;
+                    const cellY = dstPos.y + posInfo.y * cellH;
+                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFF22', true);
+                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFFEE', false, true, 2, '#FFFFFFEE');
+                }
             }
         } catch (e) {
             // ignore cursor errors
