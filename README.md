@@ -37,6 +37,27 @@
 - While holding v, you can use r to rotate & f to flip the selection
 - Backspace to delete current frame, and undo works here, yay!
 - Exports as 1 animation per row, having empty space to the side of the rightmost frames.
+- 
+- **Latest update**
+- Press 'n' to add a bit of noise to the image
+- Shift click multiple frames to layer them in the preview, click m to fully merge.
+- Useful for stuff like layering or onion skin
+- 1-4 keys change brush size
+- h & k to modify color
+- 6-9 keys to select property to modify, 6=hue,7=saturation,8=value,9=alpha
+- j to grab the average color
+- up/down keys to move the frame
+- '/' to duplicate frame
+- f to fill region
+- Press the upper left corner to access the console
+- *Console commands* (text box on the bottom of the screen), type exactly to use.
+- "clear" - *clears logs*
+- "resize(sliceSize,resizeContent=true)" - *resizes the canvas*
+- "copy(hex)" - *copys pen color*
+- "select(hex,buffer)" - *selects all pixels of this color*
+- "grayscale()" - grayscales the frame
+- "toggleOnion" - toggles onion skinning
+- "layerAlpha" - multi-select layer & onion skin visibility
 
 #### Collision editor
 - Hold 'n' to create points. Press space to turn them into a polygon.
