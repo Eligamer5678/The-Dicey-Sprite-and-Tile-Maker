@@ -616,7 +616,7 @@ export class SpriteScene extends Scene {
 
             // Fill bucket: on 'f' release, flood-fill the area under the mouse
             try {
-                if (this.keys && typeof this.keys.released === 'function' && this.keys.released('f')) {
+                if (this.keys.held('f',true)>1 || this.keys.released('f')) {
                     const pos = this.getPos(this.mouse && this.mouse.pos);
                     if (!pos || !pos.inside) return;
                     const sheet = this.currentSprite;
@@ -874,8 +874,8 @@ export class SpriteScene extends Scene {
                         const img = ctx.getImageData(0, 0, w, h);
                         const data = img.data;
                         // Value/hue noise parameters
-                        const valueStrength = 24; // larger uniform value change (applied equally to R/G/B)
-                        const hueStrength = 0.005; // small hue shift (in 0..1 space)
+                        const valueStrength = 1; // larger uniform value change (applied equally to R/G/B)
+                        const hueStrength = 0.0002; // small hue shift (in 0..1 space)
 
                         // Helper to apply noise to a pixel index:
                         // 1) add a single random delta to all RGB channels (value change)
