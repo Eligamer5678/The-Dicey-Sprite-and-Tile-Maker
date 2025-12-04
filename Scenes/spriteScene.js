@@ -6,6 +6,7 @@ import createHInput from '../js/htmlElements/createHInput.js';
 import SpriteSheet from '../js/Spritesheet.js';
 import FrameSelect from '../js/UI/frameSelect.js';
 import Color from '../js/Color.js';
+import { copyToClipboard } from '../js/Support.js';
 
 export class SpriteScene extends Scene {
     constructor(...args) {
@@ -165,9 +166,188 @@ export class SpriteScene extends Scene {
             console.warn('failed to create color picker', e);
         }
 
-        this.isReady = true;
-    }
+        // Register debug signal to grayscale the current frame
+        try {
+            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
+                try {
+                    window.Debug.createSignal('Grayscale', () => {
+                        try {
+                            const sheet = this.currentSprite;
+                            const anim = this.selectedAnimation;
+                            const frameIdx = this.selectedFrame;
+                            if (!sheet) {
+                                window.Debug && window.Debug.log && window.Debug.log('No current sprite to grayscale');
+                                return;
+                            }
+                            const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                            if (!frameCanvas) {
+                                window.Debug && window.Debug.log && window.Debug.log('No frame canvas found');
+                                return;
+                            }
+                            const ctx = frameCanvas.getContext('2d');
+                            const w = frameCanvas.width;
+                            const h = frameCanvas.height;
+                            const img = ctx.getImageData(0, 0, w, h);
+                            const data = img.data;
 
+                            const hasPointSelection = (this.selectionPoints && this.selectionPoints.length > 0);
+                            const hasRegionSelection = !!this.selectionRegion;
+
+                            const applyLumAtIdx = (idx) => {
+                                const r = data[idx];
+                                const g = data[idx + 1];
+                                const b = data[idx + 2];
+                                const lum = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
+                                data[idx] = lum;
+                                data[idx + 1] = lum;
+                                data[idx + 2] = lum;
+                            };
+
+                            if (hasPointSelection) {
+                                for (const p of this.selectionPoints) {
+                                    if (!p) continue;
+                                    if (p.x < 0 || p.y < 0 || p.x >= w || p.y >= h) continue;
+                                    const idx = (p.y * w + p.x) * 4;
+                                    applyLumAtIdx(idx);
+                                }
+                            } else if (hasRegionSelection) {
+                                const sr = this.selectionRegion;
+                                const minX = Math.max(0, Math.min(sr.start.x, sr.end.x));
+                                const minY = Math.max(0, Math.min(sr.start.y, sr.end.y));
+                                const maxX = Math.min(w - 1, Math.max(sr.start.x, sr.end.x));
+                                const maxY = Math.min(h - 1, Math.max(sr.start.y, sr.end.y));
+                                for (let yy = minY; yy <= maxY; yy++) {
+                                    for (let xx = minX; xx <= maxX; xx++) {
+                                        const idx = (yy * w + xx) * 4;
+                                        applyLumAtIdx(idx);
+                                    }
+                                }
+                            } else {
+                                for (let i = 0; i < data.length; i += 4) {
+                                    const r = data[i];
+                                    const g = data[i + 1];
+                                    const b = data[i + 2];
+                                    const lum = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
+                                    data[i] = lum;
+                                    data[i + 1] = lum;
+                                    data[i + 2] = lum;
+                                }
+                            }
+
+                            ctx.putImageData(img, 0, 0);
+                            if (typeof sheet._rebuildSheetCanvas === 'function') {
+                                try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                            }
+                            window.Debug && window.Debug.log && window.Debug.log('Applied grayscale to current frame');
+                        } catch (err) {
+                            window.Debug && window.Debug.error && window.Debug.error('Grayscale signal failed: ' + err);
+                        }
+                    });
+                } catch (e) {
+                    console.warn('Failed to register Grayscale debug signal', e);
+                }
+                // Also register CopyColor signal in the same try so both are available
+                try {
+                    window.Debug.createSignal('copy', () => {
+                        try {
+                            const hex = this.penColor || '#000000';
+                            // Use support helper to copy to clipboard
+                            try { copyToClipboard(hex); } catch (err) {
+                                // fallback to navigator if helper unavailable
+                                try { navigator.clipboard.writeText(hex); } catch (e) {}
+                            }
+                            window.Debug && window.Debug.log && window.Debug.log('Copied color to clipboard: ' + hex);
+                        } catch (err) {
+                            window.Debug && window.Debug.error && window.Debug.error('CopyColor signal failed: ' + err);
+                        }
+                    });
+                } catch (e) {
+                    console.warn('Failed to register CopyColor debug signal', e);
+                }
+                try {
+                    window.Debug.createSignal('resize', (sliceSize,resizeContent=true) => {
+                        try {
+                            this.resize(sliceSize,resizeContent)
+                            window.Debug && window.Debug.log && window.Debug.log('Resized canvas to:',sliceSize,'x',sliceSize,'px');
+                        } catch (err) {
+                            window.Debug && window.Debug.error && window.Debug.error('Failed to resize canvas' + err);
+                        }
+                    });
+                } catch (e) {
+                    console.warn('Failed to register CopyColor debug signal', e);
+                }
+            }
+        } catch (e) {}
+
+        // Register SelectColor debug signal: select(hex, buffer=1)
+        try {
+            window.Debug.createSignal('select', (hex, buffer = 1) => {
+                try {
+                    if (!hex) {
+                        window.Debug && window.Debug.log && window.Debug.log('SelectColor: missing hex argument');
+                        return;
+                    }
+                    const tol = (typeof buffer === 'number') ? buffer : (parseFloat(buffer) || 1);
+                    const colObj = Color.convertColor(hex);
+                    const rgbCol = colObj.toRgb();
+                    // Color.toRgb returns an object where .a/.b/.c hold r/g/b in this project
+                    const tr = Math.round(rgbCol.a || 0);
+                    const tg = Math.round(rgbCol.b || 0);
+                    const tb = Math.round(rgbCol.c || 0);
+
+                    const sheet = this.currentSprite;
+                    const anim = this.selectedAnimation;
+                    const frameIdx = this.selectedFrame;
+                    if (!sheet) {
+                        window.Debug && window.Debug.log && window.Debug.log('SelectColor: no current sprite');
+                        return;
+                    }
+                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                    if (!frameCanvas) {
+                        window.Debug && window.Debug.log && window.Debug.log('SelectColor: no frame canvas');
+                        return;
+                    }
+
+                    const ctx = frameCanvas.getContext('2d');
+                    const w = frameCanvas.width;
+                    const h = frameCanvas.height;
+                    let img;
+                    try { img = ctx.getImageData(0, 0, w, h); } catch (e) { window.Debug && window.Debug.error && window.Debug.error('SelectColor: getImageData failed'); return; }
+                    const data = img.data;
+
+                    const matches = [];
+                    const maxDistSq = tol * tol;
+                    for (let y = 0; y < h; y++) {
+                        for (let x = 0; x < w; x++) {
+                            const i = (y * w + x) * 4;
+                            const r = data[i];
+                            const g = data[i + 1];
+                            const b = data[i + 2];
+                            const dr = r - tr;
+                            const dg = g - tg;
+                            const db = b - tb;
+                            const distSq = dr * dr + dg * dg + db * db;
+                            if (distSq <= maxDistSq) {
+                                matches.push({ x, y });
+                            }
+                        }
+                    }
+
+                    // set selection to the matched points
+                    this.selectionPoints = matches;
+                    this.selectionRegion = null;
+                    window.Debug && window.Debug.log && window.Debug.log(`SelectColor: selected ${matches.length} pixels matching ${hex} (tol=${tol})`);
+                } catch (err) {
+                    window.Debug && window.Debug.error && window.Debug.error('SelectColor failed: ' + err);
+                }
+            });
+        } catch (e) {
+            console.warn('Failed to register select debug signal', e);
+        }
+
+        this.isReady = true;
+    
+    }
     // When switching away from this scene, dispose any UI-created DOM elements
     // and free large resources so GC can reclaim them.
     onSwitchFrom(resources){
@@ -1105,6 +1285,77 @@ export class SpriteScene extends Scene {
     rgbaToHex(r, g, b, a) {
         const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
         return '#' + toHex(r) + toHex(g) + toHex(b) + toHex(a);
+    }
+
+    // Resize the current sprite sheet's slice size.
+    // sliceSize: new tile size in pixels (integer > 0)
+    // resizeContent: if true, scale existing frame content to the new size;
+    // if false, copy content into top-left of new canvas (no scaling)
+    resize(sliceSize, resizeContent = true) {
+        try {
+            sliceSize = Math.max(1, Math.floor(Number(sliceSize) || 0));
+            if (!sliceSize) return false;
+            const sheet = this.currentSprite;
+            if (!sheet) return false;
+            const oldSize = sheet.slicePx || 0;
+            if (oldSize === sliceSize) return true; // nothing to do
+
+            // Ensure all frames are materialized (lazy descriptors -> canvases)
+            try {
+                if (sheet._frames && typeof sheet._materializeFrame === 'function') {
+                    for (const anim of Array.from(sheet._frames.keys())) {
+                        const arr = sheet._frames.get(anim) || [];
+                        for (let i = 0; i < arr.length; i++) {
+                            const entry = arr[i];
+                            if (entry && entry.__lazy === true) {
+                                try { sheet._materializeFrame(anim, i); } catch (e) { /* ignore per-frame materialize errors */ }
+                            }
+                        }
+                    }
+                }
+            } catch (e) { /* ignore materialize errors */ }
+
+            // Resize each frame canvas
+            try {
+                for (const anim of Array.from(sheet._frames.keys())) {
+                    const arr = sheet._frames.get(anim) || [];
+                    for (let i = 0; i < arr.length; i++) {
+                        const old = arr[i];
+                        if (!old) continue;
+                        // If entry is still a descriptor, skip (should be materialized above)
+                        if (old.__lazy === true) continue;
+                        const oldW = old.width || oldSize || 1;
+                        const oldH = old.height || oldSize || 1;
+                        const nc = document.createElement('canvas');
+                        nc.width = sliceSize; nc.height = sliceSize;
+                        const ctx = nc.getContext('2d');
+                        try {
+                            ctx.clearRect(0, 0, sliceSize, sliceSize);
+                            // Use nearest-neighbor (no smoothing) for pixel art
+                            try { ctx.imageSmoothingEnabled = false; } catch (e) {}
+                            if (resizeContent) {
+                                try { ctx.drawImage(old, 0, 0, oldW, oldH, 0, 0, sliceSize, sliceSize); } catch (e) { /* ignore draw errors */ }
+                            } else {
+                                try { ctx.drawImage(old, 0, 0); } catch (e) { /* ignore draw errors */ }
+                            }
+                        } catch (e) { /* ignore per-frame ops */ }
+                        arr[i] = nc;
+                    }
+                }
+            } catch (e) { /* ignore frame-level failures */ }
+
+            // Update slice size and rebuild packed sheet
+            try { sheet.slicePx = sliceSize; } catch (e) {}
+            try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) { /* ignore */ }
+
+            // Notify FrameSelect to refresh if present
+            try { if (this.FrameSelect && typeof this.FrameSelect.rebuild === 'function') this.FrameSelect.rebuild(); } catch (e) {}
+
+            return true;
+        } catch (e) {
+            console.warn('resize failed', e);
+            return false;
+        }
     }
 
     // Copy the pixels inside this.selectionRegion into this.clipboard.
