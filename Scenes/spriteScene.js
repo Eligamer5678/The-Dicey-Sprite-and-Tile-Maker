@@ -858,6 +858,108 @@ export class SpriteScene extends Scene {
                 }
             } catch (e) { console.warn('lighten/darken (h/k) failed', e); }
 
+            // Add subtle noise/randomness to the current frame on 'n' release
+            try {
+                if (this.keys && typeof this.keys.released === 'function' && this.keys.released('n')) {
+                    const sheet = this.currentSprite;
+                    const anim = this.selectedAnimation;
+                    const frameIdx = this.selectedFrame;
+                    if (!sheet) return;
+                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                    if (!frameCanvas) return;
+                    try {
+                        const w = frameCanvas.width;
+                        const h = frameCanvas.height;
+                        const ctx = frameCanvas.getContext('2d');
+                        const img = ctx.getImageData(0, 0, w, h);
+                        const data = img.data;
+                        // Value/hue noise parameters
+                        const valueStrength = 24; // larger uniform value change (applied equally to R/G/B)
+                        const hueStrength = 0.005; // small hue shift (in 0..1 space)
+
+                        // Helper to apply noise to a pixel index:
+                        // 1) add a single random delta to all RGB channels (value change)
+                        // 2) apply a smaller random hue rotation
+                        const applyNoiseAtIdx = (idx) => {
+                            const r = data[idx];
+                            const g = data[idx + 1];
+                            const b = data[idx + 2];
+                            const a = data[idx + 3];
+
+                            // uniform value change
+                            const deltaV = Math.floor(Math.random() * (valueStrength * 2 + 1)) - valueStrength;
+                            let nr = r + deltaV;
+                            let ng = g + deltaV;
+                            let nb = b + deltaV;
+                            // clamp preliminarily
+                            nr = Math.max(0, Math.min(255, nr));
+                            ng = Math.max(0, Math.min(255, ng));
+                            nb = Math.max(0, Math.min(255, nb));
+
+                            try {
+                                // small hue rotation
+                                const hex = this.rgbaToHex(nr, ng, nb, a);
+                                const col = Color.convertColor(hex);
+                                const hsv = col.toHsv(); // {a:h, b:s, c:v, d:alpha}
+                                const deltaH = (Math.random() * 2 - 1) * hueStrength;
+                                hsv.a = (hsv.a + deltaH) % 1; if (hsv.a < 0) hsv.a += 1;
+                                const rgb = hsv.toRgb(); // returns Color with rgb in a,b,c
+                                data[idx] = Math.round(rgb.a);
+                                data[idx + 1] = Math.round(rgb.b);
+                                data[idx + 2] = Math.round(rgb.c);
+                                // keep original alpha
+                                data[idx + 3] = a;
+                            } catch (e) {
+                                // fallback: write the uniform-changed RGB if color math fails
+                                data[idx] = nr;
+                                data[idx + 1] = ng;
+                                data[idx + 2] = nb;
+                                data[idx + 3] = a;
+                            }
+                        };
+
+                        // If there is any active selection (points or region), only affect those pixels.
+                        const hasPointSelection = (this.selectionPoints && this.selectionPoints.length > 0);
+                        const hasRegionSelection = !!this.selectionRegion;
+                        if (hasPointSelection) {
+                            for (const p of this.selectionPoints) {
+                                if (!p) continue;
+                                if (p.x < 0 || p.y < 0 || p.x >= w || p.y >= h) continue;
+                                const idx = (p.y * w + p.x) * 4;
+                                applyNoiseAtIdx(idx);
+                            }
+                        } else if (hasRegionSelection) {
+                            const sr = this.selectionRegion;
+                            const minX = Math.max(0, Math.min(sr.start.x, sr.end.x));
+                            const minY = Math.max(0, Math.min(sr.start.y, sr.end.y));
+                            const maxX = Math.min(w - 1, Math.max(sr.start.x, sr.end.x));
+                            const maxY = Math.min(h - 1, Math.max(sr.start.y, sr.end.y));
+                            for (let yy = minX ? minY : minY; yy <= maxY; yy++) {
+                                for (let xx = minX; xx <= maxX; xx++) {
+                                    const idx = (yy * w + xx) * 4;
+                                    applyNoiseAtIdx(idx);
+                                }
+                            }
+                        } else {
+                            // No selection -> apply full-frame subtle noise: affect a fraction of pixels
+                            const prob = 0.18; // ~18% of pixels
+                            for (let p = 0; p < w * h; p++) {
+                                if (Math.random() < prob) applyNoiseAtIdx(p * 4);
+                            }
+                        }
+
+                        ctx.putImageData(img, 0, 0);
+                        if (typeof sheet._rebuildSheetCanvas === 'function') {
+                            try { sheet._rebuildSheetCanvas(); } catch (e) { }
+                        }
+                    } catch (e) {
+                        // ignore image ops errors
+                    }
+                }
+            } catch (e) {
+                console.warn('noise (n) failed', e);
+            }
+
             // If clipboard preview is active, allow left-click (press+hold) inside the preview
             // to pick a new origin inside the clipboard. We freeze the preview placement on
             // initial press so subsequent mouse movement moves the origin relative to that frozen preview.
