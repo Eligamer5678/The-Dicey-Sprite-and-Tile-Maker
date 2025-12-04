@@ -1800,7 +1800,7 @@ export class SpriteScene extends Scene {
                         // (neighboring frames) with reduced alpha so users see motion context.
                         try {
                             const drawCtx = this.Draw && this.Draw.ctx;
-                            const onionEnabled = (typeof this.onionSkin === 'boolean') ? this.onionSkin : false;
+                            const onionEnabled = (typeof this.onionSkin === 'boolean') ? this.onionSkin : true;
                             // If FrameSelect has multi-selected frames, composite those instead
                             const multiSet = (this.FrameSelect && this.FrameSelect._multiSelected) ? this.FrameSelect._multiSelected : null;
                             const framesArr = (sheet && sheet._frames && animation) ? (sheet._frames.get(animation) || []) : [];
