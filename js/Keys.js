@@ -3,6 +3,7 @@ export default class Keys { // Key input
         this.keys = {};
         this.firstFrame = {};
         this.releasedFrame = {};
+        this.passcode = "" // allow key context
 
         window.addEventListener("keydown", e => {
             // prevent browser interfering with shortcuts
@@ -25,6 +26,12 @@ export default class Keys { // Key input
             this.releasedFrame[e.key] = true; // mark released
         });
     }
+    setPasscode(passcode){
+        this.passcode = passcode
+    }
+    resetPasscode(){
+        this.passcode = ""
+    }
 
     update(delta) {
         this.lastDelta = delta;
@@ -34,7 +41,8 @@ export default class Keys { // Key input
         }
     }
 
-    pressed(key) {
+    pressed(key,passcode="") {
+        if(passcode!==this.passcode) return false;
         const delta = this.lastDelta || 0;
         if (key === 'any') {
             for (const k in this.keys) {
@@ -48,7 +56,8 @@ export default class Keys { // Key input
         return (k && k.state && Math.abs(k.time - delta) < 1e-6);
     }
 
-    released(key) {
+    released(key,passcode="") {
+        if(passcode!==this.passcode) return false;
         if (key === 'any') {
             for (const k in this.releasedFrame) {
                 if (this.releasedFrame[k]) {
@@ -65,7 +74,8 @@ export default class Keys { // Key input
         return false;
     }
 
-    held(key, returnTime = false) {
+    held(key, returnTime = false,passcode="") {
+        if(passcode!==this.passcode) return 0;
         if (key === 'any') {
             for (const k in this.keys) {
                 if (this.keys[k] && this.keys[k].state) {
@@ -78,13 +88,15 @@ export default class Keys { // Key input
         return (k && k.state) ? (returnTime ? k.time : true) : (returnTime ? 0 : false);
     }
 
-    comboPressed(keysArray) {
+    comboPressed(keysArray,passcode="") {
+        if(passcode!==this.passcode) return false;
         const all = keysArray.every(k => this.firstFrame[k]);
         if (all) keysArray.forEach(k => (this.firstFrame[k] = false));
         return all;
     }
 
-    comboHeld(keysArray, returnTime = false) {
+    comboHeld(keysArray, returnTime = false,passcode="") {
+        if(passcode!==this.passcode) return 0;
         if (!keysArray.every(k => this.keys[k]?.state)) return returnTime ? 0 : false;
         return returnTime ? Math.min(...keysArray.map(k => this.keys[k].time)) : true;
     }

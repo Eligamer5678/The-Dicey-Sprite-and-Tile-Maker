@@ -133,6 +133,8 @@ export class SpriteScene extends Scene {
         this.selectionRegion = null;
         // clipboard stores { w, h, data(Uint8ClampedArray), originOffset: {ox,oy} }
         this.clipboard = null;
+        // transient flag set when a paste just occurred to avoid key-order races
+        this._justPasted = false;
 
         this.FrameSelect = new FrameSelect(this,this.currentSprite,this.mouse,this.keys,this.UIDraw,1)
         // create a simple color picker input positioned to the right of the left menu (shifted 200px)
@@ -344,6 +346,32 @@ export class SpriteScene extends Scene {
         } catch (e) {
             console.warn('Failed to register select debug signal', e);
         }
+
+        // Register debug signals for onion-skin control: layerAlpha(alpha), toggleOnion()
+        try {
+            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
+                window.Debug.createSignal('layerAlpha', (alpha) => {
+                    try {
+                        const a = Number(alpha);
+                        if (Number.isFinite(a)) {
+                            this.onionAlpha = Math.max(0, Math.min(1, a));
+                            console.log('onionAlpha set to', this.onionAlpha);
+                            return this.onionAlpha;
+                        }
+                    } catch (e) { /* ignore */ }
+                    return null;
+                });
+
+                window.Debug.createSignal('toggleOnion', () => {
+                    try {
+                        this.onionSkin = !(typeof this.onionSkin === 'boolean' ? this.onionSkin : true);
+                        console.log('onionSkin toggled to', this.onionSkin);
+                        return this.onionSkin;
+                    } catch (e) { /* ignore */ }
+                    return null;
+                });
+            }
+        } catch (e) { console.warn('Failed to register onion debug signals', e); }
 
         this.isReady = true;
     
@@ -682,6 +710,7 @@ export class SpriteScene extends Scene {
             if (this.clipboardPreview && (!this.keys.held('v'))) {
                 this.clipboardPreview = false;
                 this._clipboardPreviewDragging = null;
+                this.keys.resetPasscode();
             }
 
             // Ctrl + Left = eyedropper: pick color from the current frame under the mouse
@@ -773,6 +802,7 @@ export class SpriteScene extends Scene {
             try {
                 if (this.keys.held('v')) {
                     this.clipboardPreview = true;
+                    this.keys.setPasscode('pasteMode'); 
                 }
                 if (this.keys.pressed('c')) {
                     if (this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) this.doCopy();
@@ -782,13 +812,26 @@ export class SpriteScene extends Scene {
                 }
                 if (this.keys.released('v')) {
                     // paste at mouse pixel position using stored origin offset
-                    if (this.clipboard) this.doPaste(this.mouse && this.mouse.pos);
+                    if (this.clipboard) {
+                        this.doPaste(this.mouse && this.mouse.pos);
+                        // mark that a paste just occurred so we can avoid key-order races
+                        this._justPasted = true;
+                    }
                     this.clipboardPreview = false;
                     this._clipboardPreviewDragging = null;
+                    this.keys.resetPasscode();
                 }
                 // rotate clipboard clockwise with 'r'
-                if (this.keys.released('r')) {
-                    try { this.rotateClipboardCW && this.rotateClipboardCW(); } catch (e) { console.warn('rotate key failed', e); }
+                if (this.keys.released('r','pasteMode')) {
+                    try {
+                        this.rotateClipboardCW();
+                    } catch (e) { /* ignore */ }
+                }
+                // flip clipboard horizontally with 'f' while in pasteMode
+                if (this.keys.released('f','pasteMode')) {
+                    try {
+                        if (typeof this.flipClipboardH === 'function') this.flipClipboardH();
+                    } catch (e) { /* ignore */ }
                 }
             } catch (e) {
                 console.warn('clipboard op failed', e);
@@ -796,14 +839,16 @@ export class SpriteScene extends Scene {
 
             // Fill bucket: on 'f' release, flood-fill the area under the mouse
             try {
-                if (this.keys.held('f',true)>1 || this.keys.released('f')) {
+                // Prevent fill while clipboard preview/pasting (v) is active
+                if (this.keys.held('f', true) > 1 || this.keys.pressed('f')) {
+                    console.log('hello')
                     const pos = this.getPos(this.mouse && this.mouse.pos);
                     if (!pos || !pos.inside) return;
                     const sheet = this.currentSprite;
                     const anim = this.selectedAnimation;
                     const frameIdx = this.selectedFrame;
                     if (!sheet) return;
-                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                    const frameCanvas = sheet.getFrame(anim, frameIdx);
                     if (!frameCanvas) return;
                     try {
                         const w = frameCanvas.width;
@@ -1183,9 +1228,12 @@ export class SpriteScene extends Scene {
                 console.warn('clipboard preview drag failed', e);
             }
             
-        } catch (e) {
-            console.warn('selectionTool failed', e);
-        }
+            } catch (e) {
+                console.warn('selectionTool failed', e);
+            } finally {
+                // clear transient paste flag so it only affects the current tick
+                try { this._justPasted = false; } catch (ee) {}
+            }
     }
 
     // Generate list of pixel coordinates for a Bresenham line between start and end
@@ -1606,6 +1654,54 @@ export class SpriteScene extends Scene {
         }
     }
 
+    // Flip the stored clipboard horizontally (mirror left-right).
+    flipClipboardH() {
+        try {
+            if (!this.clipboard) return;
+            const cb = this.clipboard;
+            // Image clipboard (dense RGBA array)
+            if ((cb.type === 'image' || !cb.type) && typeof cb.w === 'number' && typeof cb.h === 'number' && cb.data) {
+                const w = cb.w;
+                const h = cb.h;
+                const old = cb.data;
+                const out = new Uint8ClampedArray(w * h * 4);
+                for (let y = 0; y < h; y++) {
+                    for (let x = 0; x < w; x++) {
+                        const srcIdx = (y * w + x) * 4;
+                        const nx = w - 1 - x;
+                        const ny = y;
+                        const dstIdx = (ny * w + nx) * 4;
+                        out[dstIdx] = old[srcIdx];
+                        out[dstIdx + 1] = old[srcIdx + 1];
+                        out[dstIdx + 2] = old[srcIdx + 2];
+                        out[dstIdx + 3] = old[srcIdx + 3];
+                    }
+                }
+                cb.data = out;
+                // dimensions unchanged
+                // adjust originOffset if present (mirror ox horizontally)
+                if (cb.originOffset) {
+                    const ox = cb.originOffset.ox || 0;
+                    const oy = cb.originOffset.oy || 0;
+                    cb.originOffset = { ox: w - 1 - ox, oy };
+                }
+            } else if (cb.type === 'points' && Array.isArray(cb.pixels)) {
+                // Sparse point clipboard: mirror each point across vertical center
+                const oldW = cb.w || 0;
+                for (const p of cb.pixels) {
+                    p.x = oldW - 1 - p.x;
+                }
+                if (cb.originOffset) {
+                    const ox = cb.originOffset.ox || 0;
+                    const oy = cb.originOffset.oy || 0;
+                    cb.originOffset = { ox: oldW - 1 - ox, oy };
+                }
+            }
+        } catch (e) {
+            console.warn('flipClipboardH failed', e);
+        }
+    }
+
     // Compute the draw area used by displayDrawArea and tools.
     // Returns { topLeft, size, padding, dstW, dstH, dstPos }
     computeDrawArea() {
@@ -1700,6 +1796,81 @@ export class SpriteScene extends Scene {
                     try {
                         // Draw.sheet expects a sheet-like object with `.sheet` (Image/Canvas)
                         // and `.slicePx` and an animations map. Our SpriteSheet provides those.
+                        // Before drawing the active frame, optionally draw onion-skin layers
+                        // (neighboring frames) with reduced alpha so users see motion context.
+                        try {
+                            const drawCtx = this.Draw && this.Draw.ctx;
+                            const onionEnabled = (typeof this.onionSkin === 'boolean') ? this.onionSkin : false;
+                            // If FrameSelect has multi-selected frames, composite those instead
+                            const multiSet = (this.FrameSelect && this.FrameSelect._multiSelected) ? this.FrameSelect._multiSelected : null;
+                            const framesArr = (sheet && sheet._frames && animation) ? (sheet._frames.get(animation) || []) : [];
+                            const baseAlpha = (typeof this.onionAlpha === 'number') ? this.onionAlpha : 0.35;
+
+                            if (drawCtx && multiSet && multiSet.size >= 2) {
+                                try {
+                                    // Build arrays of indices from the multi-selected set
+                                    const idxs = Array.from(multiSet).filter(i => typeof i === 'number' && i >= 0 && i < framesArr.length).sort((a,b)=>a-b);
+                                    if (idxs.length >= 2) {
+                                        const beforeIdxs = idxs.filter(i => i < frame);
+                                        const afterIdxs = idxs.filter(i => i > frame);
+
+                                        // Helper to composite a set of frames into a temporary canvas
+                                        const compositeSet = (indices) => {
+                                            if (!indices || indices.length === 0) return null;
+                                            const tmp = document.createElement('canvas');
+                                            tmp.width = dstW; tmp.height = dstH;
+                                            const tctx = tmp.getContext('2d');
+                                            try { tctx.imageSmoothingEnabled = false; } catch (e) {}
+                                            // draw each frame in order onto tmp (ascending indices)
+                                            for (const ii of indices) {
+                                                try {
+                                                    const fCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(animation, ii) : null;
+                                                    if (!fCanvas) continue;
+                                                    tctx.drawImage(fCanvas, 0, 0, fCanvas.width, fCanvas.height, 0, 0, dstW, dstH);
+                                                } catch (e) { /* ignore per-frame */ }
+                                            }
+                                            return tmp;
+                                        };
+
+                                        const beforeCanvas = compositeSet(beforeIdxs);
+                                        const afterCanvas = compositeSet(afterIdxs);
+
+                                        // Draw the composited before/after canvases with alpha
+                                        if (beforeCanvas) {
+                                            drawCtx.save();
+                                            drawCtx.globalAlpha = baseAlpha;
+                                            this.Draw.image(beforeCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
+                                            drawCtx.restore();
+                                        }
+                                        if (afterCanvas) {
+                                            drawCtx.save();
+                                            drawCtx.globalAlpha = baseAlpha;
+                                            this.Draw.image(afterCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
+                                            drawCtx.restore();
+                                        }
+                                    }
+                                } catch (e) { /* ignore multi-select compositing errors */ }
+                            } else if (drawCtx && onionEnabled) {
+                                const onionRange = (typeof this.onionRange === 'number') ? this.onionRange : 1;
+                                for (let off = -onionRange; off <= onionRange; off++) {
+                                    if (off === 0) continue;
+                                    try {
+                                        const idx = frame + off;
+                                        const fCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(animation, idx) : null;
+                                        if (!fCanvas) continue;
+                                        drawCtx.save();
+                                        // Fade more for frames further away
+                                        const distance = Math.abs(off);
+                                        const alpha = Math.max(0, baseAlpha * (1 - (distance - 1) / Math.max(1, onionRange)));
+                                        drawCtx.globalAlpha = alpha;
+                                        // Use Draw.image so transforms / scaling are respected
+                                        this.Draw.image(fCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
+                                        drawCtx.restore();
+                                    } catch (e) { /* ignore per-frame draw errors */ }
+                                }
+                            }
+                        } catch (e) { /* ignore onion/multi preparation errors */ }
+
                         this.Draw.sheet(sheet, dstPos, new Vector(dstW, dstH), animation, frame, null, 1, false);
                     } catch (e) {
                         // fallback to per-frame canvas if Draw.sheet fails
