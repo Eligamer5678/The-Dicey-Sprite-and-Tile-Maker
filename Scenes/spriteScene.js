@@ -860,7 +860,7 @@ export class SpriteScene extends Scene {
 
             // Add subtle noise/randomness to the current frame on 'n' release
             try {
-                if (this.keys && typeof this.keys.released === 'function' && this.keys.released('n')) {
+                if (this.keys && typeof this.keys.released === 'function' && this.keys.held('n')) {
                     const sheet = this.currentSprite;
                     const anim = this.selectedAnimation;
                     const frameIdx = this.selectedFrame;
@@ -875,7 +875,7 @@ export class SpriteScene extends Scene {
                         const data = img.data;
                         // Value/hue noise parameters
                         const valueStrength = 1; // larger uniform value change (applied equally to R/G/B)
-                        const hueStrength = 0.0002; // small hue shift (in 0..1 space)
+                        const hueStrength = 0.00001; // small hue shift (in 0..1 space)
 
                         // Helper to apply noise to a pixel index:
                         // 1) add a single random delta to all RGB channels (value change)
