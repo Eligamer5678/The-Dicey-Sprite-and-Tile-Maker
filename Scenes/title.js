@@ -1771,6 +1771,8 @@ export class TitleScene extends Scene {
         } catch (e) { console.warn('set tile failed', e); }
     }
     sceneTick(tickDelta){
+        this.mouse.update(tickDelta)
+        this.keys.update(tickDelta)
         this.zoomWorld(tickDelta)
         this.panWorld(tickDelta)
         this.getCursor()

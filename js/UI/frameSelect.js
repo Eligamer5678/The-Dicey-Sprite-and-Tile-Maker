@@ -28,6 +28,8 @@ export default class FrameSelect {
         this._animName = null;
         // multi-frame selection (store indices)
         this._multiSelected = new Set();
+        // id of the last-clicked group (for toggling layered state)
+        this._activeGroup = null;
         // Create a fps slider
         const sliderPos = new Vector(1920 - this._previewBuffer * 3 - this._previewSize, this._previewBuffer + (this._previewSize + this._previewBuffer * 2) + 8);
         const sliderSize = new Vector(this._previewSize+this._previewBuffer*2, 20);
@@ -39,14 +41,14 @@ export default class FrameSelect {
         this.menu = new Menu(this.mouse, this.keys, new Vector(0, 0), new Vector(200, 1080), this.layer, '#FFFFFF22');
         this.menu.addElement('fpsSlider', fpsSlider)
 
-    // inline text input for renaming/adding animations
-    this._textInput = null;
-    this._animEditTarget = null; // animation name being edited
-    // import/export UI elements (created in constructor)
-    this._importInput = null;
-    this._importBtn = null;
-    this._exportBtn = null;
-    this._createImportExportUI();
+        // inline text input for renaming/adding animations
+        this._textInput = null;
+        this._animEditTarget = null; // animation name being edited
+        // import/export UI elements (created in constructor)
+        this._importInput = null;
+        this._importBtn = null;
+        this._exportBtn = null;
+        this._createImportExportUI();
     }
 
     // Rebuild palette entries from scene.tileTypes (array of {sheetId,row,col})
@@ -72,6 +74,50 @@ export default class FrameSelect {
         let i = 1;
         while(names.has(base + i)) i++;
         return base + i;
+    }
+
+    // --- frame group helpers (groups are stored per-animation on the sprite)
+    _getFrameGroups(anim){
+        if (!this.sprite) return [];
+        if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
+        const arr = this.sprite._frameGroups.get(anim);
+        return Array.isArray(arr) ? arr : [];
+    }
+
+    _addFrameGroup(anim, indices){
+        if (!this.sprite) return null;
+        if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
+        let groups = this.sprite._frameGroups.get(anim) || [];
+        // avoid overlapping membership: don't allow grouping indices already in any group
+        for (const g of groups){
+            for (const idx of g.indices) if (indices.includes(idx)) return null;
+        }
+        const id = 'g' + (Date.now().toString(36) + Math.random().toString(36).slice(2,6));
+        const sorted = Array.from(new Set(indices)).map(Number).sort((a,b)=>a-b);
+        const group = { id: id, indices: sorted, collapsed: false, layered: false };
+        groups.push(group);
+        this.sprite._frameGroups.set(anim, groups);
+        return group;
+    }
+
+    _removeFrameGroup(anim, id){
+        if (!this.sprite || !this.sprite._frameGroups) return false;
+        const groups = this.sprite._frameGroups.get(anim) || [];
+        const idx = groups.findIndex(g => g.id === id);
+        if (idx === -1) return false;
+        groups.splice(idx,1);
+        this.sprite._frameGroups.set(anim, groups);
+        return true;
+    }
+
+    _toggleGroupCollapsed(anim, id){
+        const groups = this._getFrameGroups(anim);
+        const g = groups.find(x=>x.id===id);
+        if (!g) return false;
+        g.collapsed = !g.collapsed;
+        if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
+        this.sprite._frameGroups.set(anim, groups);
+        return true;
     }
 
     addAnimation(){
@@ -239,21 +285,132 @@ export default class FrameSelect {
             // toBlob
             // ensure packed sheet is available (may have been deferred for performance)
             try { if (this.sprite && typeof this.sprite.ensurePackedSheet === 'function') this.sprite.ensurePackedSheet(); } catch(e) {}
-            const blob = await new Promise((res)=> sheet.toBlob((b)=>res(b), 'image/png'));
-            // Use File System Access API when available
+
+            // If the current animation contains layered groups, build an export canvas
+            // that collapses layered groups into single frames so the exported PNG
+            // contains merged frames. Otherwise use the existing packed sheet canvas.
+            let exportCanvas = null;
+            try {
+                const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
+                const groups = this._getFrameGroups(anim);
+                const hasLayered = Array.isArray(groups) && groups.some(g => !!g.layered);
+                if (anim && framesArr.length > 0 && hasLayered) {
+                    // Build logical sequence collapsing layered groups
+                    const seq = [];
+                    for (let i = 0; i < framesArr.length; i++){
+                        const grp = groups.find(g => Math.min.apply(null, g.indices) === i);
+                        if (grp && grp.layered) {
+                            seq.push({ type: 'group', group: grp });
+                            i = Math.max.apply(null, grp.indices);
+                            continue;
+                        }
+                        seq.push({ type: 'frame', index: i });
+                    }
+                    // create per-logical-frame canvases (slicePx x slicePx)
+                    const slice = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                    const framesCanv = [];
+                    for (const e of seq){
+                        const fc = document.createElement('canvas');
+                        fc.width = slice; fc.height = slice;
+                        const fctx = fc.getContext('2d');
+                        if (e.type === 'frame'){
+                            try {
+                                const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, e.index) : null;
+                                if (src && src.getContext) fctx.drawImage(src, 0, 0);
+                            } catch (err) { /* ignore */ }
+                        } else if (e.type === 'group'){
+                            // composite each member frame in order
+                            const idxs = Array.isArray(e.group.indices) ? e.group.indices.slice().sort((a,b)=>a-b) : [];
+                            for (const fi of idxs){
+                                try {
+                                    const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, fi) : null;
+                                    if (src && src.getContext) fctx.drawImage(src, 0, 0);
+                                } catch (err) { /* ignore */ }
+                            }
+                        }
+                        framesCanv.push(fc);
+                    }
+                    // tile into a grid (max 8 columns)
+                    const n = framesCanv.length;
+                    const cols = Math.min(8, Math.max(1, n));
+                    const rows = Math.ceil(n / cols);
+                    exportCanvas = document.createElement('canvas');
+                    exportCanvas.width = cols * slice;
+                    exportCanvas.height = rows * slice;
+                    const ectx = exportCanvas.getContext('2d');
+                    for (let i = 0; i < n; i++){
+                        const r = Math.floor(i / cols);
+                        const c = i % cols;
+                        ectx.drawImage(framesCanv[i], c * slice, r * slice);
+                    }
+                }
+            } catch (err) { console.warn('build merged export canvas failed', err); }
+
+            const blob = await new Promise((res)=> {
+                if (exportCanvas && exportCanvas.toBlob) return exportCanvas.toBlob((b)=>res(b), 'image/png');
+                if (sheet && sheet.toBlob) return sheet.toBlob((b)=>res(b), 'image/png');
+                // fallback: try to use sprite.sheet canvas if available
+                try { if (this.sprite && this.sprite.sheet && this.sprite.sheet.toBlob) return this.sprite.sheet.toBlob((b)=>res(b), 'image/png'); } catch(e){}
+                // ultimate fallback: create an empty 1x1 png
+                const c = document.createElement('canvas'); c.width = 1; c.height = 1; c.toBlob((b)=>res(b), 'image/png');
+            });
+            // Build metadata JSON containing groups and basic animation info
+            const buildMetadata = () => {
+                const meta = {};
+                try {
+                    meta.name = (this.scene && this.scene.currentSprite && this.scene.currentSprite.name) ? this.scene.currentSprite.name : (this.sprite && this.sprite.name) || null;
+                    meta.slicePx = this.sprite && this.sprite.slicePx ? this.sprite.slicePx : null;
+                    // animations: name -> frameCount
+                    meta.animations = {};
+                    if (this.sprite && this.sprite._frames) {
+                        for (const [k, v] of this.sprite._frames.entries()){
+                            try { meta.animations[k] = Array.isArray(v) ? v.length : (typeof v.length === 'number' ? v.length : null); } catch(e){ meta.animations[k] = null; }
+                        }
+                    }
+                    // frameGroups: convert Map -> plain object
+                    meta.frameGroups = {};
+                    if (this.sprite && this.sprite._frameGroups) {
+                        try {
+                            for (const [anim, groups] of this.sprite._frameGroups.entries()){
+                                meta.frameGroups[anim] = Array.isArray(groups) ? groups.map(g => ({ id: g.id, indices: Array.isArray(g.indices)? g.indices.slice() : [], collapsed: !!g.collapsed, layered: !!g.layered })) : [];
+                            }
+                        } catch(e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
+                return meta;
+            };
+
+            const metaObj = buildMetadata();
+            const metaStr = JSON.stringify(metaObj, null, 2);
+            const metaBlob = new Blob([metaStr], { type: 'application/json' });
+            const metaFilename = (filename && filename.toLowerCase().endsWith('.png')) ? filename.replace(/\.png$/i, '.json') : (filename + '.json');
+
+            // Use File System Access API when available to save both PNG and metadata
             if (window.showSaveFilePicker){
                 try{
+                    // Save PNG
                     const handle = await window.showSaveFilePicker({ suggestedName: filename, types: [{ description: 'PNG Image', accept: { 'image/png': ['.png'] } }] });
                     const writable = await handle.createWritable();
                     await writable.write(blob);
                     await writable.close();
+                    // Attempt to save metadata (user can cancel)
+                    try {
+                        const mhandle = await window.showSaveFilePicker({ suggestedName: metaFilename, types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }] });
+                        const mw = await mhandle.createWritable();
+                        await mw.write(metaBlob);
+                        await mw.close();
+                    } catch (e) {
+                        // ignore metadata save errors/cancel
+                    }
                     return;
                 } catch (e) {
                     // fall through to anchor fallback
                     console.warn('showSaveFilePicker failed or canceled', e);
                 }
             }
-            // fallback: anchor download
+
+            // fallback: anchor download for PNG then metadata JSON
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
@@ -261,6 +418,17 @@ export default class FrameSelect {
             document.body.appendChild(a);
             a.click();
             setTimeout(()=>{ URL.revokeObjectURL(url); try{ a.remove(); }catch(e){} }, 1500);
+
+            // trigger metadata download as a second file
+            try{
+                const murl = URL.createObjectURL(metaBlob);
+                const ma = document.createElement('a');
+                ma.href = murl;
+                ma.download = metaFilename;
+                document.body.appendChild(ma);
+                // small delay to ensure browser registers separate clicks in sequence
+                setTimeout(()=>{ ma.click(); setTimeout(()=>{ URL.revokeObjectURL(murl); try{ ma.remove(); }catch(e){} }, 1500); }, 250);
+            } catch (e) { /* ignore metadata fallback errors */ }
         } catch (e) { console.warn('export failed', e); }
     }
 
@@ -303,7 +471,8 @@ export default class FrameSelect {
 
     update(delta) {
         this.menu.update(delta);
-        if(this._animFps === 0) this._animIndex = this.selectedFrame
+        // active group (id of last-clicked group slot)
+        if (typeof this._activeGroup === 'undefined') this._activeGroup = null;
         if(this.mouse.pos.x <= 200){
             let scrollDelta = this.mouse.wheel()
             this.scrollPos -= scrollDelta
@@ -314,18 +483,50 @@ export default class FrameSelect {
             const dt = (typeof delta === 'number' && delta > 0) ? delta : (1 / 60);
             const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
             const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
+            // Build a logical frames sequence that collapses layered groups into single frames
+            const groups = this._getFrameGroups(anim);
+            for (const g of groups){ g.firstIndex = Math.min.apply(null, g.indices); }
+            const framesSeq = [];
+            for (let i = 0; i < framesArr.length; i++){
+                const grp = groups.find(g => g.firstIndex === i);
+                if (grp){
+                    if (grp.layered) {
+                        framesSeq.push({ type: 'group', group: grp });
+                        // skip all indices in group
+                        i = Math.max.apply(null, grp.indices);
+                        continue;
+                    }
+                    // if not layered, we still want individual frames to appear
+                }
+                framesSeq.push({ type: 'frame', index: i });
+            }
             // reset when animation changes
             if (anim !== this._animName) {
                 this._animName = anim;
                 this._animIndex = 0;
                 this._animTimer = 0;
             }
-            if (framesArr.length > 0 && this._animFps > 0) {
+            // if fps is 0 (paused), map the scene.selectedFrame into the logical sequence index
+            try {
+                if (this._animFps === 0) {
+                    const selFrame = (this.scene && typeof this.scene.selectedFrame === 'number') ? this.scene.selectedFrame : null;
+                    if (selFrame !== null && selFrame !== undefined) {
+                        let found = -1;
+                        for (let si = 0; si < framesSeq.length; si++){
+                            const e = framesSeq[si];
+                            if (e.type === 'frame' && e.index === selFrame) { found = si; break; }
+                            if (e.type === 'group' && Array.isArray(e.group.indices) && e.group.indices.indexOf(selFrame) !== -1) { found = si; break; }
+                        }
+                        if (found !== -1) this._animIndex = found;
+                    }
+                }
+            } catch (e) {}
+            if (framesSeq.length > 0 && this._animFps > 0) {
                 this._animTimer += dt;
                 const frameTime = 1 / (this._animFps || 8);
                 while (this._animTimer >= frameTime) {
                     this._animTimer -= frameTime;
-                    this._animIndex = (this._animIndex + 1) % framesArr.length;
+                    this._animIndex = (this._animIndex + 1) % framesSeq.length;
                 }
             } else {
                 this._animIndex = 0;
@@ -335,53 +536,76 @@ export default class FrameSelect {
             // ignore
         }
 
-        // handle click selection: if left button was released over a frame slot
+        // handle click selection: if left button was released over a frame slot (frames + groups)
 
         if (this.mouse && this.mouse.released && this.mouse.released('left')) {
             const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
             const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
-            const slotCount = framesArr.length + 1;
-            for (let i = 0; i < slotCount; i++) {
-                const pos = new Vector(5, 100 + (180 + 20) * i + this.scrollPos);
+            // compute slots combining groups and frames
+            const slots = [];
+            const groups = this._getFrameGroups(anim);
+            for (const g of groups){ g.firstIndex = Math.min.apply(null, g.indices); }
+            for (let i = 0; i < framesArr.length; i++){
+                const groupAtFirst = groups.find(g => g.firstIndex === i);
+                if (groupAtFirst){
+                    slots.push({ type: 'group', group: groupAtFirst, posIndex: i });
+                    if (groupAtFirst.collapsed){
+                        // skip to last index in group
+                        i = Math.max.apply(null, groupAtFirst.indices);
+                        continue;
+                    }
+                    // when expanded, still render the frame after the group slot
+                }
+                slots.push({ type: 'frame', index: i, posIndex: i });
+            }
+            // add slot for new frame at end
+            slots.push({ type: 'add', posIndex: framesArr.length });
+
+            for (let s = 0; s < slots.length; s++){
+                const item = slots[s];
+                const pos = new Vector(5, 100 + (180 + 20) * s + this.scrollPos);
                 const size = new Vector(190, 190);
-                if (Geometry.pointInRect(this.mouse.pos, pos, size)) {
-                    // clicked an existing frame
+                if (Geometry.pointInRect(this.mouse.pos, pos, size)){
                     if (!anim) break;
-                    if (i < framesArr.length) {
-                        // If Shift held, toggle multi-selection of this frame
+                    if (item.type === 'frame'){
                         try {
+                            const i = item.index;
                             if (this.keys && this.keys.held && this.keys.held('Shift')) {
                                 if (this._multiSelected.has(i)) this._multiSelected.delete(i);
                                 else this._multiSelected.add(i);
-                                // also set primary selection to last clicked
-                                if (this.scene) this.scene.selectedFrame = i;
                             } else {
-                                // normal single select: clear any multi-selection
                                 if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
                                 if (this.scene) this.scene.selectedFrame = i;
                             }
-                        } catch (e) { if (this.scene) this.scene.selectedFrame = i; }
-                    } else {
-                        // add new frame and select it
+                        } catch (e) { if (this.scene) this.scene.selectedFrame = item.index; }
+                    } else if (item.type === 'group'){
+                        // Entire group slot toggles collapse. Hold Shift while clicking to select all frames instead.
+                        try {
+                            if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
+                            for (const idx of item.group.indices) this._multiSelected.add(idx);
+                            // set active group
+                            this._activeGroup = item.group.id;
+                            this._toggleGroupCollapsed(anim, item.group.id);
+
+                        } catch (e) { console.warn('Group click failed', e); }
+                    } else if (item.type === 'add'){
                         if (typeof this.sprite.insertFrame === 'function') {
                             this.sprite.insertFrame(anim);
-                            if (this.scene) this.scene.selectedFrame = framesArr.length; // previous length -> new index
-                            // clear multi selection when adding
+                            if (this.scene) this.scene.selectedFrame = framesArr.length;
                             if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
                         }
                     }
-                    // prevent input "leak" to underlying UI by masking this layer (use addMask to avoid region conflicts)
-                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
-                    break; // stop after first hit
+                    this.mouse.addMask(1); 
+                    break;
                 }
             }
         }
 
         // Handle merge key: press 'm' to merge multiple selected frames into one new frame (keep originals)
         try {
-            if (this.keys && typeof this.keys.released === 'function' && this.keys.released('m')) {
-                if (this._multiSelected && this._multiSelected.size >= 2) {
-                    const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+            if (this.keys.released('m')) {
+                if (this._multiSelected.size >= 2) {
+                    const anim = this.scene.selectedAnimation;
                     if (!anim || !this.sprite || !this.sprite._frames || !this.sprite._frames.has(anim)) return;
                     const arr = this.sprite._frames.get(anim);
                     // compute indices in ascending order
@@ -392,46 +616,89 @@ export default class FrameSelect {
                         const out = document.createElement('canvas'); out.width = px; out.height = px;
                         const ctx = out.getContext('2d'); ctx.clearRect(0,0,px,px);
                         for (const idx of idxs) {
-                            try {
-                                const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
-                                if (src) ctx.drawImage(src, 0, 0);
-                            } catch (e) { /* ignore per-frame draw error */ }
+                            const src = this.sprite.getFrame(anim, idx);
+                            if (src) ctx.drawImage(src, 0, 0);
                         }
                         // append merged frame and rebuild
                         arr.push(out);
-                        if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
-                        if (this.scene) this.scene.selectedFrame = arr.length - 1;
+                        this.sprite._rebuildSheetCanvas();
+                        this.scene.selectedFrame = arr.length - 1;
                         // clear multi selection after merge
                         this._multiSelected.clear();
-                        try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                        this.mouse.addMask(1); 
                     } catch (e) { console.warn('FrameSelect merge failed', e); }
                 }
             }
         } catch (e) { console.warn('FrameSelect merge key handling failed', e); }
+        // handle grouping: press 'g' to group selected frames or ungroup when matching a group
+        try {
+            if (this.keys && typeof this.keys.released === 'function' && this.keys.released('g')) {
+                const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                if (!anim || !this.sprite || !this.sprite._frames || !this.sprite._frames.has(anim)) return;
+                const groups = this._getFrameGroups(anim);
+                const sel = Array.from(this._multiSelected).filter(i=>typeof i === 'number').map(Number).sort((a,b)=>a-b);
+                if (sel.length === 0) return;
+                // check if selection exactly matches an existing group -> ungroup
+                const matching = groups.find(g => {
+                    if (!g || !Array.isArray(g.indices)) return false;
+                    if (g.indices.length !== sel.length) return false;
+                    for (let i = 0; i < sel.length; i++) if (g.indices[i] !== sel[i]) return false;
+                    return true;
+                });
+                if (matching) {
+                    this._removeFrameGroup(anim, matching.id);
+                    // clear selection
+                    if (this._multiSelected) this._multiSelected.clear();
+                    return;
+                }
+                // otherwise create a group if >=2
+                if (sel.length >= 2) {
+                    const created = this._addFrameGroup(anim, sel);
+                    if (!created) {
+                        console.warn('Could not create group; indices may overlap existing groups');
+                    } else {
+                        if (this._multiSelected) this._multiSelected.clear();
+                        for (const idx of created.indices) this._multiSelected.add(idx);
+                        // mark active group to allow 'l' toggling
+                        this._activeGroup = created.id;
+                    }
+                }
+            }
+        } catch (e) { console.warn('FrameSelect group handling failed', e); }
+        // toggle layered rendering for active group (press 'l')
+        try {
+            if (this.keys && typeof this.keys.released === 'function' && this.keys.released('l')){
+                const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                if (!anim || !this.sprite) return;
+                const groups = this._getFrameGroups(anim);
+                const g = groups.find(x=>x.id === this._activeGroup);
+                if (!g) return;
+                g.layered = !g.layered;
+                // write back
+                if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
+                this.sprite._frameGroups.set(anim, groups);
+            }
+        } catch (e) { console.warn('FrameSelect layered toggle failed', e); }
         // handle backspace: remove selected frame when hovering over the menu
         try {
-            if (this.keys && this.keys.pressed && this.keys.released && this.keys.released('Backspace')) {
+            if (this.keys.released('Backspace')) {
                 // only if mouse is over our menu area
-                if (this.mouse && Geometry.pointInRect(this.mouse.pos, this.menu.pos, this.menu.size)) {
-                    const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
-                    const sel = (this.scene && typeof this.scene.selectedFrame === 'number') ? this.scene.selectedFrame : null;
+                if (Geometry.pointInRect(this.mouse.pos, this.menu.pos, this.menu.size)) {
+                    const anim = this.scene.selectedAnimation;
+                    const sel = this.scene.selectedFrame;
                     const arr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
                     if (anim && sel !== null && arr.length > 0 && sel >= 0 && sel < arr.length) {
-                        if (typeof this.sprite.popFrame === 'function') {
-                            // capture removed frame for undo
-                            const removed = this.sprite.popFrame(anim, sel);
-                            if (removed) {
-                                this._lastDeleted = { anim: anim, index: sel, canvas: removed };
-                            }
-                            // clamp selectedFrame to new range
-                            const newLen = (this.sprite._frames.get(anim) || []).length;
-                            if (this.scene) {
-                                if (newLen === 0) this.scene.selectedFrame = 0;
-                                else this.scene.selectedFrame = Math.max(0, Math.min(sel, newLen - 1));
-                            }
-                            // mask input so other UI doesn't receive the same key/mouse (use addMask for click context)
-                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                        // capture removed frame for undo
+                        const removed = this.sprite.popFrame(anim, sel);
+                        if (removed) {
+                            this._lastDeleted = { anim: anim, index: sel, canvas: removed };
                         }
+                        // clamp selectedFrame to new range
+                        const newLen = (this.sprite._frames.get(anim) || []).length;
+                        if (newLen === 0) this.scene.selectedFrame = 0;
+                        else this.scene.selectedFrame = Math.max(0, Math.min(sel, newLen - 1));
+                        // mask input so other UI doesn't receive the same key/mouse (use addMask for click context)
+                        this.mouse.addMask(1);
                     }
                 }
             }
@@ -472,53 +739,280 @@ export default class FrameSelect {
                 const sel = (this.scene && typeof this.scene.selectedFrame === 'number') ? this.scene.selectedFrame : null;
                 const arr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
 
-                // Duplicate (press 'v') -> insert a copy after the selected frame
-                if (this.keys.released('/')) {
-                    if (anim && sel !== null && arr && sel >= 0 && sel < arr.length) {
-                        try {
-                            const src = this.sprite.getFrame(anim, sel);
-                            const clone = document.createElement('canvas');
-                            clone.width = this.sprite.slicePx || (src ? src.width : 16);
-                            clone.height = this.sprite.slicePx || (src ? src.height : 16);
-                            const ctx = clone.getContext('2d');
-                            if (src) ctx.drawImage(src, 0, 0);
-                            // insert after current
-                            arr.splice(sel + 1, 0, clone);
-                            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
-                            if (this.scene) this.scene.selectedFrame = sel + 1;
-                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
-                        } catch (e) { console.warn('FrameSelect duplicate failed', e); }
-                    }
+                // Duplicate (press '/') -> duplicate all multi-selected frames, or duplicate single selected frame
+                if (this.keys.released('/') || this.keys.released('|')) {
+                    try {
+                        const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                        if (!anim || !this.sprite || !this.sprite._frames || !this.sprite._frames.has(anim)) { /* nothing */ }
+                        else {
+                            const arr = this.sprite._frames.get(anim);
+                            // gather multi-selection indices (valid)
+                            const selIdxs = Array.from(this._multiSelected || []).filter(i=>typeof i === 'number' && i>=0 && i < arr.length).map(Number).sort((a,b)=>a-b);
+                            if (selIdxs.length >= 1) {
+                                // duplicate all selected frames in order, inserting after the last selected index
+                                const clones = [];
+                                for (const idx of selIdxs) {
+                                    try {
+                                        const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
+                                        const clone = document.createElement('canvas');
+                                        clone.width = this.sprite.slicePx || (src ? src.width : 16);
+                                        clone.height = this.sprite.slicePx || (src ? src.height : 16);
+                                        const ctx = clone.getContext('2d');
+                                        if (src) ctx.drawImage(src, 0, 0);
+                                        clones.push(clone);
+                                    } catch (e) { console.warn('FrameSelect duplicate per-frame failed', e); }
+                                }
+                                const insertPos = Math.max.apply(null, selIdxs) + 1;
+                                // insert clones preserving order
+                                arr.splice(insertPos, 0, ...clones);
+                                // if selection exactly matches a group, duplicate the group metadata as well
+                                try {
+                                    const groups = this._getFrameGroups(anim);
+                                    const matching = groups.find(g => Array.isArray(g.indices) && g.indices.length === selIdxs.length && g.indices.every((v,i)=>v === selIdxs[i]));
+                                    if (matching) {
+                                        // create a new group with indices pointing to the newly inserted clones
+                                        const newIndices = [];
+                                        for (let i = 0; i < clones.length; i++) newIndices.push(insertPos + i);
+                                        const newGroup = { id: 'g' + (Date.now().toString(36) + Math.random().toString(36).slice(2,6)), indices: newIndices, collapsed: matching.collapsed, layered: matching.layered };
+                                        groups.push(newGroup);
+                                        if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
+                                        this.sprite._frameGroups.set(anim, groups);
+                                        // update active group to the new group
+                                        this._activeGroup = newGroup.id;
+                                    }
+                                } catch (e) { console.warn('FrameSelect duplicate group metadata failed', e); }
+                                if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                // select newly inserted frames
+                                if (this._multiSelected) this._multiSelected.clear();
+                                for (let i = 0; i < clones.length; i++) this._multiSelected.add(insertPos + i);
+                                if (this.scene) this.scene.selectedFrame = insertPos;
+                                try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                            } else {
+                                // fallback: duplicate single selected frame (existing behavior)
+                                const sel = (this.scene && typeof this.scene.selectedFrame === 'number') ? this.scene.selectedFrame : null;
+                                if (sel !== null && sel !== undefined && sel >= 0 && sel < arr.length) {
+                                    try {
+                                        const src = this.sprite.getFrame(anim, sel);
+                                        const clone = document.createElement('canvas');
+                                        clone.width = this.sprite.slicePx || (src ? src.width : 16);
+                                        clone.height = this.sprite.slicePx || (src ? src.height : 16);
+                                        const ctx = clone.getContext('2d');
+                                        if (src) ctx.drawImage(src, 0, 0);
+                                        arr.splice(sel + 1, 0, clone);
+                                        if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                        if (this.scene) this.scene.selectedFrame = sel + 1;
+                                        try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                                    } catch (e) { console.warn('FrameSelect duplicate failed', e); }
+                                }
+                            }
+                        }
+                    } catch (e) { console.warn('FrameSelect duplicate block failed', e); }
                 }
 
                 // Move frame earlier (ArrowUp)
                 if (this.keys.released('ArrowUp')) {
-                    if (anim && sel !== null && arr && sel > 0 && sel < arr.length) {
-                        try {
-                            const prev = arr[sel - 1];
-                            const cur = arr[sel];
-                            arr[sel - 1] = cur;
-                            arr[sel] = prev;
-                            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
-                            if (this.scene) this.scene.selectedFrame = sel - 1;
-                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
-                        } catch (e) { console.warn('FrameSelect move up failed', e); }
-                    }
+                    try {
+                        if (!anim || !arr) { /* nothing */ }
+                        else {
+                            const groups = this._getFrameGroups(anim);
+                            const selIdxs = Array.from(this._multiSelected || []).filter(i=>typeof i === 'number' && i>=0 && i < arr.length).map(Number).sort((a,b)=>a-b);
+                            if (selIdxs.length === 0) {
+                                // single selected frame fallback
+                                if (sel !== null && sel !== undefined && sel > 0 && sel < arr.length) {
+                                    const prev = arr[sel - 1];
+                                    const cur = arr[sel];
+                                    arr[sel - 1] = cur;
+                                    arr[sel] = prev;
+                                    if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                    if (this.scene) this.scene.selectedFrame = sel - 1;
+                                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                                }
+                            } else {
+                                // try match a group exactly
+                                const matching = groups.find(g => Array.isArray(g.indices) && g.indices.length === selIdxs.length && g.indices.every((v,i)=>v === selIdxs[i]));
+                                if (matching) {
+                                    const first = Math.min.apply(null, matching.indices);
+                                    const len = matching.indices.length;
+                                    if (first > 0) {
+                                        // capture element references for every group so we can recompute numeric indices after reorder
+                                        const groupElems = groups.map(g => ({ g: g, elems: g.indices.map(i => arr[i]) }));
+                                        // choose a safe insert point: move above previous group's start if present
+                                        const prevGroups = groups.filter(g => Math.max.apply(null, g.indices) < first).sort((a,b)=>Math.max.apply(null,b.indices) - Math.max.apply(null,a.indices));
+                                        const block = arr.splice(first, len);
+                                        if (prevGroups.length > 0) {
+                                            const prev = prevGroups[0];
+                                            // anchor on prev group's first element via captured refs
+                                            const prevGe = groupElems.find(x => x.g === prev);
+                                            const anchorElem = (prevGe && prevGe.elems && prevGe.elems.length) ? prevGe.elems[0] : null;
+                                            const idx = (anchorElem !== null) ? arr.indexOf(anchorElem) : Math.max(0, first - 1);
+                                            const insertPos = (idx === -1) ? 0 : Math.max(0, idx);
+                                            arr.splice(insertPos, 0, ...block);
+                                        } else {
+                                            // no previous group, move up by one
+                                            arr.splice(first - 1, 0, ...block);
+                                        }
+                                        // recompute indices for all groups from element references
+                                        for (const ge of groupElems) {
+                                            try { ge.g.indices = ge.elems.map(e => arr.indexOf(e)).filter(i => i !== -1).sort((a,b)=>a-b); } catch(e){}
+                                        }
+                                        if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
+                                        this.sprite._frameGroups.set(anim, groups);
+                                        // update selection to moved group's new indices
+                                        const newIndices = matching.indices.slice(0);
+                                        if (this._multiSelected) this._multiSelected.clear();
+                                        for (const ni of newIndices) this._multiSelected.add(ni);
+                                        if (this.scene) this.scene.selectedFrame = newIndices[0];
+                                        if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                        try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                                    }
+                                } else {
+                                    // handle contiguous blocks within selection (ascending order)
+                                    const blocks = [];
+                                    let start = selIdxs[0];
+                                    let prev = selIdxs[0];
+                                    for (let i = 1; i < selIdxs.length; i++){
+                                        if (selIdxs[i] === prev + 1) {
+                                            prev = selIdxs[i];
+                                            continue;
+                                        }
+                                        blocks.push([start, prev]);
+                                        start = selIdxs[i];
+                                        prev = selIdxs[i];
+                                    }
+                                    blocks.push([start, prev]);
+                                    // store original canvases to re-select later
+                                    const originals = selIdxs.map(i=>arr[i]);
+                                    // capture group elements so we can recompute indices after multiple moves
+                                    const groupElems = groups.map(g => ({ g: g, elems: g.indices.map(i => arr[i]) }));
+                                    for (const b of blocks) {
+                                        const bStart = b[0];
+                                        const bEnd = b[1];
+                                        const bLen = bEnd - bStart + 1;
+                                        if (bStart > 0 && selIdxs.indexOf(bStart - 1) === -1) {
+                                            const block = arr.splice(bStart, bLen);
+                                            arr.splice(bStart - 1, 0, ...block);
+                                        }
+                                    }
+                                    if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                    // recompute all group indices from element refs
+                                    for (const ge of groupElems) {
+                                        try { ge.g.indices = ge.elems.map(e => arr.indexOf(e)).filter(i => i !== -1).sort((a,b)=>a-b); } catch(e){}
+                                    }
+                                    if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
+                                    this.sprite._frameGroups.set(anim, groups);
+                                    // recompute selection indices
+                                    if (this._multiSelected) this._multiSelected.clear();
+                                    for (const orig of originals) {
+                                        const ni = arr.indexOf(orig);
+                                        if (ni !== -1) this._multiSelected.add(ni);
+                                    }
+                                    if (this.scene) this.scene.selectedFrame = Math.min(...Array.from(this._multiSelected));
+                                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                                }
+                            }
+                        }
+                    } catch (e) { console.warn('FrameSelect move up failed', e); }
                 }
 
                 // Move frame later (ArrowDown)
                 if (this.keys.released('ArrowDown')) {
-                    if (anim && sel !== null && arr && sel >= 0 && sel < arr.length - 1) {
-                        try {
-                            const next = arr[sel + 1];
-                            const cur = arr[sel];
-                            arr[sel + 1] = cur;
-                            arr[sel] = next;
-                            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
-                            if (this.scene) this.scene.selectedFrame = sel + 1;
-                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
-                        } catch (e) { console.warn('FrameSelect move down failed', e); }
-                    }
+                    try {
+                        if (!anim || !arr) { /* nothing */ }
+                        else {
+                            const groups = this._getFrameGroups(anim);
+                            const selIdxs = Array.from(this._multiSelected || []).filter(i=>typeof i === 'number' && i>=0 && i < arr.length).map(Number).sort((a,b)=>a-b);
+                            if (selIdxs.length === 0) {
+                                // single selected frame fallback
+                                if (sel !== null && sel !== undefined && sel >= 0 && sel < arr.length - 1) {
+                                    const next = arr[sel + 1];
+                                    const cur = arr[sel];
+                                    arr[sel + 1] = cur;
+                                    arr[sel] = next;
+                                    if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                    if (this.scene) this.scene.selectedFrame = sel + 1;
+                                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                                }
+                            } else {
+                                // try match group exactly
+                                const matching = groups.find(g => Array.isArray(g.indices) && g.indices.length === selIdxs.length && g.indices.every((v,i)=>v === selIdxs[i]));
+                                if (matching) {
+                                    const first = Math.min.apply(null, matching.indices);
+                                    const len = matching.indices.length;
+                                    const last = first + len - 1;
+                                    if (last < arr.length - 1) {
+                                        // capture element references for groups so we can recompute indices after reorder
+                                        const groupElems = groups.map(g => ({ g: g, elems: g.indices.map(i => arr[i]) }));
+                                        // prefer to insert after the next group's end if present
+                                        const nextGroups = groups.filter(g => Math.min.apply(null, g.indices) > last).sort((a,b)=>Math.min.apply(null,a.indices) - Math.min.apply(null,b.indices));
+                                        const block = arr.splice(first, len);
+                                        if (nextGroups.length > 0) {
+                                            const next = nextGroups[0];
+                                            // anchor on next group's last element via captured refs
+                                            const nextGe = groupElems.find(x => x.g === next);
+                                            const anchorElem = (nextGe && nextGe.elems && nextGe.elems.length) ? nextGe.elems[nextGe.elems.length - 1] : null;
+                                            const idx = (anchorElem !== null) ? arr.indexOf(anchorElem) : Math.min(arr.length, first + 1);
+                                            const insertPos = (idx === -1) ? arr.length : Math.min(arr.length, idx + 1);
+                                            arr.splice(insertPos, 0, ...block);
+                                        } else {
+                                            // default: insert after original end
+                                            arr.splice(first + 1, 0, ...block);
+                                        }
+                                        // recompute all group indices
+                                        for (const ge of groupElems) {
+                                            try { ge.g.indices = ge.elems.map(e => arr.indexOf(e)).filter(i => i !== -1).sort((a,b)=>a-b); } catch(e){}
+                                        }
+                                        if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
+                                        this.sprite._frameGroups.set(anim, groups);
+                                        if (this._multiSelected) this._multiSelected.clear();
+                                        // select moved group's new indices
+                                        const newIndices = matching.indices.slice(0);
+                                        for (const ni of newIndices) this._multiSelected.add(ni);
+                                        if (this.scene) this.scene.selectedFrame = newIndices[0];
+                                        if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                        try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                                    }
+                                } else {
+                                    // move contiguous blocks down; process blocks in reverse order
+                                    const blocks = [];
+                                    let start = selIdxs[0];
+                                    let prev = selIdxs[0];
+                                    for (let i = 1; i < selIdxs.length; i++){
+                                        if (selIdxs[i] === prev + 1) { prev = selIdxs[i]; continue; }
+                                        blocks.push([start, prev]);
+                                        start = selIdxs[i]; prev = selIdxs[i];
+                                    }
+                                    blocks.push([start, prev]);
+                                    const originals = selIdxs.map(i=>arr[i]);
+                                    // capture group element refs prior to reordering
+                                    const groupElems = groups.map(g => ({ g: g, elems: g.indices.map(i => arr[i]) }));
+                                    for (let bi = blocks.length - 1; bi >= 0; bi--) {
+                                        const b = blocks[bi];
+                                        const bStart = b[0];
+                                        const bEnd = b[1];
+                                        const bLen = bEnd - bStart + 1;
+                                        if (bEnd < arr.length - 1 && selIdxs.indexOf(bEnd + 1) === -1) {
+                                            const block = arr.splice(bStart, bLen);
+                                            arr.splice(bStart + 1, 0, ...block);
+                                        }
+                                    }
+                                    if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                    // recompute all group indices from element refs
+                                    for (const ge of groupElems) {
+                                        try { ge.g.indices = ge.elems.map(e => arr.indexOf(e)).filter(i => i !== -1).sort((a,b)=>a-b); } catch(e){}
+                                    }
+                                    if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
+                                    this.sprite._frameGroups.set(anim, groups);
+                                    if (this._multiSelected) this._multiSelected.clear();
+                                    for (const orig of selOriginals) {
+                                        const ni = arr.indexOf(orig);
+                                        if (ni !== -1) this._multiSelected.add(ni);
+                                    }
+                                    if (this.scene) this.scene.selectedFrame = Math.min(...Array.from(this._multiSelected));
+                                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                                }
+                            }
+                        }
+                    } catch (e) { console.warn('FrameSelect move down failed', e); }
                 }
             }
         } catch (e) {
@@ -538,7 +1032,7 @@ export default class FrameSelect {
             const contentPos = outerPos.clone().add(new Vector(this._previewBuffer, this._previewBuffer));
             const contentSize = new Vector(this._previewSize, this._previewSize);
             const listX = contentPos.x;
-        const listY = contentPos.y + contentSize.y + 8 + 50; // same 50px drop as draw
+            const listY = contentPos.y + contentSize.y + 8 + 50; // same 50px drop as draw
             const rowH = 28;
             const names = this._getAnimationNames();
             if (this.mouse && this.mouse.released && this.mouse.released('left')){
@@ -596,34 +1090,69 @@ export default class FrameSelect {
             const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
             if (framesArr.length > 0 && anim) {
                 // If multiple frames are selected, show a merged preview (composited)
-                if (this._multiSelected && this._multiSelected.size >= 2) {
-                    const idxs = Array.from(this._multiSelected).filter(i => typeof i === 'number' && i >= 0 && i < framesArr.length).sort((a,b)=>a-b);
-                    if (idxs.length >= 2) {
-                        try {
-                            const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
-                            const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
-                            const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
-                            for (const idx of idxs) {
-                                try {
-                                    const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
-                                    if (src) tctx.drawImage(src, 0, 0);
-                                } catch (e) { /* ignore per-frame draw error */ }
-                            }
-                            this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
-                            // small label indicating merged preview
-                            this.UIDraw.text('Merged Preview', new Vector(contentPos.x + 8, contentPos.y + 18), '#FFFFFF', 0, 12, { align: 'left', font: 'monospace' });
-                        } catch (e) {
-                            // fallback to normal sheet draw on error
-                            const fi = Math.max(0, Math.min(this._animIndex, framesArr.length - 1));
-                            this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                const idxs = Array.from(this._multiSelected).filter(i => typeof i === 'number' && i >= 0 && i < framesArr.length).sort((a,b)=>a-b);
+                if (idxs.length >= 2) {
+                    try {
+                        const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                        const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
+                        const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
+                        for (const idx of idxs) {
+                            try {
+                                const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
+                                if (src) tctx.drawImage(src, 0, 0);
+                            } catch (e) { /* ignore per-frame draw error */ }
                         }
-                    } else {
-                        const fi = Math.max(0, Math.min(this._animIndex, framesArr.length - 1));
-                        this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                        this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
+                        // small label indicating merged preview
+                        this.UIDraw.text('Merged Preview', new Vector(contentPos.x + 8, contentPos.y + 18), '#FFFFFF', 0, 12, { align: 'left', font: 'monospace' });
+                    } catch (e) {
+                        // fallback to sequence-based draw on error
+                        // fallthrough to sequence draw below
                     }
                 } else {
-                    const fi = Math.max(0, Math.min(this._animIndex, framesArr.length - 1));
-                    this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                    // build frames sequence like update() to honor layered groups
+                    const groups = this._getFrameGroups(anim);
+                    for (const g of groups){ g.firstIndex = Math.min.apply(null, g.indices); }
+                    const framesSeq = [];
+                    for (let i = 0; i < framesArr.length; i++){
+                        const grp = groups.find(g => g.firstIndex === i);
+                        if (grp){
+                            if (grp.layered) {
+                                framesSeq.push({ type: 'group', group: grp });
+                                i = Math.max.apply(null, grp.indices);
+                                continue;
+                            }
+                        }
+                        framesSeq.push({ type: 'frame', index: i });
+                    }
+                    const seqLen = framesSeq.length;
+                    if (seqLen === 0) {
+                        this.UIDraw.rect(contentPos, contentSize, '#00000000', false, true, 2, '#444444AA');
+                    } else {
+                        const seqIndex = Math.max(0, Math.min(this._animIndex, seqLen - 1));
+                        const entry = framesSeq[seqIndex];
+                        if (entry.type === 'frame') {
+                            this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, entry.index);
+                        } else if (entry.type === 'group') {
+                            // draw composited layered preview
+                            try {
+                                const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                                const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
+                                const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
+                                for (const idx of entry.group.indices) {
+                                    try {
+                                        const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
+                                        if (src) tctx.drawImage(src, 0, 0);
+                                    } catch (e) {}
+                                }
+                                this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
+                            } catch (e) {
+                                // fallback to first frame
+                                const fi = Math.max(0, Math.min(entry.group.indices[0] || 0, framesArr.length - 1));
+                                this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                            }
+                        }
+                    }
                 }
             } else {
                 // empty area (checker or placeholder)
@@ -680,50 +1209,96 @@ export default class FrameSelect {
         // determine which animation to show (use scene selection as source of truth)
         const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
         const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
-        const slotCount = framesArr.length + 1; // extra slot for "add new frame"
-        for (let i = 0; i < slotCount; i++){
-                const slotPos = new Vector(5,100 + (180+20) * i + this.scrollPos);
-                const slotSize = new Vector(190,190);
-                this.UIDraw.rect(slotPos, slotSize, '#333030ff')
-            // only draw an existing frame; the final slot is the "add" placeholder
-            if (i < framesArr.length && anim) {
-                this.UIDraw.sheet(this.sprite, new Vector(10,100 + (180+20) * i + this.scrollPos), new Vector(180,180), anim, i)
+        // build slots including groups
+        try {
+            const groups = this._getFrameGroups(anim);
+            for (const g of groups){ g.firstIndex = Math.min.apply(null, g.indices); }
+            const slots = [];
+            for (let i = 0; i < framesArr.length; i++){
+                const groupAtFirst = groups.find(g => g.firstIndex === i);
+                if (groupAtFirst){
+                    slots.push({ type: 'group', group: groupAtFirst });
+                    if (groupAtFirst.collapsed){
+                        i = Math.max.apply(null, groupAtFirst.indices);
+                        continue;
+                    }
+                }
+                slots.push({ type: 'frame', index: i });
             }
-            // draw a plus icon in the add-new slot (simple two-rect plus)
-            if (i === framesArr.length) {
+            // add slot for new frame
+            slots.push({ type: 'add' });
+
+            for (let s = 0; s < slots.length; s++){
+                const item = slots[s];
+                const slotPos = new Vector(5,100 + (180+20) * s + this.scrollPos);
+                const slotSize = new Vector(190,190);
+                this.UIDraw.rect(slotPos, slotSize, '#333030ff');
+
+                if (item.type === 'frame'){
+                    const i = item.index;
+                    if (anim) this.UIDraw.sheet(this.sprite, new Vector(slotPos.x + 5, slotPos.y + 5), new Vector(180,180), anim, i);
+                } else if (item.type === 'group'){
+                    // group pseudo-frame: show a composited preview when layered, otherwise center a label
+                    const gp = item.group;
+                    if (gp && gp.layered) {
+                        try {
+                            const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                            const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
+                            const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
+                            for (const idx of (gp.indices || [])){
+                                try {
+                                    const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
+                                    if (src) tctx.drawImage(src, 0, 0);
+                                } catch (e) {}
+                            }
+                            // draw composited thumbnail into the slot inner area
+                            this.UIDraw.image(tmp, new Vector(slotPos.x + 5, slotPos.y + 5), new Vector(180,180), null, 0, 1, false);
+                            // small layered indicator at bottom
+                            this.UIDraw.text('Layered', new Vector(slotPos.x + slotSize.x/2, slotPos.y + slotSize.y - 16), '#FFFFFF', 0, 12, { align: 'center', font: 'monospace' });
+                        } catch (e) { /* fallback to label below on error */ }
+                    } else {
+                        const center = slotPos.clone().add(new Vector(slotSize.x/2, slotSize.y/2));
+                        const label = 'Group (' + (gp.indices ? gp.indices.length : 0) + ')';
+                        this.UIDraw.text(label, new Vector(center.x, center.y + 6), '#FFFFFF', 0, 16, { align: 'center', font: 'monospace' });
+                    }
+                } else if (item.type === 'add'){
+                    try {
+                        const innerPos = new Vector(slotPos.x + 5, slotPos.y + 5);
+                        const innerSize = new Vector(180,180);
+                        const center = innerPos.clone().add(new Vector(innerSize.x/2, innerSize.y/2));
+                        const barW = 6;
+                        const barL = 64;
+                        const vPos = new Vector(center.x - barW/2, center.y - barL/2);
+                        const vSize = new Vector(barW, barL);
+                        const hPos = new Vector(center.x - barL/2, center.y - barW/2);
+                        const hSize = new Vector(barL, barW);
+                        this.UIDraw.rect(vPos, vSize, '#FFFFFFFF', true);
+                        this.UIDraw.rect(hPos, hSize, '#FFFFFFFF', true);
+                    } catch (e) {}
+                }
+
+                // draw selected outline for frame indices (primary or multi)
                 try {
-                    const innerPos = new Vector(10,100 + (180+20) * i + this.scrollPos);
-                    const innerSize = new Vector(180,180);
-                    const center = innerPos.clone().add(new Vector(innerSize.x/2, innerSize.y/2));
-                    const barW = 6;
-                    const barL = 64;
-                    const vPos = new Vector(center.x - barW/2, center.y - barL/2);
-                    const vSize = new Vector(barW, barL);
-                    const hPos = new Vector(center.x - barL/2, center.y - barW/2);
-                    const hSize = new Vector(barL, barW);
-                    this.UIDraw.rect(vPos, vSize, '#FFFFFFFF', true);
-                    this.UIDraw.rect(hPos, hSize, '#FFFFFFFF', true);
+                    if (item.type === 'frame'){
+                        const i = item.index;
+                        const isPrimary = (this.scene && typeof this.scene.selectedFrame !== 'undefined' && this.scene.selectedFrame === i);
+                        const isMulti = this._multiSelected && this._multiSelected.has(i);
+                        // outline frames that belong to any expanded (not collapsed) group in blue
+                        try {
+                            const inOpenGroup = groups && Array.isArray(groups) && groups.some(g => !g.collapsed && Array.isArray(g.indices) && g.indices.indexOf(i) !== -1);
+                            if (inOpenGroup) this.UIDraw.rect(slotPos, slotSize, '#00000000', false, true, 3, '#0084ffff');
+                        } catch (e) {}
+                        if (isPrimary) this.UIDraw.rect(slotPos, slotSize, '#00000000', false, true, 4, '#FFFF00FF');
+                        if (isMulti) this.UIDraw.rect(slotPos, slotSize, '#00000000', false, true, 4, '#00FF00FF');
+                    } else if (item.type === 'group'){
+                        // if all indices in group are selected, draw group multi outline
+                        const gp2 = item.group;
+                        const allSelected = gp2.indices.every(idx => this._multiSelected && this._multiSelected.has(idx));
+                        if (allSelected) this.UIDraw.rect(slotPos, slotSize, '#00000000', false, true, 4, '#00FF00FF');
+                    }
                 } catch (e) {}
             }
-            // draw selected outline if this is the selected frame (primary) or multi-selected
-            try {
-                const isPrimary = (this.scene && typeof this.scene.selectedFrame !== 'undefined' && this.scene.selectedFrame === i);
-                const isMulti = this._multiSelected && this._multiSelected.has(i);
-                // draw primary first (yellow), then multi (green) so green appears above yellow
-                if (isPrimary) {
-                    const selPos = slotPos;
-                    const selSize = slotSize;
-                    this.UIDraw.rect(selPos, selSize, '#00000000', false, true, 4, '#FFFF00FF');
-                }
-                if (isMulti) {
-                    const selPos = slotPos;
-                    const selSize = slotSize;
-                    this.UIDraw.rect(selPos, selSize, '#00000000', false, true, 4, '#00FF00FF');
-                }
-            } catch (e) {
-                // ignore drawing errors
-            }
-        }
+        } catch(e){}
         this.UIDraw.text(this._animFps,new Vector(1875,40),'#FFFFFF')
 
     }

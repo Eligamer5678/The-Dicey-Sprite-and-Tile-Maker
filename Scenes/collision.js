@@ -599,6 +599,8 @@ export class CollisionScene extends Scene {
 
     // Called by base Scene.tick() at fixed rate
     sceneTick(tickDelta) {
+        this.mouse.update(tickDelta)
+        this.keys.update(tickDelta)
         this.mouse.setMask(0)
         // Update Entities UI
         try { if (this.entitiesUI && this.entitiesUI.menu) this.entitiesUI.menu.update(tickDelta); } catch (e) {}

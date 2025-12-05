@@ -553,6 +553,8 @@ export class SpriteScene extends Scene {
 
     // tick handler: called by Scene.tick() via sceneTick
     sceneTick(tickDelta){
+        this.mouse.update(tickDelta)
+        this.keys.update(tickDelta)
         this.mouse.setMask(0)
         this.FrameSelect.update()
         this.mouse.setPower(0)
@@ -699,11 +701,11 @@ export class SpriteScene extends Scene {
             if (!this.mouse) return;
 
             // Right click to cancel selection (also clear any region selection)
-            if (this.mouse.held('right') && this.selectionPoints.length !== 0) {
+            if (this.mouse.pressed('right') && this.selectionPoints.length !== 0) {
                 this.selectionPoints = [];
                 this.currentTool = null;
                 this.selectionRegion = null;
-                this.mouse.pause(0.15)
+                this.mouse.pause(0.3)
             }
 
             // Clear clipboard preview when Alt is released or preview expired
@@ -721,7 +723,7 @@ export class SpriteScene extends Scene {
                         const sheet = this.currentSprite;
                         const anim = this.selectedAnimation;
                         const frameIdx = this.selectedFrame;
-                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                        const frameCanvas = sheet.getFrame(anim, frameIdx);
                         if (frameCanvas) {
                             const ctx = frameCanvas.getContext('2d');
                             try {

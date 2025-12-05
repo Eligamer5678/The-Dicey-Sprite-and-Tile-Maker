@@ -8,16 +8,17 @@ export default class SpriteSheet{
         this.sheet = sheet;
         this.slicePx = slicePx;
         this._frames = new Map(); // animationName -> [canvas, ...]
-    // materialization queue for incremental lazy-loading to avoid blocking
-    // weak CPUs. Each entry: {animation, index}
-    this._materializeQueue = [];
-    this._materializeScheduled = false;
-    // choose batch size based on hardwareConcurrency when available
-    try { this._materializeBatch = Math.max(1, (navigator.hardwareConcurrency ? Math.max(1, Math.floor(navigator.hardwareConcurrency/2)) : 2)); } catch(e){ this._materializeBatch = 2; }
-        if(animations){
-            this.animations = animations;
-        } else {
-            this.animations = new Map();
+        this._frameGroups = new Map() 
+        // materialization queue for incremental lazy-loading to avoid blocking
+        // weak CPUs. Each entry: {animation, index}
+        this._materializeQueue = [];
+        this._materializeScheduled = false;
+        // choose batch size based on hardwareConcurrency when available
+        try { this._materializeBatch = Math.max(1, (navigator.hardwareConcurrency ? Math.max(1, Math.floor(navigator.hardwareConcurrency/2)) : 2)); } catch(e){ this._materializeBatch = 2; }
+            if(animations){
+                this.animations = animations;
+            } else {
+                this.animations = new Map();
         }
     }
     addAnimation(name,row,frameCount){
@@ -116,11 +117,17 @@ export default class SpriteSheet{
                 return;
             }
 
-            // compute max frames in any animation (use ragged arrays allowed)
+            // compute max logical frames (exclude placeholders)
             let maxFrames = 0;
             for (const name of animNames) {
                 const arr = this._frames.get(name) || [];
-                if (arr.length > maxFrames) maxFrames = arr.length;
+                let logical = 0;
+                for (let f = 0; f < arr.length; f++) {
+                    const src = arr[f];
+                    if (src && (src.__groupStart || src.__groupEnd)) continue;
+                    logical++;
+                }
+                if (logical > maxFrames) maxFrames = logical;
             }
 
             const rows = animNames.length;
@@ -147,26 +154,31 @@ export default class SpriteSheet{
             for (let r = 0; r < animNames.length; r++) {
                 const name = animNames[r];
                 const arr = this._frames.get(name) || [];
+                // draw only logical frames (skip placeholders); columns advance per logical frame
+                let col = 0;
                 for (let f = 0; f < arr.length; f++) {
                     const src = arr[f];
                     if (!src) continue;
+                    if (src.__groupStart || src.__groupEnd) continue;
                     // if frame is a lazy descriptor, draw directly from its source
                     if (src.__lazy === true && src.src) {
                         try {
-                            outCtx.drawImage(src.src, src.sx, src.sy, src.w, src.h, f * this.slicePx, r * this.slicePx, this.slicePx, this.slicePx);
+                            outCtx.drawImage(src.src, src.sx, src.sy, src.w, src.h, col * this.slicePx, r * this.slicePx, this.slicePx, this.slicePx);
                         } catch (e) {
                             // if drawImage with descriptor fails, skip (leave blank)
                         }
                     } else {
                         // assume it's a canvas-like object
-                        outCtx.drawImage(src, f * this.slicePx, r * this.slicePx, this.slicePx, this.slicePx);
+                        outCtx.drawImage(src, col * this.slicePx, r * this.slicePx, this.slicePx, this.slicePx);
                     }
+                    col++;
                 }
                 // update animations metadata
-                if (!this.animations.has(name)) this.animations.set(name, { row: r, frameCount: arr.length });
+                const logicalCount = (() => { let c=0; for (let i=0;i<(arr||[]).length;i++){ const s=arr[i]; if (!s) continue; if (s.__groupStart||s.__groupEnd) continue; c++; } return c; })();
+                if (!this.animations.has(name)) this.animations.set(name, { row: r, frameCount: logicalCount });
                 else {
                     const meta = this.animations.get(name) || {};
-                    meta.row = r; meta.frameCount = arr.length; this.animations.set(name, meta);
+                    meta.row = r; meta.frameCount = logicalCount; this.animations.set(name, meta);
                 }
             }
 
@@ -228,8 +240,24 @@ export default class SpriteSheet{
         try {
             if (!this._frames.has(animation)) return null;
             const arr = this._frames.get(animation);
-            if (index < 0 || index >= arr.length) return null;
-            const entry = arr[index];
+            // if index is logical, map to physical
+            let phys = index;
+            if (typeof phys === 'number') {
+                // if provided index may be logical, find physical by scanning
+                let logical = Math.max(0, Math.floor(index || 0));
+                let found = -1;
+                for (let i = 0; i < arr.length; i++){
+                    const e = arr[i];
+                    if (!e) continue;
+                    if (e.__groupStart || e.__groupEnd) continue;
+                    if (logical === 0) { found = i; break; }
+                    logical--;
+                }
+                if (found === -1) return null;
+                phys = found;
+            }
+            if (phys < 0 || phys >= arr.length) return null;
+            const entry = arr[phys];
             if (!entry) return null;
             if (entry.__lazy !== true) return entry; // already a canvas
 
@@ -245,8 +273,8 @@ export default class SpriteSheet{
                 console.warn('_materializeFrame draw failed', e);
             }
             // replace descriptor with actual canvas
-            arr[index] = c;
-            // update packed sheet cell for this frame
+            arr[phys] = c;
+            // update packed sheet cell for this frame (use logical index)
             try { this._updatePackedFrame(animation, index); } catch(e) {}
             return c;
         } catch (e) {
@@ -351,8 +379,24 @@ export default class SpriteSheet{
         const frameCanvas = document.createElement('canvas');
         frameCanvas.width = this.slicePx; frameCanvas.height = this.slicePx;
         const ctx = frameCanvas.getContext('2d'); ctx.clearRect(0,0,frameCanvas.width, frameCanvas.height);
-        if (typeof index === 'number' && index >= 0 && index <= arr.length) arr.splice(index, 0, frameCanvas);
-        else arr.push(frameCanvas);
+        // index is a logical index (skip placeholders). Map to physical insertion position
+        if (typeof index === 'number' && index >= 0) {
+            // find physical position for logical index
+            let logical = Math.floor(index);
+            let physPos = arr.length;
+            let found = false;
+            for (let i = 0; i < arr.length; i++){
+                const e = arr[i];
+                if (!e) continue;
+                if (e.__groupStart || e.__groupEnd) continue;
+                if (logical === 0) { physPos = i; found = true; break; }
+                logical--;
+            }
+            if (!found) physPos = arr.length;
+            arr.splice(physPos, 0, frameCanvas);
+        } else {
+            arr.push(frameCanvas);
+        }
         this._rebuildSheetCanvas();
         return true;
     }
@@ -363,8 +407,22 @@ export default class SpriteSheet{
         const arr = this._frames.get(animation);
         if (arr.length === 0) return false;
         let removed;
-        if (typeof index === 'number' && index >= 0 && index < arr.length) removed = arr.splice(index,1);
-        else removed = [arr.pop()];
+        if (typeof index === 'number' && index >= 0) {
+            // map logical index to physical
+            let logical = Math.floor(index);
+            let phys = -1;
+            for (let i = 0; i < arr.length; i++){
+                const e = arr[i];
+                if (!e) continue;
+                if (e.__groupStart || e.__groupEnd) continue;
+                if (logical === 0) { phys = i; break; }
+                logical--;
+            }
+            if (phys === -1) phys = arr.length - 1;
+            removed = arr.splice(phys,1);
+        } else {
+            removed = [arr.pop()];
+        }
         this._rebuildSheetCanvas();
         return removed[0] || null;
     }
@@ -373,11 +431,20 @@ export default class SpriteSheet{
     getFrame(animation, index = 0) {
         const arr = this._frames.get(animation);
         if (!arr || arr.length === 0) return null;
-        const idx = Math.max(0, Math.min(arr.length - 1, index));
-        const entry = arr[idx];
-        // If this entry is a lazy descriptor, materialize it now
+        // map logical index -> physical index (skip placeholders)
+        let logical = Math.max(0, Math.floor(index || 0));
+        let found = -1;
+        for (let i = 0; i < arr.length; i++){
+            const entry = arr[i];
+            if (!entry) continue;
+            if (entry.__groupStart || entry.__groupEnd) continue;
+            if (logical === 0) { found = i; break; }
+            logical--;
+        }
+        if (found === -1) return null;
+        const entry = arr[found];
         if (entry && entry.__lazy === true) {
-            return this._materializeFrame(animation, idx);
+            return this._materializeFrame(animation, found);
         }
         return entry;
     }
