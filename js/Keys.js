@@ -57,7 +57,6 @@ export default class Keys { // Key input
     }
 
     released(key,passcode="") {
-        console.log('released')
         if(passcode!==this.passcode) return false;
         if (key === 'any') {
             for (const k in this.releasedFrame) {
