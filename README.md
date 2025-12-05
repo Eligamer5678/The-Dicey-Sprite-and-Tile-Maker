@@ -1,4 +1,4 @@
-*Note: This web app is designed for chromebooks & laptop touchpads, not mice. Panning will not work correctly with mice.*
+*Note: This web app is designed for chromebooks & laptop touchpads*
 
 # Controls
 
