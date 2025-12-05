@@ -50,7 +50,7 @@
 - 6-9 keys to select property to modify, 6=hue,7=saturation,8=value,9=alpha
 - j to grab the average color
 - up/down keys to move the frame
-- '/' (or shift + \) to duplicate frame
+- '/' (or shift + backslash) to duplicate frame
 - f to fill region
 - Press the upper left corner to access the console
 - *Console commands* (text box on the bottom of the screen), type exactly to use.
