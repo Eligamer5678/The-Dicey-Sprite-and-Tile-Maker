@@ -41,13 +41,16 @@
 - **Latest update**
 - Press 'n' to add a bit of noise to the image
 - Shift click multiple frames to layer them in the preview, click m to fully merge.
+- Or click 'g' to group them
+- Clicking l will convert the group into a layered frame
+- Click g on a group to ungroup
 - Useful for stuff like layering or onion skin
 - 1-4 keys change brush size
 - h & k to modify color
 - 6-9 keys to select property to modify, 6=hue,7=saturation,8=value,9=alpha
 - j to grab the average color
 - up/down keys to move the frame
-- '/' to duplicate frame
+- '/' (or shift + \) to duplicate frame
 - f to fill region
 - Press the upper left corner to access the console
 - *Console commands* (text box on the bottom of the screen), type exactly to use.
