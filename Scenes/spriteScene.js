@@ -451,14 +451,22 @@ export class SpriteScene extends Scene {
         wheelY = this.mouse.wheel();
         wheelX = this.mouse.wheelX();
         
- 
         // Convert wheel deltas to pan velocity impulses. We divide by zoom so
         // panning speed feels consistent at different zoom levels.
+        // When Shift is held, interpret vertical wheel (wheelY) as horizontal
+        // scrolling (common UX: Shift + scroll -> horizontal pan).
         const zX = this.zoom.x;
         const zY = this.zoom.y;
+        // combine horizontal movement: native horizontal wheel plus vertical wheel when Shift held
+        let horiz = wheelX || 0;
+        let vert = wheelY || 0;
+        if (this.keys && this.keys.held && this.keys.held('Shift')) {
+            horiz += wheelY; // map vertical scroll into horizontal pan
+            vert = 0; // suppress vertical pan while Shift is held
+        }
         // invert direction so wheel down moves content up (typical UX)
-        const impulseX = -wheelX * (this.panImpulse) * (1 / zX);
-        const impulseY = -wheelY * (this.panImpulse) * (1 / zY);
+        const impulseX = -horiz * (this.panImpulse) * (1 / zX);
+        const impulseY = -vert * (this.panImpulse) * (1 / zY);
         this.panVlos.x += impulseX;
         this.panVlos.y += impulseY;
     }
