@@ -134,8 +134,8 @@ class Game {
     }
 
     async init() {
-        await this.loadScene('title');
-        this.switchScene('title');
+        await this.loadScene('spriteScene');
+        this.switchScene('spriteScene');
         // Only create the multiplayer UI if the server (firebase) was initialized.
 
         // De-comment to enable server-side features.
