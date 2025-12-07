@@ -355,6 +355,93 @@ export class SpriteScene extends Scene {
             console.warn('Failed to register select debug signal', e);
         }
 
+        // Debug: draw the current pen color into all selected pixels/region
+        try {
+            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
+                window.Debug.createSignal('drawSelected', () => {
+                    try {
+                        const sheet = this.currentSprite;
+                        if (!sheet) {
+                            window.Debug && window.Debug.log && window.Debug.log('drawSelected: no current sprite');
+                            return;
+                        }
+                        const colorHex = this.penColor || '#000000';
+                        let applied = 0;
+
+                        // helper to write a single pixel using sheet API if available, otherwise direct canvas
+                        const writePixel = (anim, frameIdx, x, y) => {
+                            try {
+                                if (typeof sheet.setPixel === 'function') {
+                                    sheet.setPixel(anim, frameIdx, x, y, colorHex, 'replace');
+                                } else {
+                                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                                    if (frameCanvas) {
+                                        const ctx = frameCanvas.getContext('2d');
+                                        try {
+                                            const col = Color.convertColor(colorHex).toRgb();
+                                            const r = Math.round(col.a || 0);
+                                            const g = Math.round(col.b || 0);
+                                            const b = Math.round(col.c || 0);
+                                            const a = (col.d === undefined) ? 1 : (col.d || 0);
+                                            ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+                                            ctx.fillRect(x, y, 1, 1);
+                                        } catch (e) { /* ignore per-pixel canvas failures */ }
+                                    }
+                                }
+                                applied++;
+                            } catch (e) { /* ignore write errors */ }
+                        };
+
+                        // If explicit point selection exists, use those points (respect areaIndex per-point)
+                        if (this.selectionPoints && this.selectionPoints.length > 0) {
+                            for (const p of this.selectionPoints) {
+                                if (!p) continue;
+                                let anim = this.selectedAnimation;
+                                let frameIdx = this.selectedFrame;
+                                if (p && typeof p.areaIndex === 'number') {
+                                    const binding = this.getAreaBinding(p.areaIndex);
+                                    if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                                        anim = binding.anim;
+                                        frameIdx = Number(binding.index);
+                                    }
+                                }
+                                writePixel(anim, frameIdx, p.x, p.y);
+                            }
+                        } else if (this.selectionRegion) {
+                            // region selection: paint every pixel inside the region
+                            const sr = this.selectionRegion;
+                            const minX = Math.min(sr.start.x, sr.end.x);
+                            const minY = Math.min(sr.start.y, sr.end.y);
+                            const maxX = Math.max(sr.start.x, sr.end.x);
+                            const maxY = Math.max(sr.start.y, sr.end.y);
+                            // prefer region's areaIndex if present
+                            let anim = this.selectedAnimation;
+                            let frameIdx = this.selectedFrame;
+                            if (sr && typeof sr.areaIndex === 'number') {
+                                const binding = this.getAreaBinding(sr.areaIndex);
+                                if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                                    anim = binding.anim;
+                                    frameIdx = Number(binding.index);
+                                }
+                            }
+                            for (let yy = minY; yy <= maxY; yy++) {
+                                for (let xx = minX; xx <= maxX; xx++) {
+                                    writePixel(anim, frameIdx, xx, yy);
+                                }
+                            }
+                        } else {
+                            window.Debug && window.Debug.log && window.Debug.log('drawSelected: no selection to draw into');
+                        }
+
+                        if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                        window.Debug && window.Debug.log && window.Debug.log('drawSelected applied to ' + applied + ' pixels');
+                    } catch (err) {
+                        window.Debug && window.Debug.error && window.Debug.error('drawSelected failed: ' + err);
+                    }
+                });
+            }
+        } catch (e) { console.warn('Failed to register drawSelected debug signal', e); }
+
         // Register debug signals for onion-skin control: layerAlpha(alpha), toggleOnion()
         try {
             if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
@@ -460,7 +547,7 @@ export class SpriteScene extends Scene {
         // combine horizontal movement: native horizontal wheel plus vertical wheel when Shift held
         let horiz = wheelX || 0;
         let vert = wheelY || 0;
-        if (this.keys && this.keys.held && this.keys.held('Shift')) {
+        if (this.keys.held('Shift') || this.mouse.held('middle')) {
             horiz += wheelY; // map vertical scroll into horizontal pan
             vert = 0; // suppress vertical pan while Shift is held
         }
@@ -735,10 +822,10 @@ export class SpriteScene extends Scene {
                     // Rotate / Flip preview and commit handlers for area under mouse
                     try {
                         const posForTransform = this.getPos(this.mouse && this.mouse.pos);
-                        if (posForTransform && posForTransform.inside && typeof posForTransform.areaIndex === 'number') {
+                        if (this.tilemode) {
                             const ai = posForTransform.areaIndex;
                             // Rotate: plain 'r' = preview rotate 90deg CW, Shift+'r' = commit rotate to frame data
-                            if ((this.keys.released('R')||this.keys.released('r'))) {
+                            if ((this.keys.pressed('R')||this.keys.pressed('r'))) {
                                 if (this.keys.held('Shift')) {
                                     try { this.applyAreaRotateData(ai); } catch (e) { /* ignore */ }
                                 } else {
@@ -850,10 +937,86 @@ export class SpriteScene extends Scene {
             // Ctrl + Left = eyedropper: pick color from the current frame under the mouse
             if (this.keys.held('Control')) {
                 try {
+                    // initialize stored original color when Control first held
+                    if (this._eyedropperOriginalColor === undefined) {
+                        this._eyedropperOriginalColor = this.penColor;
+                        this._eyedropperCancelled = false;
+                    }
+
+                    // If user scrolled while holding Control, cancel eyedropper and revert
+                    const wheelY_check = (this.mouse && typeof this.mouse.wheel === 'function') ? this.mouse.wheel() : 0;
+                    const wheelX_check = (this.mouse && typeof this.mouse.wheelX === 'function') ? this.mouse.wheelX() : 0;
+                    if (!this._eyedropperCancelled && (wheelY_check || wheelX_check)) {
+                        try {
+                            if (this._eyedropperOriginalColor !== undefined) {
+                                this.penColor = this._eyedropperOriginalColor;
+                                if (this._colorInput) {
+                                    // sync HTML color input (drop alpha)
+                                    const col = this.penColor || '#000000';
+                                    // if stored color is 9 or 7 chars (#RRGGBBAA or #RRGGBB), pick first 7
+                                    this._colorInput.value = col.length >= 7 ? col.slice(0,7) : col;
+                                }
+                            }
+                        } catch (e) {}
+                        this._eyedropperCancelled = true;
+                    }
+
+                    // if cancelled, skip sampling until Control released
+                    if (this._eyedropperCancelled) {
+                        // noop while cancelled
+                    } else {
+                        const pos = this.getPos(this.mouse.pos);
+                        if (pos && pos.inside && this.currentSprite) {
+                            const sheet = this.currentSprite;
+                            // Prefer the frame bound to the area under the mouse. Fall back to selected frame.
+                            let anim = this.selectedAnimation;
+                            let frameIdx = this.selectedFrame;
+                            if (typeof pos.areaIndex === 'number') {
+                                const binding = this.getAreaBinding(pos.areaIndex);
+                                if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                                    anim = binding.anim;
+                                    frameIdx = Number(binding.index);
+                                }
+                            }
+                            const frameCanvas = sheet.getFrame(anim, frameIdx);
+                            if (frameCanvas) {
+                                const ctx = frameCanvas.getContext('2d');
+                                try {
+                                    const d = ctx.getImageData(pos.x, pos.y, 1, 1).data;
+                                    // set internal pen color including alpha
+                                    const hex8 = this.rgbaToHex(d[0], d[1], d[2], d[3]);
+                                    this.penColor = hex8;
+                                    // update HTML color input (6-digit, drop alpha)
+                                    if (this._colorInput) {
+                                        const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
+                                        this._colorInput.value = '#' + toHex(d[0]) + toHex(d[1]) + toHex(d[2]);
+                                    }
+                                } catch (e) {
+                                    // ignore getImageData errors
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn('eyedropper failed', e);
+                }
+            } else {
+                // Control not held: if we previously had an eyedropper session, clear temporary state
+                try {
+                    if (this._eyedropperOriginalColor !== undefined) {
+                        // If it was cancelled, we've already reverted. If not cancelled, keep sampled color.
+                        this._eyedropperOriginalColor = undefined;
+                        this._eyedropperCancelled = false;
+                    }
+                } catch (e) {}
+            }
+
+            // Middle-click eyedropper: immediate sample on middle button press
+            try {
+                if (this.mouse.held('middle')) {
                     const pos = this.getPos(this.mouse.pos);
                     if (pos && pos.inside && this.currentSprite) {
                         const sheet = this.currentSprite;
-                        // Prefer the frame bound to the area under the mouse. Fall back to selected frame.
                         let anim = this.selectedAnimation;
                         let frameIdx = this.selectedFrame;
                         if (typeof pos.areaIndex === 'number') {
@@ -868,10 +1031,8 @@ export class SpriteScene extends Scene {
                             const ctx = frameCanvas.getContext('2d');
                             try {
                                 const d = ctx.getImageData(pos.x, pos.y, 1, 1).data;
-                                // set internal pen color including alpha
                                 const hex8 = this.rgbaToHex(d[0], d[1], d[2], d[3]);
                                 this.penColor = hex8;
-                                // update HTML color input (6-digit, drop alpha)
                                 if (this._colorInput) {
                                     const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
                                     this._colorInput.value = '#' + toHex(d[0]) + toHex(d[1]) + toHex(d[2]);
@@ -881,10 +1042,8 @@ export class SpriteScene extends Scene {
                             }
                         }
                     }
-                } catch (e) {
-                    console.warn('eyedropper failed', e);
                 }
-            }
+            } catch (e) { console.warn('middle-click eyedropper failed', e); }
 
             // Shift + Left click to add a point (avoid double-selecting the same pixel)
             if (this.keys.held('Shift') && this.mouse.held('left')) {
@@ -1225,6 +1384,33 @@ export class SpriteScene extends Scene {
                             ctx.putImageData(img, minX, minY);
                             if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch(e){}
                         } catch (e) { /* ignore region read/write errors */ }
+                    }
+
+                    // No active selection: apply adjustment to the current pen/draw color
+                    if ((!this.selectionPoints || this.selectionPoints.length === 0) && !this.selectionRegion) {
+                        try {
+                            const cur = this.penColor || '#000000';
+                            const col = Color.convertColor(cur);
+                            const hsv = col.toHsv();
+                            switch (channel) {
+                                case 'h':
+                                    hsv.a = (hsv.a + appliedDelta) % 1; if (hsv.a < 0) hsv.a += 1; break;
+                                case 's':
+                                    hsv.b = clamp(hsv.b + appliedDelta, 0, 1); break;
+                                case 'v':
+                                    hsv.c = clamp(hsv.c + appliedDelta, 0, 1); break;
+                                case 'a':
+                                    hsv.d = clamp(hsv.d + appliedDelta, 0, 1); break;
+                            }
+                            const rgb = hsv.toRgb();
+                            const newHex8 = this.rgbaToHex(Math.round(rgb.a), Math.round(rgb.b), Math.round(rgb.c), Math.round((rgb.d || 1) * 255));
+                            this.penColor = newHex8;
+                            // sync HTML color input (drop alpha component)
+                            if (this._colorInput) {
+                                const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
+                                try { this._colorInput.value = '#' + toHex(Math.round(rgb.a)) + toHex(Math.round(rgb.b)) + toHex(Math.round(rgb.c)); } catch (e) {}
+                            }
+                        } catch (e) { /* ignore color math errors */ }
                     }
                 };
                 if (this.keys && typeof this.keys.released === 'function') {

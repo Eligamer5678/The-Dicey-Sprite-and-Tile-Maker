@@ -42,6 +42,7 @@ export default class Keys { // Key input
     }
 
     pressed(key,passcode="") {
+        if(window.Debug.visible) return false;
         if(passcode!==this.passcode) return false;
         const delta = this.lastDelta || 0;
         if (key === 'any') {
@@ -57,6 +58,7 @@ export default class Keys { // Key input
     }
 
     released(key,passcode="") {
+        if(window.Debug.visible) return false;
         if(passcode!==this.passcode) return false;
         if (key === 'any') {
             for (const k in this.releasedFrame) {
@@ -75,6 +77,7 @@ export default class Keys { // Key input
     }
 
     held(key, returnTime = false,passcode="") {
+        if(window.Debug.visible) return 0;
         if(passcode!==this.passcode) return 0;
         if (key === 'any') {
             for (const k in this.keys) {
@@ -89,6 +92,7 @@ export default class Keys { // Key input
     }
 
     comboPressed(keysArray,passcode="") {
+        if(window.Debug.visible) return false;
         if(passcode!==this.passcode) return false;
         const all = keysArray.every(k => this.firstFrame[k]);
         if (all) keysArray.forEach(k => (this.firstFrame[k] = false));
@@ -96,6 +100,7 @@ export default class Keys { // Key input
     }
 
     comboHeld(keysArray, returnTime = false,passcode="") {
+        if(window.Debug.visible) return 0;
         if(passcode!==this.passcode) return 0;
         if (!keysArray.every(k => this.keys[k]?.state)) return returnTime ? 0 : false;
         return returnTime ? Math.min(...keysArray.map(k => this.keys[k].time)) : true;

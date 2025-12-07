@@ -38,8 +38,7 @@
 - Backspace to delete current frame, and undo works here, yay!
 - Exports as 1 animation per row, having empty space to the side of the rightmost frames.
 - 
-- **Latest update**
-- Press 'n' to add a bit of noise to the image
+- Press 'n' to add a bit of noise to the image 
 - Shift click multiple frames to layer them in the preview, click m to fully merge.
 - Useful for stuff like layering or onion skin
 - Or click 'g' to group them
@@ -61,6 +60,20 @@
 - "grayscale()" - grayscales the frame
 - "toggleOnion" - toggles onion skinning
 - "layerAlpha" - multi-select layer & onion skin visibility
+
+- **Latest update**
+- Holding shift while scrolling will pan horizontally
+- Scrolling will cancel eyedropper (so zooming doesn't eyedrop)
+- Middle click also is eyedropper
+- If nothing is selected, h/k modifies the draw color
+- Added console command: drawSelected()
+- Added Tile mode
+
+- **Tile mode**
+- Press t to enter
+- r to rotate, shift-r to actually rotate the frame data
+- alt+f to flip, alt+shift+f to actully flip the frame data
+- Press 'y' to mirror the selected frame. Toggles between locked-on-frame & selected
 
 #### Collision editor
 - Hold 'n' to create points. Press space to turn them into a polygon.
