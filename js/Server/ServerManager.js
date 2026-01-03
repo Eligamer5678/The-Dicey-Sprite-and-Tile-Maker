@@ -31,6 +31,8 @@ export default class ServerManager {
             sent: new Signal(),
             fetched: new Signal(),
         };
+        this._paused = false;
+        this._savedListeners = new Map(); // path -> callback (for re-attach on unpause)
     }
 
     async createRoom() {
@@ -41,7 +43,7 @@ export default class ServerManager {
             lastActive: Date.now(),
             tickCounter: 0
         });
-        console.log(`[ServerManager] created room ${this.roomId}`);
+        //console.log(`[ServerManager] created room ${this.roomId}`);
         return this.roomId;
     }
 
@@ -51,7 +53,7 @@ export default class ServerManager {
         await update(ref(this.db, `rooms/${roomId}/players/p2`), { connected: true });
         try {
             await update(ref(this.db, `rooms/${roomId}`), { lastActive: Date.now(), tickCounter: 0 });
-            console.log(`[ServerManager] joined room ${roomId}`);
+            //console.log(`[ServerManager] joined room ${roomId}`);
         } catch (e) { this.signals.error.emit(e); }
     }
 
@@ -124,6 +126,7 @@ export default class ServerManager {
 
     async syncSet(path, value) {
         if (!this._ensureRoom()) return;
+        if (this._paused) return;
         try {
             await set(ref(this.db, this._path(path)), value);
             this.signals.sent.emit(path, value);
@@ -134,6 +137,7 @@ export default class ServerManager {
 
     async syncUpdate(path, valueObj) {
         if (!this._ensureRoom()) return;
+        if (this._paused) return;
         try {
             await update(ref(this.db, this._path(path)), valueObj);
             this.signals.sent.emit(path, valueObj);
@@ -144,12 +148,59 @@ export default class ServerManager {
 
     async syncRemove(path) {
         if (!this._ensureRoom()) return;
+        if (this._paused) return;
         try {
             await set(ref(this.db, this._path(path)), null);
             this.signals.sent.emit(path, null);
         } catch (e) {
             this.signals.error.emit(e);
         }
+    }
+
+    // Pause server activity: stop ticks and unsubscribe listeners. Saved callbacks
+    // are kept so unpause() can re-attach them.
+    pause() {
+        try {
+            if (this._paused) return;
+            this._paused = true;
+            // stop tick
+            this._tickWasRunning = !!this._tickInterval;
+            this.stopTick();
+            // unsubscribe listeners but keep callbacks in _savedListeners
+            for (const [fullPath, rec] of this.listeners.entries()) {
+                try {
+                    if (rec && typeof rec === 'function') {
+                        try { rec(); } catch(e) {}
+                    } else if (rec && rec.unsub && typeof rec.unsub === 'function') {
+                        try { rec.unsub(); } catch(e) {}
+                    }
+                } catch (e) {}
+            }
+            this.listeners.clear();
+            //console.debug('[ServerManager] paused');
+        } catch (e) { console.warn('ServerManager.pause failed', e); }
+    }
+
+    // Resume server activity: re-attach saved listeners and restart tick if needed.
+    unpause() {
+        try {
+            if (!this._paused) return;
+            this._paused = false;
+            // re-attach saved listeners
+            for (const [fullPath, callback] of this._savedListeners.entries()) {
+                try {
+                    // fullPath is absolute (basePath/room/...); extract relative path after basePath/roomId/
+                    let rel = fullPath;
+                    const prefix = `${this.basePath}/${this.roomId}/`;
+                    if (fullPath.indexOf(prefix) === 0) rel = fullPath.slice(prefix.length);
+                    // call on() to re-register
+                    try { this.on(rel, callback); } catch (e) {}
+                } catch (e) {}
+            }
+            // restart tick if it was running
+            if (this._tickWasRunning) this.startTick();
+            //console.debug('[ServerManager] unpaused');
+        } catch (e) { console.warn('ServerManager.unpause failed', e); }
     }
 
     async fetch(path = "") {
@@ -174,14 +225,17 @@ export default class ServerManager {
         if (!this._ensureRoom()) return;
         const fullPath = this._path(path);
         const dbRef = ref(this.db, fullPath);
+        // store the callback so we can re-attach after pause/unpause
+        this._savedListeners.set(fullPath, callback);
         const listener = onValue(dbRef, (snapshot) => {
+            if (this._paused) return; // ignore updates while paused
             const val = snapshot.val();
             this.set(path, val, false);
-            callback(val);
+            try { callback(val); } catch (e) {}
             this.signals.updated.emit(path, val);
         });
-        // onValue returns an unsubscribe function in modern SDKs; store whatever it returns
-        this.listeners.set(fullPath, listener);
+        // store an object with unsubscribe and callback for pause/resume handling
+        this.listeners.set(fullPath, { dbRef, callback, unsub: listener });
         this.signals.connected.emit(path);
     }
 
@@ -189,12 +243,19 @@ export default class ServerManager {
         if (!this._ensureRoom()) return;
         const fullPath = this._path(path);
         const dbRef = ref(this.db, fullPath);
-        off(dbRef);
-        this.listeners.delete(fullPath);
-        this.signals.disconnected.emit(path);
+        try {
+            // attempt to unsubscribe using stored record
+            const rec = this.listeners.get(fullPath);
+            if (rec) {
+                if (rec.unsub && typeof rec.unsub === 'function') try { rec.unsub(); } catch(e) {}
+                this.listeners.delete(fullPath);
+            }
+        } catch (e) {}
+        try { this.signals.disconnected.emit(path); } catch (e) {}
     }
 
     async sendDiff(diffObj,customID = null) {
+        if (this._paused) return;
         if(customID !== null){
             if (!this._ensureRoom(customID)) return;
             try {
@@ -223,7 +284,7 @@ export default class ServerManager {
                 try {
                     // Always reset the room tickCounter to 0 from active clients (heartbeat)
                     update(ref(this.db, this._path('')), { lastActive: Date.now(), tickCounter: 0 }).catch(()=>{});
-                    console.debug(`[ServerManager] heartbeat room=${this.roomId} tick=${this.tick}`);
+                    //console.debug(`[ServerManager] heartbeat room=${this.roomId} tick=${this.tick}`);
                 } catch (e) {
                     // ignore errors when no room set or update fails
                 }
@@ -258,7 +319,7 @@ export default class ServerManager {
                 break;
             }
             if (!roomId) return null;
-            console.log(`[ServerManager] deleteRandomRoom -> removing ${roomId}`);
+            //console.log(`[ServerManager] deleteRandomRoom -> removing ${roomId}`);
             await set(ref(this.db, `${this.basePath}/${roomId}`), null);
             this.signals.cleanup && this.signals.cleanup.emit && this.signals.cleanup.emit(roomId);
             return roomId;
@@ -278,7 +339,7 @@ export default class ServerManager {
     // - if we reach requiredCount without interruption, delete the room
     // - on any abort (active client appears, owner changed, or counter skip), clear sweeper and return
     async coordinatedSweepAttempt({ maxAgeMs = 10 * 60 * 1000, requiredCount = 10, stepMs = 5000, takeoverMs = 10 * 1000 } = {}) {
-        console.log(`[ServerManager] coordinatedSweepAttempt invoked (maxAgeMs=${maxAgeMs}, requiredCount=${requiredCount}, stepMs=${stepMs})`);
+        //console.log(`[ServerManager] coordinatedSweepAttempt invoked (maxAgeMs=${maxAgeMs}, requiredCount=${requiredCount}, stepMs=${stepMs})`);
         try {
             const rootRef = ref(this.db, this.basePath);
             const snap = await get(rootRef);
@@ -289,7 +350,7 @@ export default class ServerManager {
 
             // If we are not working on a candidate, pick one
             if(this.sweepId === null){
-                console.log('[ServerManager] Finding candidate...')
+                //console.log('[ServerManager] Finding candidate...')
 
                 // pick a random candidate that is not our own room and appears stale
                 const now = Date.now();
@@ -304,18 +365,18 @@ export default class ServerManager {
                     break;
                 }
                 if (!candidateId) return null;
-                console.log(`[ServerManager] Found valid candidate=${candidateId}`);
+                //console.log(`[ServerManager] Found valid candidate=${candidateId}`);
                 this.sweepId = candidateId;
                 this.sweepValue = 0;
                 return null; // don't update yet; updating here could conflict with others
             }
-            console.log('[ServerManager] Incrementing sweep step on candidate: ', this.sweepId)
+            //console.log('[ServerManager] Incrementing sweep step on candidate: ', this.sweepId)
 
             // If we have a candidate, proceed with sweep attempt
             const candidate = rooms[this.sweepId];  // Get candidate room object
             if(candidate.tickCounter !== this.sweepValue){
                 // Clients conflicting; try again
-                console.log('[ServerManager] Sweep aborted: conflicting clients detected');
+                //console.log('[ServerManager] Sweep aborted: conflicting clients detected');
                 this.sweepValue = 0;
                 this.sweepId = null;
                 return null;
@@ -324,18 +385,18 @@ export default class ServerManager {
 
             try {
                 await update(ref(this.db, roomPath), { tickCounter: candidate.tickCounter + 1 }); // Increment tickCounter to show deleting activity
-                console.log(`[ServerManager] incremented tickCounter on ${this.sweepId} -> ${candidate.tickCounter + 1}`);
+                //console.log(`[ServerManager] incremented tickCounter on ${this.sweepId} -> ${candidate.tickCounter + 1}`);
             } catch (err) {
-                console.warn('[ServerManager] failed to increment tickCounter', err);
+                //console.warn('[ServerManager] failed to increment tickCounter', err);
             }
             this.sweepValue += 1;
 
             if(this.sweepValue < requiredCount){
-                console.log('[ServerManager] Sweep step incremented, not done yet');
+                //console.log('[ServerManager] Sweep step incremented, not done yet');
                 return null; // not done yet
             }
             // From here, we have proved that there are not conflicting clients; proceed to delete
-            console.log(`[ServerManager] Sweep successful; deleting room ${this.sweepId}`);
+            //console.log(`[ServerManager] Sweep successful; deleting room ${this.sweepId}`);
             await set(ref(this.db, roomPath), null);
             this.sweepId = null;
             this.sweepValue = 0;

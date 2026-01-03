@@ -13,7 +13,7 @@ export default class Keys { // Key input
             if (e.key === "/") {
                 e.preventDefault();
             }
-            if (e.key === "s") {
+            if (e.ctrlKey) {
                 e.preventDefault();
             }
             
@@ -30,7 +30,7 @@ export default class Keys { // Key input
             if (e.key === "/") {
                 e.preventDefault();
             }
-            if (e.key === "s") {
+            if (e.ctrlKey) {
                 e.preventDefault();
             }
             this.keys[e.key] = { state: false, time: 0 };

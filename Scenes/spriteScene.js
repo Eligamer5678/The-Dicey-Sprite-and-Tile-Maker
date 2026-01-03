@@ -103,6 +103,150 @@ export class SpriteScene extends Scene {
                 if (typeof this.currentSprite._rebuildSheetCanvas === 'function') this.currentSprite._rebuildSheetCanvas();
             } catch (e) { console.warn('failed to paint test frame', e); }
         } catch (e) { console.warn('failed to create default SpriteSheet', e); }
+
+        // --- Multiplayer edit buffering / hooks ---
+        try {
+            // op buffer collects small edit objects before sending to server
+            this._opBuffer = [];
+            this._seenOpIds = new Set();
+            this._sendScheduledId = null;
+            this._sendIntervalMs = 120; // throttle outgoing batches
+            this.clientId = this.playerId || ('c' + Math.random().toString(36).slice(2,8));
+            this._lastModified = new Map(); // anim -> frameIndex -> Uint32Array timestamps (ms)
+            this._suppressOutgoing = false;
+            // track remote edit entries we have seen so we can prune older ops
+            this._remoteEdits = new Map(); // id -> timestamp (ms)
+            // pruning configuration: prune edits older than 30s (30000ms)
+            this._pruneIntervalMs = 10000;
+            this._pruneThresholdMs = 30000;
+            this._pruneIntervalId = null;
+            // message tracking and local username
+            this._seenMsgIds = new Set();
+            try {
+                this.playerName = (this.saver && typeof this.saver.get === 'function') ? this.saver.get('player_name') : null;
+            } catch (e) { this.playerName = null; }
+
+            const sheet = this.currentSprite;
+            if (sheet) {
+                // wrap modifyFrame to record pixel changes
+                if (typeof sheet.modifyFrame === 'function') {
+                    const _origModify = sheet.modifyFrame.bind(sheet);
+                    sheet.modifyFrame = (animation, index, changes) => {
+                        const res = _origModify(animation, index, changes);
+                        try {
+                            const pixels = [];
+                            if (Array.isArray(changes)) {
+                                for (const c of changes) {
+                                    if (!c) continue;
+                                    if (c.x === undefined || c.y === undefined) continue;
+                                    pixels.push({ x: Number(c.x), y: Number(c.y), color: (c.color || c.col || c.c || '#000000') });
+                                }
+                            } else if (changes && typeof changes.x === 'number') {
+                                pixels.push({ x: Number(changes.x), y: Number(changes.y), color: (changes.color || '#000000') });
+                            }
+                            if (pixels.length) {
+                                // update last-modified timestamps for local pixels
+                                try { const now = Date.now(); for (const p of pixels) { try { this._markPixelModified(animation, Number(index), Number(p.x), Number(p.y), now); } catch(e){} } } catch(e){}
+                                if (!this._suppressOutgoing) {
+                                    this._opBuffer.push({ type: 'draw', anim: animation, frame: Number(index), pixels, client: this.clientId, time: Date.now() });
+                                    this._scheduleSend && this._scheduleSend();
+                                }
+                            }
+                        } catch (e) { /* non-fatal */ }
+                        return res;
+                    };
+                }
+                // wrap setPixel convenience if present
+                if (typeof sheet.setPixel === 'function') {
+                    const _origSet = sheet.setPixel.bind(sheet);
+                    sheet.setPixel = (animation, index, x, y, color, blendType) => {
+                        const res = _origSet(animation, index, x, y, color, blendType);
+                        try {
+                            const now = Date.now(); try { this._markPixelModified(animation, Number(index), Number(x), Number(y), now); } catch(e){}
+                            if (!this._suppressOutgoing) {
+                                this._opBuffer.push({ type: 'draw', anim: animation, frame: Number(index), pixels: [{ x: Number(x), y: Number(y), color: (color || '#000000') }], client: this.clientId, time: now });
+                                this._scheduleSend && this._scheduleSend();
+                            }
+                        } catch (e) { /* ignore */ }
+                        return res;
+                    };
+                }
+                // wrap structural frame/animation methods so remote peers receive metadata updates
+                if (typeof sheet.insertFrame === 'function') {
+                    const _origInsert = sheet.insertFrame.bind(sheet);
+                    sheet.insertFrame = (animation, index) => {
+                        const res = _origInsert(animation, index);
+                        try {
+                            // compute logical count
+                            const arr = sheet._frames.get(animation) || [];
+                            let logical = 0; for (let i=0;i<arr.length;i++){ const e=arr[i]; if(!e) continue; if(e.__groupStart||e.__groupEnd) continue; logical++; }
+                            if (this.server && !this._suppressOutgoing) {
+                                const diff = {};
+                                diff['meta/animations/' + encodeURIComponent(animation)] = logical;
+                                try { this.server.sendDiff(diff); } catch(e){}
+                            }
+                        } catch(e){}
+                        return res;
+                    };
+                }
+                if (typeof sheet.popFrame === 'function') {
+                    const _origPop = sheet.popFrame.bind(sheet);
+                    sheet.popFrame = (animation, index) => {
+                        const res = _origPop(animation, index);
+                        try {
+                            const arr = sheet._frames.get(animation) || [];
+                            let logical = 0; for (let i=0;i<arr.length;i++){ const e=arr[i]; if(!e) continue; if(e.__groupStart||e.__groupEnd) continue; logical++; }
+                            if (this.server && !this._suppressOutgoing) {
+                                const diff = {};
+                                diff['meta/animations/' + encodeURIComponent(animation)] = logical;
+                                try { this.server.sendDiff(diff); } catch(e){}
+                            }
+                        } catch(e){}
+                        return res;
+                    };
+                }
+                if (typeof sheet.addAnimation === 'function') {
+                    const _origAddAnim = sheet.addAnimation.bind(sheet);
+                    sheet.addAnimation = (name,row,frameCount) => {
+                        const res = _origAddAnim(name,row,frameCount);
+                        try {
+                            if (this.server && !this._suppressOutgoing) {
+                                const diff = {};
+                                diff['meta/animations/' + encodeURIComponent(name)] = Number(frameCount) || 0;
+                                try { this.server.sendDiff(diff); } catch(e){}
+                            }
+                        } catch(e){}
+                        return res;
+                    };
+                }
+                if (typeof sheet.removeAnimation === 'function') {
+                    const _origRemoveAnim = sheet.removeAnimation.bind(sheet);
+                    sheet.removeAnimation = (name) => {
+                        const res = _origRemoveAnim(name);
+                        try {
+                            if (this.server && !this._suppressOutgoing) {
+                                const diff = {};
+                                // set count to 0 to indicate removal
+                                diff['meta/animations/' + encodeURIComponent(name)] = 0;
+                                try { this.server.sendDiff(diff); } catch(e){}
+                            }
+                        } catch(e){}
+                        return res;
+                    };
+                }
+            }
+
+            // hide multiplayer menu by default if present
+            try {
+                const mp = document.getElementById('multiplayer-menu');
+                if (mp) mp.style.display = 'none';
+            } catch (e) {}
+
+            // start periodic pruning of old edits (safe to run even if no edits known yet)
+            try {
+                this._pruneIntervalId = setInterval(() => { try { this._pruneOldEdits(); } catch (e) {} }, this._pruneIntervalMs || 10000);
+            } catch (e) {}
+        } catch (e) { console.warn('multiplayer hooks setup failed', e); }
         
         
         this.zoom = new Vector(1,1)
@@ -472,8 +616,197 @@ export class SpriteScene extends Scene {
             }
         } catch (e) { console.warn('Failed to register onion debug signals', e); }
 
+        // Debug: show multiplayer menu (hidden by default). Call via Debug signal to unhide.
+        try {
+            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
+                try {
+                    window.Debug.createSignal('enableColab', () => {
+                        try {
+                            const el = document.getElementById('multiplayer-menu');
+                            if (el) {
+                                el.style.display = 'flex';
+                                try { if (this.server && typeof this.server.unpause === 'function') this.server.unpause(); } catch (e) {}
+                                return true;
+                            }
+                        } catch (e) {}
+                        return false;
+                    });
+                } catch (e) { console.warn('Failed to register showMultiplayerMenu debug signal', e); }
+            }
+        } catch (e) { /* ignore debug registration errors */ }
+
+        // Debug: set player name (persisted) and send/receive simple chat messages
+        try {
+            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
+                try {
+                    window.Debug.createSignal('name', (n) => {
+                        try {
+                            const name = (typeof n === 'string') ? n.trim().slice(0, 64) : String(n || '').slice(0,64);
+                            this.playerName = name;
+                            if (this.saver && typeof this.saver.set === 'function') {
+                                try { this.saver.set('player_name', name); } catch (e) {}
+                            }
+                            console.log('name set to', name);
+                            return true;
+                        } catch (e) { return false; }
+                    });
+                } catch (e) { console.warn('Failed to register name debug signal', e); }
+
+                try {
+                    window.Debug.createSignal('msg', (text) => {
+                        try {
+                            if (!text) return false;
+                            const body = String(text);
+                            const from = this.playerName || this.clientId || 'anon';
+                            const payload = { from, text: body, time: Date.now(), client: this.clientId };
+                            const id = (payload.time || Date.now()) + '_' + Math.random().toString(36).slice(2,6);
+                            // send via server if available
+                            try {
+                                if (this.server && typeof this.server.sendDiff === 'function') {
+                                    const diff = {};
+                                    diff['messages/' + id] = payload;
+                                    this.server.sendDiff(diff);
+                                }
+                            } catch (e) {}
+                            // also locally log/display
+                            try { console.log('[msg] ' + from + ': ' + body); } catch (e) {}
+                            try { if (window.Debug && window.Debug.log) window.Debug.log('[msg] ' + from + ': ' + body); } catch (e) {}
+                            return true;
+                        } catch (e) { return false; }
+                    });
+                } catch (e) { console.warn('Failed to register msg debug signal', e); }
+            }
+        } catch (e) { /* ignore debug registration errors */ }
+
+        // Autosave defaults
+        this._autosaveEnabled = true;
+        this._autosaveIntervalSeconds = 60;
+        this._autosaveIntervalId = null;
+
+        
+
+        // Start autosave timer if enabled
+        try {
+            if (this._autosaveEnabled) {
+                this._autosaveIntervalId = setInterval(() => {
+                    try { this.doSave(); } catch (e) { /* ignore autosave errors */ }
+                }, (this._autosaveIntervalSeconds || 60) * 1000);
+            }
+        } catch (e) {}
+
+        // Attempt to load previously-saved sprite frames/metdata (async). We call
+        // saver.load() to make sure savedata is fresh, then restore per-frame images
+        // if present under `sprites/<name>/frames/...`.
+        try {
+            if (this.saver && typeof this.saver.load === 'function') {
+                try { this.saver.load(); } catch (e) {}
+            }
+            (async () => {
+                try {
+                    const keyName = (this.currentSprite && this.currentSprite.name) ? this.currentSprite.name : 'spritesheet';
+                    // Migrate legacy stored packed image saved at `sprites/<name>` (string)
+                    try {
+                        if (this.saver && this.saver.savedata && this.saver.savedata.sprites && typeof this.saver.savedata.sprites[keyName] === 'string') {
+                            try {
+                                const legacy = this.saver.savedata.sprites[keyName];
+                                this.saver.savedata.sprites[keyName] = { packed: legacy };
+                                try { this.saver.save(); } catch (e) {}
+                            } catch (e) {}
+                        }
+                    } catch (e) {}
+                    const meta = (this.saver && typeof this.saver.get === 'function') ? this.saver.get('sprites_meta/' + keyName) : null;
+                    // If no metadata, try a simple packed image load fallback
+                    if (!meta) {
+                        try {
+                            const packed = (this.saver && typeof this.saver.getImage === 'function') ? this.saver.getImage('sprites/' + keyName + '/packed') : null;
+                            if (packed) {
+                                const img = new Image();
+                                img.src = packed;
+                                img.onload = () => {
+                                    try { this.currentSprite.sheet = img; } catch (e) {}
+                                };
+                            }
+                        } catch (e) {}
+                        return;
+                    }
+
+                    // Reconstruct frames from saved per-frame images
+                    if (!this.currentSprite || !this.currentSprite._frames) return;
+                    const animNames = Object.keys(meta.animations || {});
+                    let pending = 0;
+                    for (const anim of animNames) {
+                        const count = meta.animations[anim] || 0;
+                        if (!this.currentSprite._frames.has(anim)) this.currentSprite._frames.set(anim, []);
+                        const arr = this.currentSprite._frames.get(anim) || [];
+                        for (let i = 0; i < count; i++) {
+                            try {
+                                const path = 'sprites/' + keyName + '/frames/' + encodeURIComponent(anim) + '/' + i;
+                                const dataUrl = (this.saver && typeof this.saver.getImage === 'function') ? this.saver.getImage(path) : null;
+                                if (!dataUrl) continue;
+                                pending++;
+                                // load image async and draw into canvas
+                                (function(arrRef, idx, srcDataUrl, parent) {
+                                    const im = new Image();
+                                    im.onload = () => {
+                                        try {
+                                            const c = document.createElement('canvas');
+                                            c.width = im.width; c.height = im.height;
+                                            const cx = c.getContext('2d');
+                                            try { cx.imageSmoothingEnabled = false; } catch (e) {}
+                                            cx.clearRect(0,0,c.width,c.height);
+                                            cx.drawImage(im, 0, 0);
+                                            arrRef[idx] = c;
+                                        } catch (e) { /* ignore per-frame load error */ }
+                                        pending--;
+                                        if (pending === 0) {
+                                            try { parent.currentSprite._rebuildSheetCanvas(); } catch (e) {}
+                                        }
+                                    };
+                                    im.onerror = () => { pending--; if (pending === 0) { try { parent.currentSprite._rebuildSheetCanvas(); } catch (e) {} } };
+                                    im.src = srcDataUrl;
+                                })(arr, i, dataUrl, this);
+                            } catch (e) { /* ignore */ }
+                        }
+                        this.currentSprite._frames.set(anim, arr);
+                    }
+                    // If nothing pending, still rebuild so packed sheet picks up metadata
+                    if (pending === 0) {
+                        try { this.currentSprite._rebuildSheetCanvas(); } catch (e) {}
+                    }
+                } catch (e) { /* ignore load errors */ }
+            })();
+        } catch (e) {}
+
+        // Register debug signals for save/clear/autosave control
+        try {
+            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
+                // save([name]) -> explicitly save current sheet and metadata
+                window.Debug.createSignal('save', (name) => { try { this.doSave(name); } catch (e) { console.warn('debug save failed', e); } });
+                // clearSave([name]) -> remove saved sheet+meta for given name
+                window.Debug.createSignal('clearSave', (name) => {
+                    try {
+                        const n = name || (this.currentSprite && this.currentSprite.name) || 'spritesheet';
+                        if (this.saver && typeof this.saver.remove === 'function') {
+                            try { this.saver.remove('sprites/' + n); } catch (e) {}
+                            try { this.saver.remove('sprites_meta/' + n); } catch (e) {}
+                        }
+                    } catch (e) { console.warn('debug clearSave failed', e); }
+                });
+                // autosave(enabled:boolean, seconds?:number) -> toggle autosave and optionally set interval
+                window.Debug.createSignal('autosave', (enabled, seconds) => {
+                    try {
+                        this._autosaveEnabled = !!enabled;
+                        if (typeof seconds === 'number' && seconds > 0) this._autosaveIntervalSeconds = Math.max(1, Math.floor(seconds));
+                        if (this._autosaveIntervalId) { try { clearInterval(this._autosaveIntervalId); } catch (e) {} this._autosaveIntervalId = null; }
+                        if (this._autosaveEnabled) {
+                            this._autosaveIntervalId = setInterval(() => { try { this.doSave(); } catch (e) {} }, (this._autosaveIntervalSeconds || 60) * 1000);
+                        }
+                    } catch (e) { console.warn('debug autosave failed', e); }
+                });
+            }
+        } catch (e) { /* ignore debug registration errors */ }
+
         this.isReady = true;
-    
     }
     // When switching away from this scene, dispose any UI-created DOM elements
     // and free large resources so GC can reclaim them.
@@ -483,6 +816,12 @@ export class SpriteScene extends Scene {
                 try { this.FrameSelect.dispose(); } catch(e){}
             }
         } catch (e) { console.warn('spriteScene.onSwitchFrom cleanup failed', e); }
+        // clear autosave timer if present
+        try { if (this._autosaveIntervalId) { try { clearInterval(this._autosaveIntervalId); } catch (e) {} this._autosaveIntervalId = null; } } catch (e) {}
+        // clear any pending multiplayer send timer
+        try { if (this._sendScheduledId) { try { clearTimeout(this._sendScheduledId); } catch (e) {} this._sendScheduledId = null; } } catch (e) {}
+        // clear pruning interval if present
+        try { if (this._pruneIntervalId) { try { clearInterval(this._pruneIntervalId); } catch (e) {} this._pruneIntervalId = null; } } catch (e) {}
         // mark not ready so switching back will re-run onReady
         this.isReady = false;
         // call parent behaviour
@@ -1918,6 +2257,93 @@ export class SpriteScene extends Scene {
         }
     }
 
+        // Save current sprite sheet image and metadata into the Saver instance.
+        // name (optional): name/key to use for storage; defaults to current sprite name.
+        doSave(name) {
+            try {
+                if (!this.saver) return false;
+                const sprite = this.currentSprite || (this.scene && this.scene.currentSprite) || null;
+                const keyName = name || (sprite && sprite.name) || 'spritesheet';
+
+                // Ensure packed sheet is up-to-date
+                try { if (sprite && typeof sprite._rebuildSheetCanvas === 'function') sprite._rebuildSheetCanvas(); } catch (e) {}
+
+                const sheetCanvas = sprite && (sprite.sheet || sprite._sheet || null);
+                if (!sheetCanvas || !sheetCanvas.toDataURL) {
+                    // Nothing to save
+                    return false;
+                }
+
+                // Convert packed canvas to dataURL and save
+                let dataUrl = null;
+                try { dataUrl = sheetCanvas.toDataURL('image/png'); } catch (e) { try { dataUrl = sheetCanvas.toDataURL(); } catch (ee) { dataUrl = null; } }
+                if (dataUrl && typeof this.saver.setImage === 'function') {
+                    try { this.saver.setImage('sprites/' + keyName + '/packed', dataUrl); } catch (e) { /* ignore save errors */ }
+                }
+
+                // Save each frame individually (animation -> frame index). This allows restoring
+                // editable frame canvases on reload. We store under `sprites/<name>/frames/<anim>/<idx>`.
+                try {
+                    if (sprite && sprite._frames && typeof sprite._frames.entries === 'function') {
+                        for (const [anim, arr] of sprite._frames.entries()) {
+                            if (!Array.isArray(arr)) continue;
+                            for (let i = 0; i < arr.length; i++) {
+                                try {
+                                    const entry = arr[i];
+                                    let frameDataUrl = null;
+                                    if (!entry) continue;
+                                    if (entry.__lazy === true) {
+                                        // attempt to draw from descriptor.src if available
+                                        if (entry.src) {
+                                            try {
+                                                const c = document.createElement('canvas');
+                                                c.width = entry.w || sprite.slicePx || 1;
+                                                c.height = entry.h || sprite.slicePx || 1;
+                                                const cx = c.getContext('2d');
+                                                try { cx.imageSmoothingEnabled = false; } catch (e) {}
+                                                cx.clearRect(0,0,c.width,c.height);
+                                                cx.drawImage(entry.src, entry.sx || 0, entry.sy || 0, entry.w || sprite.slicePx, entry.h || sprite.slicePx, 0, 0, c.width, c.height);
+                                                frameDataUrl = c.toDataURL('image/png');
+                                            } catch (e) { frameDataUrl = null; }
+                                        }
+                                    } else if (entry instanceof HTMLCanvasElement) {
+                                        try { frameDataUrl = entry.toDataURL('image/png'); } catch (e) { frameDataUrl = null; }
+                                    }
+                                    if (frameDataUrl && typeof this.saver.setImage === 'function') {
+                                        try { this.saver.setImage('sprites/' + keyName + '/frames/' + encodeURIComponent(anim) + '/' + i, frameDataUrl); } catch (e) {}
+                                    }
+                                } catch (e) { /* ignore per-frame save errors */ }
+                            }
+                        }
+                    }
+                } catch (e) { /* ignore frames save errors */ }
+
+                // Minimal metadata: slice size, animations and frame counts, groups
+                const meta = { name: keyName, slicePx: (sprite && sprite.slicePx) || null, animations: {} };
+                try {
+                    if (sprite && sprite._frames && typeof sprite._frames.entries === 'function') {
+                        for (const [anim, arr] of sprite._frames.entries()) {
+                            meta.animations[anim] = Array.isArray(arr) ? arr.length : (arr && arr.length) || 0;
+                        }
+                    }
+                } catch (e) {}
+                try {
+                    if (sprite && sprite._frameGroups && typeof sprite._frameGroups.entries === 'function') {
+                        meta.frameGroups = {};
+                        for (const [anim, groups] of sprite._frameGroups.entries()) {
+                            meta.frameGroups[anim] = groups;
+                        }
+                    }
+                } catch (e) {}
+
+                try { this.saver.set('sprites_meta/' + keyName, meta); } catch (e) {}
+                return true;
+            } catch (e) {
+                console.warn('doSave failed', e);
+                return false;
+            }
+        }
+
     // Copy the pixels inside this.selectionRegion into this.clipboard.
     doCopy() {
         try {
@@ -2186,6 +2612,211 @@ export class SpriteScene extends Scene {
         } catch (e) {
             console.warn('doPaste failed', e);
         }
+    }
+
+    // Schedule sending buffered ops (throttled)
+    _scheduleSend() {
+        try {
+            if (this._sendScheduledId) return;
+            this._sendScheduledId = setTimeout(() => {
+                try { this.sendState(); } catch (e) { /* ignore */ }
+                try { clearTimeout(this._sendScheduledId); } catch (e) {}
+                this._sendScheduledId = null;
+            }, this._sendIntervalMs || 120);
+        } catch (e) { /* ignore */ }
+    }
+
+    // Override Scene.sendState: send buffered pixel edit ops to server using per-op keys
+    sendState() {
+        try {
+            if (!this.server || !this._opBuffer || this._opBuffer.length === 0) return;
+            if (!this.server.sendDiff) {
+                // fallback to parent behaviour
+                if (super.sendState) return super.sendState();
+                return;
+            }
+
+            // Build an update object mapping nested keys to op payloads so firebase update() creates distinct children
+            const diff = {};
+            // limit how many ops we send in one batch to avoid huge updates
+            const batch = this._opBuffer.splice(0, 256);
+            for (const op of batch) {
+                const id = (op.time || Date.now()) + '_' + Math.random().toString(36).slice(2,6);
+                // store under edits/<id>
+                diff['edits/' + id] = op;
+            }
+
+            if (Object.keys(diff).length > 0) {
+                try { this.server.sendDiff(diff); } catch (e) { console.warn('sendState sendDiff failed', e); }
+            }
+        } catch (e) { console.warn('sendState failed', e); }
+    }
+
+    // Apply remote state sent by other clients. Accepts the full remote state blob.
+    applyRemoteState(state) {
+        try {
+            if (!state) return;
+            // state may contain an `edits` object (map of id -> op)
+            const edits = state.edits || null;
+            // also handle structural metadata under state.meta.animations
+            const meta = (state && state.meta && state.meta.animations) ? state.meta.animations : null;
+            const sheet = this.currentSprite;
+            if (!sheet && !meta) return;
+
+            let applied = 0;
+
+            // First apply metadata structural changes (create/remove frames) while suppressing outgoing echoes
+            if (meta && typeof meta === 'object') {
+                try {
+                    this._suppressOutgoing = true;
+                    for (const anim of Object.keys(meta)) {
+                        try {
+                            const targetCount = Number(meta[anim]) || 0;
+                            // ensure frames array exists
+                            if (!this.currentSprite._frames.has(anim)) this.currentSprite._frames.set(anim, []);
+                            const arr = this.currentSprite._frames.get(anim) || [];
+                            // compute logical count
+                            let logical = 0;
+                            for (let i = 0; i < arr.length; i++) { const e = arr[i]; if (!e) continue; if (e.__groupStart||e.__groupEnd) continue; logical++; }
+                            if (logical < targetCount) {
+                                // add frames
+                                for (let k = 0; k < (targetCount - logical); k++) {
+                                    try { this.currentSprite.insertFrame(anim); } catch(e){}
+                                }
+                            } else if (logical > targetCount) {
+                                // remove frames
+                                for (let k = 0; k < (logical - targetCount); k++) {
+                                    try { this.currentSprite.popFrame(anim); } catch(e){}
+                                }
+                            }
+                        } catch(e){}
+                    }
+                } finally { this._suppressOutgoing = false; }
+                // rebuild packed sheet to reflect structural changes
+                try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch(e){}
+            }
+
+            // handle incoming chat/messages under state.messages
+            const msgs = state.messages || null;
+            if (msgs && typeof msgs === 'object') {
+                for (const mid of Object.keys(msgs)) {
+                    try {
+                        if (this._seenMsgIds && this._seenMsgIds.has(mid)) continue;
+                        const m = msgs[mid];
+                        if (!m) { if (this._seenMsgIds) this._seenMsgIds.add(mid); continue; }
+                        const from = m.from || m.client || 'anon';
+                        const text = m.text || '';
+                        try { console.log('[msg] ' + from + ': ' + text); } catch (e) {}
+                        if (this._seenMsgIds) this._seenMsgIds.add(mid);
+                    } catch (e) { continue; }
+                }
+            }
+            if (!edits || typeof edits !== 'object') return;
+            for (const id of Object.keys(edits)) {
+                if (this._seenOpIds && this._seenOpIds.has(id)) continue;
+                const op = edits[id];
+                // record seen remote edit time so we can prune old entries later
+                try { if (this._remoteEdits) this._remoteEdits.set(id, (op && op.time) ? Number(op.time) : Date.now()); } catch (e) {}
+                if (!op || op.client === this.clientId) {
+                    // ignore self-originated edits
+                    if (this._seenOpIds) this._seenOpIds.add(id);
+                    continue;
+                }
+                try {
+                    if (op.type === 'draw' && Array.isArray(op.pixels)) {
+                        // Apply pixels respecting last-modified times to reduce flicker.
+                        const toApply = [];
+                        for (const p of op.pixels) {
+                            try {
+                                const px = Number(p.x), py = Number(p.y);
+                                const last = this._getPixelModified(op.anim, op.frame, px, py) || 0;
+                                // If local has a newer modification, skip applying older remote op
+                                if (last && last > (op.time || 0)) continue;
+                                toApply.push({ x: px, y: py, color: p.color || '#000000' });
+                            } catch (e) { continue; }
+                        }
+                        if (toApply.length) {
+                            if (typeof sheet.drawPixels === 'function') {
+                                try { this._suppressOutgoing = true; sheet.drawPixels(op.anim, op.frame, toApply); } catch (e) {
+                                    for (const px of toApply) { try { sheet.setPixel(op.anim, op.frame, px.x, px.y, px.color, 'replace'); } catch (er) {} }
+                                } finally { this._suppressOutgoing = false; }
+                            } else {
+                                try { this._suppressOutgoing = true; for (const px of toApply) { try { sheet.setPixel(op.anim, op.frame, px.x, px.y, px.color, 'replace'); } catch (er) {} } } finally { this._suppressOutgoing = false; }
+                            }
+                            // mark applied pixels as modified at remote op time
+                            try { const t = op.time || Date.now(); for (const a of toApply) { try { this._markPixelModified(op.anim, op.frame, a.x, a.y, t); } catch(e){} } } catch(e){}
+                            applied++;
+                        }
+                    }
+                } catch (e) { /* ignore per-op apply errors */ }
+                if (this._seenOpIds) this._seenOpIds.add(id);
+            }
+            if (applied > 0) {
+                try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
+            }
+        } catch (e) { console.warn('applyRemoteState failed', e); }
+    }
+
+    // Helper: mark a pixel as modified locally at given timestamp (ms)
+    _markPixelModified(anim, frameIdx, x, y, timestamp) {
+        try {
+            if (!this._lastModified) this._lastModified = new Map();
+            if (!this.currentSprite) return;
+            const size = this.currentSprite.slicePx || 0;
+            if (!size) return;
+            if (!this._lastModified.has(anim)) this._lastModified.set(anim, new Map());
+            const frameMap = this._lastModified.get(anim);
+            if (!frameMap.has(frameIdx)) {
+                frameMap.set(frameIdx, new Uint32Array(size * size));
+            }
+            const arr = frameMap.get(frameIdx);
+            if (!arr) return;
+            const idx = (y * size) + x;
+            if (idx < 0 || idx >= arr.length) return;
+            arr[idx] = Math.max(arr[idx] || 0, Math.floor(timestamp || Date.now()));
+        } catch (e) { /* ignore */ }
+    }
+
+    // Helper: get last-modified timestamp for a pixel
+    _getPixelModified(anim, frameIdx, x, y) {
+        try {
+            if (!this._lastModified) return 0;
+            const frameMap = this._lastModified.get(anim);
+            if (!frameMap) return 0;
+            const arr = frameMap.get(frameIdx);
+            if (!arr) return 0;
+            const size = this.currentSprite.slicePx || 0;
+            const idx = (y * size) + x;
+            if (idx < 0 || idx >= arr.length) return 0;
+            return arr[idx] || 0;
+        } catch (e) { return 0; }
+    }
+
+    // Periodically prune old remote edits from server state to avoid unbounded growth.
+    // Deletes `edits/<id>` entries older than `_pruneThresholdMs` (default 30000ms).
+    _pruneOldEdits() {
+        try {
+            if (!this.server || !this.server.sendDiff) return;
+            if (!this._remoteEdits || this._remoteEdits.size === 0) return;
+            const now = Date.now();
+            const cutoff = now - (this._pruneThresholdMs || 30000);
+            const diff = {};
+            const removed = [];
+            for (const [id, t] of this._remoteEdits.entries()) {
+                try {
+                    const ts = Number(t) || 0;
+                    if (ts && ts < cutoff) {
+                        diff['edits/' + id] = null;
+                        removed.push(id);
+                    }
+                    if (Object.keys(diff).length >= 128) break; // avoid huge updates
+                } catch (e) { continue; }
+            }
+            if (Object.keys(diff).length > 0) {
+                try { this.server.sendDiff(diff); } catch (e) { console.warn('pruneOldEdits sendDiff failed', e); }
+                for (const id of removed) try { this._remoteEdits.delete(id); } catch (e) {}
+            }
+        } catch (e) { console.warn('pruneOldEdits failed', e); }
     }
 
     // Rotate the stored clipboard 90 degrees clockwise.

@@ -136,6 +136,7 @@ class Game {
     async init() {
         await this.loadScene('spriteScene');
         this.switchScene('spriteScene');
+        this.createMultiplayerUI()
         // Only create the multiplayer UI if the server (firebase) was initialized.
 
         // De-comment to enable server-side features.
@@ -220,7 +221,7 @@ class Game {
         // Position relative to a 1920x1080 logical canvas: bottom-right origin
         const panelPos = new Vector(1920 - margin - panelSize.x, 1080 - margin - panelSize.y);
         const panel = createHDiv(
-            null,
+            'multiplayer-menu',
             panelPos,
             panelSize,
             '#00000033',
@@ -228,7 +229,7 @@ class Game {
                 borderRadius: '8px',
                 border: '1px solid #FFFFFF44',
                 backdropFilter: 'blur(4px)',
-                display: 'flex',
+                display: 'none',
                 flexDirection: 'column',
                 justifyContent: 'space-around',
                 alignItems: 'center',
@@ -267,6 +268,8 @@ class Game {
             console.log('Room created:', roomId);
             this.enableMultiplayer.emit('p1');
 
+            try { if (this.server && typeof this.server.unpause === 'function') this.server.unpause(); } catch (e) {}
+
             // Attach signal handler for this scene instance
             this.server.on('state', (state) => {
                 this.remoteStateSignal.emit(state,'p1'); 
@@ -287,6 +290,8 @@ class Game {
             console.log('Joined room:', roomId);
             this.enableMultiplayer.emit('p2');
 
+            try { if (this.server && typeof this.server.unpause === 'function') this.server.unpause(); } catch (e) {}
+
             const snapshot = await this.server.fetch('state');
             if (snapshot) this.remoteStateSignal.emit(snapshot);
 
@@ -299,13 +304,18 @@ class Game {
 
         this.uiElements = { panel, label, input, createBtn, joinBtn, statusLabel };
 
+        // If multiplayer UI is hidden by default, pause server activity to save resources
+        try {
+            if (this.server && typeof this.server.pause === 'function') this.server.pause();
+        } catch (e) {}
+
         // Start coordinated sweeper attempts periodically (every 30s).
         // Each attempt will try to claim a stale room and perform required steps (5 steps of 5s each by default).
         try {
             if (this._coordinatedSweepInterval) clearInterval(this._coordinatedSweepInterval);
             this._coordinatedSweepInterval = setInterval(() => {
                 // Indicate we're attempting a coordinated sweep (even if no candidate is found)
-                console.log('[Script] coordinated sweeper tick - attempting sweep');
+                //console.log('[Script] coordinated sweeper tick - attempting sweep');
                 // run the coordinated sweep in background; using test params: requiredCount=5, stepMs=5000
                 this.server.coordinatedSweepAttempt({ maxAgeMs: 10 * 1000, requiredCount: 5, stepMs: 5000 })
                     .then(removed => {

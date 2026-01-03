@@ -49,6 +49,40 @@ export default class Saver {
         if (autoSave) this.save();
     }
 
+    // Convenience: store image data (dataURL string) at a path. Accepts either
+    // a dataURL string or a canvas element which will be converted using toDataURL.
+    setImage(path, canvasOrDataUrl, autoSave = true) {
+        try {
+            let dataUrl = null;
+            if (!canvasOrDataUrl) return false;
+            if (typeof canvasOrDataUrl === 'string') {
+                dataUrl = canvasOrDataUrl;
+            } else if (canvasOrDataUrl instanceof HTMLCanvasElement && typeof canvasOrDataUrl.toDataURL === 'function') {
+                dataUrl = canvasOrDataUrl.toDataURL('image/png');
+            } else if (canvasOrDataUrl && typeof canvasOrDataUrl.toDataURL === 'function') {
+                dataUrl = canvasOrDataUrl.toDataURL('image/png');
+            } else {
+                console.warn('Saver.setImage: unsupported input for image conversion');
+                return false;
+            }
+            this.set(path, dataUrl, autoSave);
+            return true;
+        } catch (e) {
+            console.error('Saver.setImage failed', e);
+            return false;
+        }
+    }
+
+    // Convenience: retrieve image dataURL saved at path (or null if missing)
+    getImage(path, defaultValue = null) {
+        try {
+            const v = this.get(path, defaultValue);
+            return v === undefined ? defaultValue : v;
+        } catch (e) {
+            return defaultValue;
+        }
+    }
+
     // Get value using path
     get(path, defaultValue = null) {
         const res = this._getPathObj(path, false);

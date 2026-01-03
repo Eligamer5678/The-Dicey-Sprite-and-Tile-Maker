@@ -85,8 +85,8 @@ class Debug {
 
         // Keyword signals map
         this.signals = new Map();
-    // Generic flags map (used by other systems to toggle quick behaviors)
-    this.flags = new Map();
+        // Generic flags map (used by other systems to toggle quick behaviors)
+        this.flags = new Map();
 
         // Ensure wheel events on the input are handled (whether the input pre-existed or was just created).
         this.logs = [];
@@ -420,7 +420,7 @@ class Debug {
             this.logs.unshift(entry);
         }
         // Keep up to a reasonable cap so older logs can still be scrolled through.
-        const MAX_LOGS = 500;
+        const MAX_LOGS = 50;
         if (this.logs.length > MAX_LOGS) {
             // Remove oldest entries so length == MAX_LOGS
             this.logs.splice(0, this.logs.length - MAX_LOGS);
