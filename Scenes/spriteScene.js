@@ -246,6 +246,15 @@ export class SpriteScene extends Scene {
             try {
                 this._pruneIntervalId = setInterval(() => { try { this._pruneOldEdits(); } catch (e) {} }, this._pruneIntervalMs || 10000);
             } catch (e) {}
+            // cursor presence state
+            try {
+                this._cursorSendIntervalMs = 100; // send at most every 100ms
+                this._cursorThrottleId = null;
+                this._lastCursorPos = null;
+                this._remoteCursors = new Map(); // clientId -> { x,y,time,client,name }
+                this._cursorTTLms = 5000; // remove cursors older than 5s
+                this._cursorCleanupId = setInterval(() => { try { this._cleanupCursors(); } catch (e) {} }, 2000);
+            } catch (e) {}
         } catch (e) { console.warn('multiplayer hooks setup failed', e); }
         
         
@@ -820,6 +829,11 @@ export class SpriteScene extends Scene {
         try { if (this._autosaveIntervalId) { try { clearInterval(this._autosaveIntervalId); } catch (e) {} this._autosaveIntervalId = null; } } catch (e) {}
         // clear any pending multiplayer send timer
         try { if (this._sendScheduledId) { try { clearTimeout(this._sendScheduledId); } catch (e) {} this._sendScheduledId = null; } } catch (e) {}
+        // clear cursor send/cleanup timers
+        try { if (this._cursorThrottleId) { try { clearTimeout(this._cursorThrottleId); } catch (e) {} this._cursorThrottleId = null; } } catch (e) {}
+        try { if (this._cursorCleanupId) { try { clearInterval(this._cursorCleanupId); } catch (e) {} this._cursorCleanupId = null; } } catch (e) {}
+        // remove our cursor entry from server state if possible
+        try { if (this.server && typeof this.server.sendDiff === 'function') { const d = {}; d['cursors/' + this.clientId] = null; try { this.server.sendDiff(d); } catch (e) {} } } catch (e) {}
         // clear pruning interval if present
         try { if (this._pruneIntervalId) { try { clearInterval(this._pruneIntervalId); } catch (e) {} this._pruneIntervalId = null; } } catch (e) {}
         // mark not ready so switching back will re-run onReady
@@ -1219,6 +1233,20 @@ export class SpriteScene extends Scene {
                 // tools (pen) operate during ticks
                 this.selectionTool && this.selectionTool();
                 this.penTool && this.penTool();
+            // Throttle cursor sends when mouse moves
+            try {
+                const mp = (this.mouse && this.mouse.pos) ? this.mouse.pos : null;
+                if (mp) {
+                    const last = this._lastCursorPos || null;
+                    const now = Date.now();
+                    const moved = !last || Math.abs(mp.x - last.x) > 2 || Math.abs(mp.y - last.y) > 2;
+                    const aged = !last || ((now - (last.time || 0)) > (this._cursorSendIntervalMs || 100));
+                    if (moved || aged) {
+                        this._lastCursorPos = { x: mp.x, y: mp.y, time: now };
+                        try { this._scheduleCursorSend(); } catch (e) {}
+                    }
+                }
+            } catch (e) {}
         } catch (e) {
             console.warn('sceneTick failed', e);
         }
@@ -2711,6 +2739,23 @@ export class SpriteScene extends Scene {
                     } catch (e) { continue; }
                 }
             }
+            // handle incoming cursors under state.cursors
+            try {
+                const curs = state.cursors || null;
+                if (curs && typeof curs === 'object') {
+                    for (const cid of Object.keys(curs)) {
+                        try {
+                            const c = curs[cid];
+                            if (!c) { try { this._remoteCursors && this._remoteCursors.delete(cid); } catch(e){}; continue; }
+                            // skip own cursor (we already send our own)
+                            if (cid === this.clientId) continue;
+                            const entry = { x: Number(c.x || 0), y: Number(c.y || 0), time: Number(c.time || Date.now()), client: cid };
+                            if (c.name) entry.name = c.name;
+                            try { this._remoteCursors && this._remoteCursors.set(cid, entry); } catch(e){}
+                        } catch (e) { continue; }
+                    }
+                }
+            } catch (e) {}
             if (!edits || typeof edits !== 'object') return;
             for (const id of Object.keys(edits)) {
                 if (this._seenOpIds && this._seenOpIds.has(id)) continue;
@@ -2817,6 +2862,47 @@ export class SpriteScene extends Scene {
                 for (const id of removed) try { this._remoteEdits.delete(id); } catch (e) {}
             }
         } catch (e) { console.warn('pruneOldEdits failed', e); }
+    }
+
+    // Schedule a throttled cursor send
+    _scheduleCursorSend() {
+        try {
+            if (this._cursorThrottleId) return;
+            this._cursorThrottleId = setTimeout(() => {
+                try { this._sendCursor(); } catch (e) {}
+                try { clearTimeout(this._cursorThrottleId); } catch(e) {}
+                this._cursorThrottleId = null;
+            }, this._cursorSendIntervalMs || 100);
+        } catch (e) {}
+    }
+
+    // Send current cursor position to server under cursors/<clientId>
+    _sendCursor() {
+        try {
+            if (!this.server || !this.server.sendDiff) return;
+            if (!this.mouse || !this.mouse.pos) return;
+            const pos = this.mouse.pos;
+            const payload = { x: Number(pos.x || 0), y: Number(pos.y || 0), time: Date.now(), client: this.clientId };
+            if (this.playerName) payload.name = this.playerName;
+            const diff = {};
+            diff['cursors/' + this.clientId] = payload;
+            try { this.server.sendDiff(diff); } catch (e) {}
+        } catch (e) { /* ignore */ }
+    }
+
+    // Remove stale remote cursors from local map
+    _cleanupCursors() {
+        try {
+            if (!this._remoteCursors) return;
+            const now = Date.now();
+            const ttl = this._cursorTTLms || 5000;
+            for (const [id, entry] of Array.from(this._remoteCursors.entries())) {
+                try {
+                    const t = Number(entry.time) || 0;
+                    if (t && (now - t) > ttl) this._remoteCursors.delete(id);
+                } catch (e) { continue; }
+            }
+        } catch (e) {}
     }
 
     // Rotate the stored clipboard 90 degrees clockwise.
@@ -3214,6 +3300,29 @@ export class SpriteScene extends Scene {
         this.UIDraw.useCtx('UI');
         this.UIDraw.clear()
         this.FrameSelect.draw()
+        // Draw remote cursors from other clients
+        try {
+            if (this._remoteCursors && this._remoteCursors.size > 0) {
+                const colors = ['#FF5555FF','#55FF55FF','#5555FFFF','#FFFF55FF','#FF55FFFF','#55FFFFFF','#FFA500FF','#FFFFFF88'];
+                for (const [cid, entry] of this._remoteCursors.entries()) {
+                    try {
+                        if (!entry) continue;
+                        if (cid === this.clientId) continue;
+                        const age = Date.now() - (Number(entry.time) || 0);
+                        if (age > (this._cursorTTLms || 5000)) { this._remoteCursors.delete(cid); continue; }
+                        const hash = (cid || '').split('').reduce((s,c)=>s + c.charCodeAt(0),0) || 0;
+                        const col = colors[hash % colors.length] || '#FFFFFF88';
+                        const pos = new Vector(Number(entry.x || 0), Number(entry.y || 0));
+                        // small 5px diameter circle (radius 2.5)
+                        try { this.UIDraw.circle(pos, 2.5, col, true); } catch (e) { /* fallback ignore */ }
+                        // optional name label a little offset to the right
+                        if (entry.name) {
+                            try { this.UIDraw.text(entry.name, new Vector(pos.x + 6, pos.y + 2), '#FFFFFFFF', 0, 12, { align: 'left', baseline: 'middle', font: 'monospace' }); } catch (e) {}
+                        }
+                    } catch (e) { continue; }
+                }
+            }
+        } catch (e) {}
         // Draw a small bottom-right label showing the current adjust channel
         try {
             const uctx = this.UIDraw && this.UIDraw.ctx;
