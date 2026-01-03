@@ -16,6 +16,10 @@ export class SpriteScene extends Scene {
     }
 
     onReady() {
+        // Whether shape tools (line/box) should treat selected points as a protective mask.
+        // Default `false` because shapes often use selected points as an origin.
+        this.maskShapesWithSelection = false;
+
         // quick canvas clear 
         const worldLayers = ['bg', 'base', 'overlay'];
         for (const ln of worldLayers) {
@@ -719,6 +723,36 @@ export class SpriteScene extends Scene {
                 if (this.keys.released('7')) this.adjustChannel = 's';
                 if (this.keys.released('8')) this.adjustChannel = 'v';
                 if (this.keys.released('9')) this.adjustChannel = 'a';
+                // Quick select: press '5' to emit the debug 'select' signal using the current pen color.
+                // Hold Shift while pressing '5' to use a lowered buffer (0.5).
+                if (this.keys.comboPressed(['s','Alt'])) {
+                    console.log('emmiting')
+                    window.Debug.emit('drawSelected');
+                } else if ((this.keys.pressed('s')||this.keys.pressed('S')) && !this.keys.held('Alt')) {
+                    const col = Color.convertColor(this.penColor || '#000000');
+                    const hex = col.toHex();
+                    let buffer = 1;
+                    // If Shift is held, prompt the user for a buffer amount (default '1')
+                    if (this.keys.held('Shift')) {
+                        this.keys.update(tickDelta)
+                        console.log('prompting')
+                        try {
+                            const input = window.prompt('Buffer amount (default 1)', '1');
+                            if (input !== null) {
+                                const parsed = parseFloat(String(input).trim());
+                                if (!Number.isNaN(parsed) && isFinite(parsed)) buffer = parsed;
+                            }
+                        } catch (e) {
+                            // ignore prompt errors and fall back to default
+                        }
+                    }
+                    if (window.Debug && typeof window.Debug.emit === 'function') {
+                        window.Debug.emit('select', hex, buffer);
+                    } else if (window.Debug && typeof window.Debug.createSignal === 'function') {
+                        const sig = window.Debug.signals && window.Debug.signals.get && window.Debug.signals.get('select');
+                        if (typeof sig === 'function') sig(hex, buffer);
+                    }
+                }
             }
         } catch (e) { /* ignore */ }
         if (this.keys.released('t')){
@@ -878,7 +912,17 @@ export class SpriteScene extends Scene {
             if (this.mouse.held('left')) { // draw an NxN square centered on cursor (top-left bias for even sizes)
                 const sx = pos.x - half;
                 const sy = pos.y - half;
-                if (typeof sheet.fillRect === 'function') {
+                // If explicit selection points exist, respect them as a mask and write per-pixel skipping masked pixels.
+                if (this.selectionPoints && this.selectionPoints.length > 0) {
+                    for (let yy = 0; yy < side; yy++) {
+                        for (let xx = 0; xx < side; xx++) {
+                            const px = sx + xx;
+                            const py = sy + yy;
+                            if (this.isPixelMasked(px, py, (typeof pos.areaIndex === 'number') ? pos.areaIndex : null)) continue;
+                            try { if (typeof sheet.setPixel === 'function') sheet.setPixel(targetAnim, targetFrame, px, py, color, 'replace'); else if (typeof sheet.modifyFrame === 'function') sheet.modifyFrame(targetAnim, targetFrame, { x: px, y: py, color, blendType: 'replace' }); } catch (e) {}
+                        }
+                    }
+                } else if (typeof sheet.fillRect === 'function') {
                     sheet.fillRect(targetAnim, targetFrame, sx, sy, side, side, color, 'replace');
                 } else {
                     for (let yy = 0; yy < side; yy++) {
@@ -896,7 +940,16 @@ export class SpriteScene extends Scene {
                 const eraseColor = '#00000000';
                 const sx = pos.x - half;
                 const sy = pos.y - half;
-                if (typeof sheet.fillRect === 'function') {
+                if (this.selectionPoints && this.selectionPoints.length > 0) {
+                    for (let yy = 0; yy < side; yy++) {
+                        for (let xx = 0; xx < side; xx++) {
+                            const px = sx + xx;
+                            const py = sy + yy;
+                            if (this.isPixelMasked(px, py, (typeof pos.areaIndex === 'number') ? pos.areaIndex : null)) continue;
+                            try { if (typeof sheet.setPixel === 'function') sheet.setPixel(targetAnim, targetFrame, px, py, eraseColor, 'replace'); else if (typeof sheet.modifyFrame === 'function') sheet.modifyFrame(targetAnim, targetFrame, { x: px, y: py, color: eraseColor, blendType: 'replace' }); } catch (e) {}
+                        }
+                    }
+                } else if (typeof sheet.fillRect === 'function') {
                     sheet.fillRect(targetAnim, targetFrame, sx, sy, side, side, eraseColor, 'replace');
                 } else {
                     for (let yy = 0; yy < side; yy++) {
@@ -935,7 +988,8 @@ export class SpriteScene extends Scene {
             }
 
             // Ctrl + Left = eyedropper: pick color from the current frame under the mouse
-            if (this.keys.held('Control')) {
+            let ctrlHeld = this.keys.held('Control',true)
+            if (ctrlHeld) {
                 try {
                     // initialize stored original color when Control first held
                     if (this._eyedropperOriginalColor === undefined) {
@@ -965,8 +1019,8 @@ export class SpriteScene extends Scene {
                     if (this._eyedropperCancelled) {
                         // noop while cancelled
                     } else {
-                        const pos = this.getPos(this.mouse.pos);
-                        if (pos && pos.inside && this.currentSprite) {
+                        const pos = this.getPos(this.mouse.prevPos);
+                        if (pos && pos.inside && this.currentSprite && (ctrlHeld<0.05 || ctrlHeld > 0.3)) {
                             const sheet = this.currentSprite;
                             // Prefer the frame bound to the area under the mouse. Fall back to selected frame.
                             let anim = this.selectedAnimation;
@@ -1121,6 +1175,71 @@ export class SpriteScene extends Scene {
                         this.doPaste(this.mouse && this.mouse.pos);
                         // mark that a paste just occurred so we can avoid key-order races
                         this._justPasted = true;
+                    } else {
+                        // Try to read transferable content from system clipboard (async).
+                        (async () => {
+                            try {
+                                // Prefer reading text (data URL or JSON) since it's most widely supported.
+                                if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
+                                    const txt = await navigator.clipboard.readText();
+                                    if (txt) {
+                                        // If it's an image data URL, convert into image data for paste
+                                        if (typeof txt === 'string' && txt.startsWith('data:image')) {
+                                            try {
+                                                const img = new Image();
+                                                img.src = txt;
+                                                await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+                                                const c = document.createElement('canvas');
+                                                c.width = img.width; c.height = img.height;
+                                                const cx = c.getContext('2d');
+                                                cx.clearRect(0,0,c.width,c.height);
+                                                cx.drawImage(img,0,0);
+                                                const imgd = cx.getImageData(0,0,c.width,c.height);
+                                                // store as image clipboard so doPaste can use it
+                                                this.clipboard = { type: 'image', w: c.width, h: c.height, data: imgd.data, originOffset: { ox: 0, oy: 0 } };
+                                                this.doPaste(this.mouse && this.mouse.pos);
+                                                this._justPasted = true;
+                                            } catch (e) {
+                                                // fall through
+                                            }
+                                        } else {
+                                            // Try to parse JSON representing our clipboard structure
+                                            try {
+                                                const obj = JSON.parse(txt);
+                                                if (obj && (obj.type === 'points' || obj.type === 'image')) {
+                                                    // For image represented as dataURL, convert similarly
+                                                    if (obj.type === 'image' && obj.data && typeof obj.data === 'string' && obj.data.startsWith('data:image')) {
+                                                        try {
+                                                            const img = new Image();
+                                                            img.src = obj.data;
+                                                            await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+                                                            const c = document.createElement('canvas');
+                                                            c.width = img.width; c.height = img.height;
+                                                            const cx = c.getContext('2d');
+                                                            cx.clearRect(0,0,c.width,c.height);
+                                                            cx.drawImage(img,0,0);
+                                                            const imgd = cx.getImageData(0,0,c.width,c.height);
+                                                            this.clipboard = { type: 'image', w: c.width, h: c.height, data: imgd.data, originOffset: obj.originOffset || { ox: 0, oy: 0 } };
+                                                            this.doPaste(this.mouse && this.mouse.pos);
+                                                            this._justPasted = true;
+                                                        } catch (e) { /* ignore */ }
+                                                    } else {
+                                                        // Points or already-structured image payload (dense numeric array) may be large; trust JSON
+                                                        this.clipboard = obj;
+                                                        this.doPaste(this.mouse && this.mouse.pos);
+                                                        this._justPasted = true;
+                                                    }
+                                                }
+                                            } catch (e) {
+                                                // nothing usable on clipboard
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch (e) {
+                                // ignore clipboard read failures (permissions, insecure context)
+                            }
+                        })();
                     }
                     this.clipboardPreview = false;
                     this._clipboardPreviewDragging = null;
@@ -1616,6 +1735,24 @@ export class SpriteScene extends Scene {
         return pixels;
     }
 
+    // Check whether a pixel at (x,y) should be masked by explicit selectionPoints.
+    // If selectionPoints include an entry with matching x,y and matching areaIndex (or null), this returns true.
+    isPixelMasked(x, y, targetAreaIndex = null) {
+        try {
+            if (!this.selectionPoints || this.selectionPoints.length === 0) return false;
+            for (const p of this.selectionPoints) {
+                if (!p) continue;
+                if (p.x === x && p.y === y) {
+                    // p.areaIndex may be undefined/null or a number. Treat undefined as null.
+                    const pa = (typeof p.areaIndex === 'number') ? p.areaIndex : null;
+                    const ta = (typeof targetAreaIndex === 'number') ? targetAreaIndex : null;
+                    if (pa === ta) return true;
+                }
+            }
+        } catch (e) {}
+        return false;
+    }
+
     // Generate list of pixel coordinates for a box between start and end.
     // If filled is true, returns all pixels inside the rectangle, otherwise only the border.
     computeBoxPixels(start, end, filled) {
@@ -1686,6 +1823,8 @@ export class SpriteScene extends Scene {
                 // clamp
                 const x = Math.max(0, Math.min((sheet.slicePx || 1) - 1, p.x));
                 const y = Math.max(0, Math.min((sheet.slicePx || 1) - 1, p.y));
+                // respect selectionPoints as a mask for shapes only when enabled
+                if (this.maskShapesWithSelection && this.isPixelMasked(x, y, sourceAreaIndex)) continue;
                 if (typeof sheet.setPixel === 'function') {
                     try { sheet.setPixel(anim, frameIdx, x, y, color, 'replace'); } catch (e) { /* ignore per-pixel errors */ }
                 } else if (typeof sheet.modifyFrame === 'function') {
@@ -1835,6 +1974,27 @@ export class SpriteScene extends Scene {
                 const originY = Math.max(minY, Math.min(maxY, mpos.y));
                 const originOffset = { ox: originX - minX, oy: originY - minY };
                 this.clipboard = { type: 'points', w, h, pixels, originOffset };
+                // Attempt to also place a transferable representation on the system clipboard
+                try {
+                    if (typeof copyToClipboard === 'function') {
+                        // Create a compact image data URL representing the selected points
+                        const c = document.createElement('canvas');
+                        c.width = w; c.height = h;
+                        const cx = c.getContext('2d');
+                        const imgd = cx.createImageData(w, h);
+                        for (const p of pixels) {
+                            const idx = (p.y * w + p.x) * 4;
+                            imgd.data[idx] = p.r || 0;
+                            imgd.data[idx + 1] = p.g || 0;
+                            imgd.data[idx + 2] = p.b || 0;
+                            imgd.data[idx + 3] = p.a || 0;
+                        }
+                        cx.putImageData(imgd, 0, 0);
+                        const dataUrl = c.toDataURL('image/png');
+                        // Copy a JSON wrapper including origin so paste can recover it
+                        try { copyToClipboard(JSON.stringify({ type: 'image', w, h, originOffset, data: dataUrl })); } catch (e) { copyToClipboard(dataUrl); }
+                    }
+                } catch (e) { /* ignore clipboard copy failures */ }
                 return;
             }
 
@@ -1857,6 +2017,22 @@ export class SpriteScene extends Scene {
             const originY = Math.max(minY, Math.min(maxY, mpos.y));
             const originOffset = { ox: originX - minX, oy: originY - minY };
             this.clipboard = { type: 'image', w, h, data: img.data, originOffset };
+            // Attempt to also place a transferable representation on the system clipboard (data URL wrapped in JSON)
+            try {
+                if (typeof copyToClipboard === 'function') {
+                    const c = document.createElement('canvas');
+                    c.width = w; c.height = h;
+                    const cx = c.getContext('2d');
+                    const imageData = cx.createImageData(w, h);
+                    // copy numeric data into ImageData
+                    try { imageData.data.set(img.data); } catch (e) {
+                        for (let i = 0; i < Math.min(imageData.data.length, img.data.length); i++) imageData.data[i] = img.data[i];
+                    }
+                    cx.putImageData(imageData, 0, 0);
+                    const dataUrl = c.toDataURL('image/png');
+                    try { copyToClipboard(JSON.stringify({ type: 'image', w, h, originOffset, data: dataUrl })); } catch (e) { copyToClipboard(dataUrl); }
+                }
+            } catch (e) { /* ignore clipboard copy failures */ }
         } catch (e) {
             console.warn('doCopy failed', e);
         }

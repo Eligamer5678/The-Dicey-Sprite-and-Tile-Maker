@@ -281,7 +281,26 @@ export default class FrameSelect {
             const sheet = this.sprite && this.sprite.sheet ? this.sprite.sheet : null;
             if (!sheet) { alert('No sprite sheet to export'); return; }
             const defaultName = (this.scene && this.scene.currentSprite && this.scene.currentSprite.name) ? this.scene.currentSprite.name : 'spritesheet';
-            const filename = window.prompt('Export filename', defaultName + '.png') || (defaultName + '.png');
+            const filenamePrompt = window.prompt('Export filename', defaultName + '.png');
+            // If the user cancelled the prompt (null), abort export and do not download.
+            if (filenamePrompt === null) return;
+            const filename = filenamePrompt || (defaultName + '.png');
+            // Prompt whether to also download metadata JSON. If confirmed, ask for a metadata filename.
+            let wantMeta = false;
+            let chosenMetaFilename = null;
+            try {
+                const wantMetaConfirm = window.confirm('Also download metadata JSON alongside the PNG?');
+                if (wantMetaConfirm) {
+                    const suggestedMeta = (filename && filename.toLowerCase().endsWith('.png')) ? filename.replace(/\.png$/i, '.json') : (filename + '.json');
+                    const metaPrompt = window.prompt('Metadata filename (Cancel to skip)', suggestedMeta);
+                    if (metaPrompt !== null) {
+                        chosenMetaFilename = metaPrompt || suggestedMeta;
+                        wantMeta = true;
+                    } else {
+                        wantMeta = false;
+                    }
+                }
+            } catch (e) { /* ignore prompt failures */ }
             // toBlob
             // ensure packed sheet is available (may have been deferred for performance)
             try { if (this.sprite && typeof this.sprite.ensurePackedSheet === 'function') this.sprite.ensurePackedSheet(); } catch(e) {}
@@ -384,9 +403,9 @@ export default class FrameSelect {
             const metaObj = buildMetadata();
             const metaStr = JSON.stringify(metaObj, null, 2);
             const metaBlob = new Blob([metaStr], { type: 'application/json' });
-            const metaFilename = (filename && filename.toLowerCase().endsWith('.png')) ? filename.replace(/\.png$/i, '.json') : (filename + '.json');
+            const metaFilename = chosenMetaFilename || ((filename && filename.toLowerCase().endsWith('.png')) ? filename.replace(/\.png$/i, '.json') : (filename + '.json'));
 
-            // Use File System Access API when available to save both PNG and metadata
+            // Use File System Access API when available to save PNG and optionally metadata
             if (window.showSaveFilePicker){
                 try{
                     // Save PNG
@@ -394,14 +413,16 @@ export default class FrameSelect {
                     const writable = await handle.createWritable();
                     await writable.write(blob);
                     await writable.close();
-                    // Attempt to save metadata (user can cancel)
-                    try {
-                        const mhandle = await window.showSaveFilePicker({ suggestedName: metaFilename, types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }] });
-                        const mw = await mhandle.createWritable();
-                        await mw.write(metaBlob);
-                        await mw.close();
-                    } catch (e) {
-                        // ignore metadata save errors/cancel
+                    // Attempt to save metadata (user can cancel) only if requested
+                    if (wantMeta) {
+                        try {
+                            const mhandle = await window.showSaveFilePicker({ suggestedName: metaFilename, types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }] });
+                            const mw = await mhandle.createWritable();
+                            await mw.write(metaBlob);
+                            await mw.close();
+                        } catch (e) {
+                            // ignore metadata save errors/cancel
+                        }
                     }
                     return;
                 } catch (e) {
@@ -419,15 +440,17 @@ export default class FrameSelect {
             a.click();
             setTimeout(()=>{ URL.revokeObjectURL(url); try{ a.remove(); }catch(e){} }, 1500);
 
-            // trigger metadata download as a second file
+            // trigger metadata download as a second file if requested
             try{
-                const murl = URL.createObjectURL(metaBlob);
-                const ma = document.createElement('a');
-                ma.href = murl;
-                ma.download = metaFilename;
-                document.body.appendChild(ma);
-                // small delay to ensure browser registers separate clicks in sequence
-                setTimeout(()=>{ ma.click(); setTimeout(()=>{ URL.revokeObjectURL(murl); try{ ma.remove(); }catch(e){} }, 1500); }, 250);
+                if (wantMeta) {
+                    const murl = URL.createObjectURL(metaBlob);
+                    const ma = document.createElement('a');
+                    ma.href = murl;
+                    ma.download = metaFilename;
+                    document.body.appendChild(ma);
+                    // small delay to ensure browser registers separate clicks in sequence
+                    setTimeout(()=>{ ma.click(); setTimeout(()=>{ URL.revokeObjectURL(murl); try{ ma.remove(); }catch(e){} }, 1500); }, 250);
+                }
             } catch (e) { /* ignore metadata fallback errors */ }
         } catch (e) { console.warn('export failed', e); }
     }
@@ -1091,7 +1114,7 @@ export default class FrameSelect {
             if (framesArr.length > 0 && anim) {
                 // If multiple frames are selected, show a merged preview (composited)
                 const idxs = Array.from(this._multiSelected).filter(i => typeof i === 'number' && i >= 0 && i < framesArr.length).sort((a,b)=>a-b);
-                if (idxs.length >= 2) {
+                if (idxs.length >= 1) {
                     try {
                         const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
                         const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
@@ -1129,27 +1152,80 @@ export default class FrameSelect {
                     if (seqLen === 0) {
                         this.UIDraw.rect(contentPos, contentSize, '#00000000', false, true, 2, '#444444AA');
                     } else {
-                        const seqIndex = Math.max(0, Math.min(this._animIndex, seqLen - 1));
-                        const entry = framesSeq[seqIndex];
-                        if (entry.type === 'frame') {
-                            this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, entry.index);
-                        } else if (entry.type === 'group') {
-                            // draw composited layered preview
+                        // When preview is paused (0 fps) and nothing is multi-selected,
+                        // prefer showing the explicitly selected frame from the scene.
+                        if (this._animFps === 0 && (!this._multiSelected || this._multiSelected.size === 0) && typeof this.scene !== 'undefined' && typeof this.scene.selectedFrame === 'number') {
                             try {
-                                const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
-                                const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
-                                const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
-                                for (const idx of entry.group.indices) {
+                                const sel = this.scene.selectedFrame;
+                                // If selected frame belongs to a layered group, draw the composited group instead
+                                const groupForSel = groups.find(g => Array.isArray(g.indices) && g.indices.indexOf(sel) !== -1 && g.layered);
+                                if (groupForSel) {
                                     try {
-                                        const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
-                                        if (src) tctx.drawImage(src, 0, 0);
-                                    } catch (e) {}
+                                        const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                                        const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
+                                        const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
+                                        for (const idx of (groupForSel.indices || [])) {
+                                            try {
+                                                const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
+                                                if (src) tctx.drawImage(src, 0, 0);
+                                            } catch (e) {}
+                                        }
+                                        this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
+                                    } catch (e) {
+                                        // fallback to drawing the selected frame
+                                        this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, sel);
+                                    }
+                                } else {
+                                    // simple case: draw the selected frame directly
+                                    this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, sel);
                                 }
-                                this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
                             } catch (e) {
-                                // fallback to first frame
-                                const fi = Math.max(0, Math.min(entry.group.indices[0] || 0, framesArr.length - 1));
-                                this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                                // if anything goes wrong, fall back to the normal sequence logic below
+                                const seqIndex = Math.max(0, Math.min(this._animIndex, seqLen - 1));
+                                const entry = framesSeq[seqIndex];
+                                if (entry.type === 'frame') {
+                                    this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, entry.index);
+                                } else if (entry.type === 'group') {
+                                    try {
+                                        const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                                        const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
+                                        const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
+                                        for (const idx of entry.group.indices) {
+                                            try {
+                                                const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
+                                                if (src) tctx.drawImage(src, 0, 0);
+                                            } catch (e) {}
+                                        }
+                                        this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
+                                    } catch (e) {
+                                        const fi = Math.max(0, Math.min(entry.group.indices[0] || 0, framesArr.length - 1));
+                                        this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                                    }
+                                }
+                            }
+                        } else {
+                            const seqIndex = Math.max(0, Math.min(this._animIndex, seqLen - 1));
+                            const entry = framesSeq[seqIndex];
+                            if (entry.type === 'frame') {
+                                this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, entry.index);
+                            } else if (entry.type === 'group') {
+                                // draw composited layered preview
+                                try {
+                                    const px = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                                    const tmp = document.createElement('canvas'); tmp.width = px; tmp.height = px;
+                                    const tctx = tmp.getContext('2d'); tctx.clearRect(0,0,px,px);
+                                    for (const idx of entry.group.indices) {
+                                        try {
+                                            const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
+                                            if (src) tctx.drawImage(src, 0, 0);
+                                        } catch (e) {}
+                                    }
+                                    this.UIDraw.image(tmp, contentPos, contentSize, null, 0, 1, false);
+                                } catch (e) {
+                                    // fallback to first frame
+                                    const fi = Math.max(0, Math.min(entry.group.indices[0] || 0, framesArr.length - 1));
+                                    this.UIDraw.sheet(this.sprite, contentPos, contentSize, anim, fi);
+                                }
                             }
                         }
                     }

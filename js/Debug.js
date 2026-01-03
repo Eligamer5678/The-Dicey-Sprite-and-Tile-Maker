@@ -157,6 +157,28 @@ class Debug {
     }
 
     /**
+     * Emit a registered signal by keyword, invoking its action with any provided arguments.
+     * @param {string} keyword
+     * @param  {...any} args
+     */
+    emit(keyword, ...args) {
+        if (typeof keyword !== 'string') {
+            this.warn('emit expects a string keyword');
+            return;
+        }
+        const key = keyword.toLowerCase();
+        if (!this.signals.has(key)) {
+            this.warn(`emit: no signal registered for '${keyword}'`);
+            return;
+        }
+        try {
+            return this.signals.get(key)(...args);
+        } catch (err) {
+            this.error(`Signal emit error for '${keyword}': ${err}`);
+        }
+    }
+
+    /**
      * Add or set a named flag. Flags are stored case-insensitively.
      * @param {string} name
      * @param {*} value

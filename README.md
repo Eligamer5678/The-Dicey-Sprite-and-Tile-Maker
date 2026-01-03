@@ -29,6 +29,7 @@
 #### Spritesheet maker
 - Click the '+' to add a frame.
 - Color picker in the bottom left.
+- Hold ctrl to select color (or middleclick)
 - Shift click to select, right click/two finger press to cancel selection
 - When one pixel is selected, press b for box, or l for line.
 - When 2 pixels are selected, press b to select that region.
@@ -45,29 +46,30 @@
 - Clicking l will convert the group into a layered frame
 - Click g on a group to ungroup
 - 1-4 keys change brush size
-- h & k to modify color
+- s to select by color (hold shift to adjust buffer amount)
+- alt+s to draw selected
+- h & k to modify color (if nothing selected, modifies draw color)
 - 6-9 keys to select property to modify, 6=hue,7=saturation,8=value,9=alpha
 - j to grab the average color
 - up/down keys to move the frame
-- '/' (or shift + backslash) to duplicate frame
+- '/' to duplicate frame
 - f to fill region
+
+
 - Press the upper left corner to access the console
+
 - *Console commands* (text box on the bottom of the screen), type exactly to use.
 - "clear" - *clears logs*
 - "resize(sliceSize,resizeContent=true)" - *resizes the canvas*
 - "copy(hex)" - *copys pen color*
-- "select(hex,buffer)" - *selects all pixels of this color*
+- "select(hex,buffer)" - *selects all pixels of this color* 
 - "grayscale()" - grayscales the frame
 - "toggleOnion" - toggles onion skinning
 - "layerAlpha" - multi-select layer & onion skin visibility
+- "drawSelected" - draws the selected points
 
 - **Latest update**
-- Holding shift while scrolling will pan horizontally
-- Scrolling will cancel eyedropper (so zooming doesn't eyedrop)
-- Middle click also is eyedropper
-- If nothing is selected, h/k modifies the draw color
-- Added console command: drawSelected()
-- Added Tile mode
+- Added keybinds to commands drawSelected & select
 
 - **Tile mode**
 - Press t to enter

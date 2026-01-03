@@ -10,15 +10,27 @@ export default class Keys { // Key input
             if (e.key === " " || (e.altKey)) {
                 e.preventDefault();
             }
-
+            if (e.key === "/") {
+                e.preventDefault();
+            }
+            if (e.key === "s") {
+                e.preventDefault();
+            }
+            
             if (!this.keys[e.key]?.state) {
                 this.keys[e.key] = { state: true, time: 0 };
                 this.firstFrame[e.key] = true;
             }
         });
-
+        
         window.addEventListener("keyup", e => {
             if ((e.altKey)) {
+                e.preventDefault();
+            }
+            if (e.key === "/") {
+                e.preventDefault();
+            }
+            if (e.key === "s") {
                 e.preventDefault();
             }
             this.keys[e.key] = { state: false, time: 0 };
