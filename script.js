@@ -295,6 +295,16 @@ class Game {
             const snapshot = await this.server.fetch('state');
             if (snapshot) this.remoteStateSignal.emit(snapshot);
 
+            // Request a full snapshot from peers so newcomers receive initial frames/meta.
+            // Use the current scene's clientId when available so the response targets the
+            // correct key (`state/full/<clientId>`). If not available, generate a fallback id.
+            try {
+                const requesterId = (this.currentScene && this.currentScene.clientId) ? this.currentScene.clientId : ('c' + Math.random().toString(36).slice(2,8));
+                const diff = {};
+                diff['requests/' + requesterId] = { time: Date.now(), client: requesterId };
+                try { if (this.server && typeof this.server.sendDiff === 'function') this.server.sendDiff(diff); } catch(e){}
+            } catch (e) { /* non-fatal */ }
+
             this.server.on('state', (state) => {
                 updateStatus(state);
                 this.playerCount = 2;

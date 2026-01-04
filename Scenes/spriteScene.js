@@ -182,7 +182,7 @@ export class SpriteScene extends Scene {
                             let logical = 0; for (let i=0;i<arr.length;i++){ const e=arr[i]; if(!e) continue; if(e.__groupStart||e.__groupEnd) continue; logical++; }
                             if (this.server && !this._suppressOutgoing) {
                                 const diff = {};
-                                diff['meta/animations/' + encodeURIComponent(animation)] = logical;
+                                diff['meta/animations/' + animation] = logical;
                                 try { this.server.sendDiff(diff); } catch(e){}
                             }
                         } catch(e){}
@@ -198,7 +198,7 @@ export class SpriteScene extends Scene {
                             let logical = 0; for (let i=0;i<arr.length;i++){ const e=arr[i]; if(!e) continue; if(e.__groupStart||e.__groupEnd) continue; logical++; }
                             if (this.server && !this._suppressOutgoing) {
                                 const diff = {};
-                                diff['meta/animations/' + encodeURIComponent(animation)] = logical;
+                                diff['meta/animations/' + animation] = logical;
                                 try { this.server.sendDiff(diff); } catch(e){}
                             }
                         } catch(e){}
@@ -212,7 +212,7 @@ export class SpriteScene extends Scene {
                         try {
                             if (this.server && !this._suppressOutgoing) {
                                 const diff = {};
-                                diff['meta/animations/' + encodeURIComponent(name)] = Number(frameCount) || 0;
+                                diff['meta/animations/' + name] = Number(frameCount) || 0;
                                 try { this.server.sendDiff(diff); } catch(e){}
                             }
                         } catch(e){}
@@ -227,7 +227,7 @@ export class SpriteScene extends Scene {
                             if (this.server && !this._suppressOutgoing) {
                                 const diff = {};
                                 // set count to 0 to indicate removal
-                                diff['meta/animations/' + encodeURIComponent(name)] = 0;
+                                diff['meta/animations/' + name] = 0;
                                 try { this.server.sendDiff(diff); } catch(e){}
                             }
                         } catch(e){}
@@ -255,6 +255,10 @@ export class SpriteScene extends Scene {
                 this._cursorTTLms = 5000; // remove cursors older than 5s
                 this._cursorCleanupId = setInterval(() => { try { this._cleanupCursors(); } catch (e) {} }, 2000);
             } catch (e) {}
+            // NOTE: Full-state requests should be sent when the user actually joins a room.
+            // The request used to be sent here during scene ready, but that runs on scene load
+            // rather than when a multiplayer join occurs. The request is now issued from
+            // the multiplayer UI join handler in `script.js` so it aligns with room join timing.
         } catch (e) { console.warn('multiplayer hooks setup failed', e); }
         
         
@@ -2697,10 +2701,30 @@ export class SpriteScene extends Scene {
             if (meta && typeof meta === 'object') {
                 try {
                     this._suppressOutgoing = true;
-                    for (const anim of Object.keys(meta)) {
+                    for (const rawKey of Object.keys(meta)) {
                         try {
-                            const targetCount = Number(meta[anim]) || 0;
-                            // ensure frames array exists
+                            // support keys that may have been encoded by older clients
+                            let anim = rawKey;
+                            try { anim = decodeURIComponent(rawKey); } catch (e) { anim = rawKey; }
+                            const targetCount = Number(meta[rawKey]) || 0;
+                            // If targetCount is zero, treat as removal of the animation entirely.
+                            if (targetCount === 0) {
+                                try {
+                                    if (this.currentSprite._frames && this.currentSprite._frames.has(anim)) {
+                                        this.currentSprite._frames.delete(anim);
+                                        // If the removed animation was currently selected, pick a fallback
+                                        try {
+                                            if (this.selectedAnimation === anim) {
+                                                const keys = Array.from(this.currentSprite._frames ? this.currentSprite._frames.keys() : []);
+                                                this.selectedAnimation = keys[0] || 'idle';
+                                                this.selectedFrame = 0;
+                                            }
+                                        } catch (e) {}
+                                    }
+                                } catch (e) {}
+                                continue;
+                            }
+                            // ensure frames array exists for non-zero counts
                             if (!this.currentSprite._frames.has(anim)) this.currentSprite._frames.set(anim, []);
                             const arr = this.currentSprite._frames.get(anim) || [];
                             // compute logical count
@@ -2752,6 +2776,63 @@ export class SpriteScene extends Scene {
                             const entry = { x: Number(c.x || 0), y: Number(c.y || 0), time: Number(c.time || Date.now()), client: cid };
                             if (c.name) entry.name = c.name;
                             try { this._remoteCursors && this._remoteCursors.set(cid, entry); } catch(e){}
+                        } catch (e) { continue; }
+                    }
+                }
+            } catch (e) {}
+            // handle full-state requests: peers may request a full snapshot under state.requests/<requesterId>
+            try {
+                const reqs = state.requests || null;
+                if (reqs && typeof reqs === 'object') {
+                    for (const rid of Object.keys(reqs)) {
+                        try {
+                            if (!rid) continue;
+                            // ignore requests we sent ourselves
+                            if (rid === this.clientId) continue;
+                            // record seen set to avoid re-responding repeatedly
+                            if (!this._seenFullRequests) this._seenFullRequests = new Set();
+                            if (this._seenFullRequests.has(rid)) continue;
+                            // only respond if we have a currentSprite to share
+                            if (!this.currentSprite) { this._seenFullRequests.add(rid); continue; }
+                            // build payload and send under full/<rid>
+                            try {
+                                const payload = this._buildFullPayload();
+                                if (payload && this.server && typeof this.server.sendDiff === 'function') {
+                                    const diff = {};
+                                    diff['full/' + rid] = payload;
+                                    try { this.server.sendDiff(diff); } catch (e) {}
+                                }
+                            } catch (e) {}
+                            this._seenFullRequests.add(rid);
+                        } catch (e) { continue; }
+                    }
+                }
+            } catch (e) {}
+
+            // handle incoming full snapshots under state.full
+            try {
+                const fulls = state.full || null;
+                if (fulls && typeof fulls === 'object') {
+                    for (const fid of Object.keys(fulls)) {
+                        try {
+                            if (!fid) continue;
+                            // only apply payloads addressed to us
+                            if (fid !== this.clientId) continue;
+                            const payload = fulls[fid];
+                            if (!payload) continue;
+                            try {
+                                // apply payload (async image loads inside)
+                                this._applyFullPayload(payload);
+                            } catch (e) {}
+                            // clear the full and request entries so they don't persist
+                            try {
+                                if (this.server && typeof this.server.sendDiff === 'function') {
+                                    const diff = {};
+                                    diff['full/' + fid] = null;
+                                    diff['requests/' + fid] = null;
+                                    try { this.server.sendDiff(diff); } catch (e) {}
+                                }
+                            } catch (e) {}
                         } catch (e) { continue; }
                     }
                 }
@@ -2862,6 +2943,94 @@ export class SpriteScene extends Scene {
                 for (const id of removed) try { this._remoteEdits.delete(id); } catch (e) {}
             }
         } catch (e) { console.warn('pruneOldEdits failed', e); }
+    }
+
+    // Build a full payload representing the current editable sprite: per-frame dataURLs + meta
+    _buildFullPayload() {
+        try {
+            if (!this.currentSprite) return null;
+            const sprite = this.currentSprite;
+            const meta = { slicePx: sprite.slicePx || null, animations: {} };
+            const frames = {};
+            try {
+                const keys = Array.from(sprite._frames ? sprite._frames.keys() : []);
+                for (const anim of keys) {
+                    try {
+                        const arr = sprite._frames.get(anim) || [];
+                        const outMap = {};
+                        let logical = 0;
+                        for (let i = 0; i < arr.length; i++) {
+                            const entry = arr[i];
+                            if (!entry) continue;
+                            if (entry.__groupStart || entry.__groupEnd) continue;
+                            // materialize canvas (if entry is string packed, ignore)
+                            try {
+                                const canvas = entry;
+                                if (canvas && canvas.toDataURL) {
+                                    outMap[logical] = canvas.toDataURL();
+                                }
+                            } catch (e) {}
+                            logical++;
+                        }
+                        meta.animations[anim] = logical;
+                        frames[anim] = outMap;
+                    } catch (e) { continue; }
+                }
+            } catch (e) {}
+            return { meta, frames, time: Date.now(), client: this.clientId };
+        } catch (e) { return null; }
+    }
+
+    // Apply a full payload (meta + frames) into currentSprite. Loads images async and rebuilds sheet.
+    _applyFullPayload(payload) {
+        try {
+            if (!payload || !this.currentSprite) return false;
+            const meta = payload.meta || {};
+            const frames = payload.frames || {};
+            // ensure frames map exists
+            if (!this.currentSprite._frames) this.currentSprite._frames = new Map();
+            // set slice size if provided
+            try { if (meta.slicePx) this.currentSprite.slicePx = Number(meta.slicePx); } catch (e) {}
+            const pending = [];
+            for (const anim of Object.keys(frames)) {
+                try {
+                    const animFrames = frames[anim] || {};
+                    if (!this.currentSprite._frames.has(anim)) this.currentSprite._frames.set(anim, []);
+                    const arr = this.currentSprite._frames.get(anim) || [];
+                    // prepare array length
+                    const keys = Object.keys(animFrames).map(k=>Number(k)).sort((a,b)=>a-b);
+                    for (const idx of keys) {
+                        try {
+                            const dataUrl = animFrames[idx];
+                            if (!dataUrl) continue;
+                            const img = new Image();
+                            const p = new Promise((resolve) => {
+                                img.onload = () => {
+                                    try {
+                                        const c = document.createElement('canvas');
+                                        c.width = img.width; c.height = img.height;
+                                        const cx = c.getContext('2d');
+                                        try { cx.imageSmoothingEnabled = false; } catch (e) {}
+                                        cx.clearRect(0,0,c.width,c.height);
+                                        cx.drawImage(img,0,0);
+                                        arr[idx] = c;
+                                    } catch (e) {}
+                                    resolve(true);
+                                };
+                                img.onerror = () => { resolve(false); };
+                                img.src = dataUrl;
+                            });
+                            pending.push(p);
+                        } catch (e) { continue; }
+                    }
+                    this.currentSprite._frames.set(anim, arr);
+                } catch (e) { continue; }
+            }
+            Promise.all(pending).then(() => {
+                try { if (typeof this.currentSprite._rebuildSheetCanvas === 'function') this.currentSprite._rebuildSheetCanvas(); } catch (e) {}
+            }).catch(()=>{ try { if (typeof this.currentSprite._rebuildSheetCanvas === 'function') this.currentSprite._rebuildSheetCanvas(); } catch(e){} });
+            return true;
+        } catch (e) { return false; }
     }
 
     // Schedule a throttled cursor send
