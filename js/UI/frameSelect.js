@@ -134,7 +134,6 @@ export default class FrameSelect {
     renameAnimation(oldName, newName){
         if (!this.sprite || !this.sprite._frames) return false;
         if (!oldName || !newName) return false;
-        if (oldName === 'idle') return false;
         newName = String(newName).trim();
         if (newName.length === 0) return false;
         if (this.sprite._frames.has(newName)) return false; // avoid collision
@@ -148,7 +147,6 @@ export default class FrameSelect {
 
     removeAnimation(name){
         if (!this.sprite || !this.sprite._frames) return false;
-        if (name === 'idle') return false;
         if (!this.sprite._frames.has(name)) return false;
         this.sprite._frames.delete(name);
         if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
@@ -1072,9 +1070,9 @@ export default class FrameSelect {
                         const removeRect = new Vector(rpos.x + rsize.x - 40, rpos.y + 4);
                         const removeSize = new Vector(36, rsize.y - 8);
                         if (Geometry.pointInRect(this.mouse.pos, renameRect, renameSize)){
-                            if (name !== 'idle') this._spawnTextInputFor(name);
+                            this._spawnTextInputFor(name);
                         } else if (Geometry.pointInRect(this.mouse.pos, removeRect, removeSize)){
-                            if (name !== 'idle') this.removeAnimation(name);
+                            this.removeAnimation(name);
                         } else {
                             // select animation
                             if (this.scene) this.scene.selectedAnimation = name;
@@ -1264,7 +1262,7 @@ export default class FrameSelect {
                 const renameSize = new Vector(36, rsize.y - 8);
                 const removePos = new Vector(rpos.x + rsize.x - 40, rpos.y + 4);
                 const removeSize = new Vector(36, rsize.y - 8);
-                const disabled = (name === 'idle');
+                const disabled = false;
                 this.UIDraw.rect(renamePos, renameSize, disabled ? '#444444' : '#666666');
                 this.UIDraw.text('R', new Vector(renamePos.x + renameSize.x/2, renamePos.y + renameSize.y/2 + 6), '#FFFFFF', 0, 12, { align: 'center', font: 'monospace' });
                 this.UIDraw.rect(removePos, removeSize, disabled ? '#444444' : '#AA4444');
