@@ -624,10 +624,45 @@ export class SpriteScene extends Scene {
 
                         const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
+                        // Since Debug's input parser naively splits on commas, array literals like
+                        // [0,0,0,0] arrive as multiple arguments ("[0", 0, 0, "0]"). We first
+                        // normalize the raw args back into array-like strings where possible.
+                        const normalizeArgs = (raw) => {
+                            const out = [];
+                            for (let i = 0; i < raw.length; i++) {
+                                const v = raw[i];
+                                if (typeof v === 'string' && v.indexOf('[') !== -1 && v.indexOf(']') === -1) {
+                                    let buf = String(v);
+                                    while (buf.indexOf(']') === -1 && i + 1 < raw.length) {
+                                        i++;
+                                        buf += ',' + String(raw[i]);
+                                    }
+                                    out.push(buf);
+                                } else {
+                                    out.push(v);
+                                }
+                            }
+                            return out;
+                        };
+
+                        const normArgs = normalizeArgs(args);
+
                         // Parse a color spec which may be an array [r,g,b,a, 'rgba'|'hsva'] or any
                         // Color.convertColor-compatible input.
                         const parseColorSpec = (spec) => {
                             try {
+                                // Allow bracketed array syntax passed as a single string, e.g. "[0,0,0,0]".
+                                if (typeof spec === 'string') {
+                                    const t = spec.trim();
+                                    if (t[0] === '[' && t.indexOf(']') !== -1) {
+                                        try {
+                                            const arr = JSON.parse(t.replace(/'/g, '"'));
+                                            spec = arr;
+                                        } catch (e) {
+                                            // fall through and let other handlers try
+                                        }
+                                    }
+                                }
                                 if (Array.isArray(spec) && spec.length >= 3) {
                                     const v0 = Number(spec[0]) || 0;
                                     const v1 = Number(spec[1]) || 0;
@@ -696,11 +731,11 @@ export class SpriteScene extends Scene {
                         const kind = String(type || '').toLowerCase();
 
                         if (kind === 'pointlight') {
-                            const cx = Number(args[0]);
-                            const cy = Number(args[1]);
-                            const startInfo = parseColorSpec(args[2] !== undefined ? args[2] : ['#000000']);
-                            const endInfo = parseColorSpec(args[3] !== undefined ? args[3] : ['#FFFFFFFF']);
-                            const bias = clamp01(args[4] !== undefined ? Number(args[4]) : 0);
+                            const cx = Number(normArgs[0]);
+                            const cy = Number(normArgs[1]);
+                            const startInfo = parseColorSpec(normArgs[2] !== undefined ? normArgs[2] : ['#000000']);
+                            const endInfo = parseColorSpec(normArgs[3] !== undefined ? normArgs[3] : ['#FFFFFFFF']);
+                            const bias = clamp01(normArgs[4] !== undefined ? Number(normArgs[4]) : 0);
 
                             const centerX = Number.isFinite(cx) ? cx : (px - 1) / 2;
                             const centerY = Number.isFinite(cy) ? cy : (py - 1) / 2;
@@ -734,9 +769,9 @@ export class SpriteScene extends Scene {
                                 }
                             }
                         } else if (kind === 'points') {
-                            const count = Math.max(0, Math.floor(Number(args[0]) || 0));
-                            const colorInfo = parseColorSpec(args[1] !== undefined ? args[1] : ['#FFFFFFFF']);
-                            let seed = args[2] !== undefined ? Number(args[2]) : 1;
+                            const count = Math.max(0, Math.floor(Number(normArgs[0]) || 0));
+                            const colorInfo = parseColorSpec(normArgs[1] !== undefined ? normArgs[1] : ['#FFFFFFFF']);
+                            let seed = normArgs[2] !== undefined ? Number(normArgs[2]) : 1;
                             if (!Number.isFinite(seed) || seed === 0) seed = 1;
                             const rng = () => {
                                 seed = (seed * 1664525 + 1013904223) >>> 0;
@@ -750,10 +785,10 @@ export class SpriteScene extends Scene {
                                 writePixel(x, y, col);
                             }
                         } else if (kind === 'linear') {
-                            const startInfo = parseColorSpec(args[0] !== undefined ? args[0] : ['#000000']);
-                            const endInfo = parseColorSpec(args[1] !== undefined ? args[1] : ['#FFFFFFFF']);
-                            const bias = clamp01(args[2] !== undefined ? Number(args[2]) : 0);
-                            const angleDeg = args[3] !== undefined ? Number(args[3]) : 0;
+                            const startInfo = parseColorSpec(normArgs[0] !== undefined ? normArgs[0] : ['#000000']);
+                            const endInfo = parseColorSpec(normArgs[1] !== undefined ? normArgs[1] : ['#FFFFFFFF']);
+                            const bias = clamp01(normArgs[2] !== undefined ? Number(normArgs[2]) : 0.5);
+                            const angleDeg = normArgs[3] !== undefined ? Number(normArgs[3]) : 0;
                             const angleRad = (Number.isFinite(angleDeg) ? angleDeg : 0) * Math.PI / 180;
                             const dxDir = Math.cos(angleRad) || 1;
                             const dyDir = Math.sin(angleRad) || 0;
@@ -1547,8 +1582,8 @@ export class SpriteScene extends Scene {
         try {
             if (!this.mouse) return;
 
-            // Right click to cancel selection (also clear any region selection)
-            if (this.mouse.pressed('right') && this.selectionPoints.length !== 0) {
+            // Right click (without Shift) to cancel selection (also clear any region selection)
+            if (this.mouse.pressed('right') && !this.keys.held('Shift') && this.selectionPoints.length !== 0) {
                 this.selectionPoints = [];
                 this.currentTool = null;
                 this.selectionRegion = null;
@@ -1675,15 +1710,21 @@ export class SpriteScene extends Scene {
             } catch (e) { console.warn('middle-click eyedropper failed', e); }
 
             // Shift + Left click to add a point (avoid double-selecting the same pixel)
-            if (this.keys.held('Shift') && this.mouse.held('left')) {
+            // Shift + Right click to remove a point under the cursor
+            if (this.keys.held('Shift')) {
                 const pos = this.getPos(this.mouse.pos);
                 if (pos && pos.inside) {
-                    const exists = this.selectionPoints.some(p => p.x === pos.x && p.y === pos.y && p.areaIndex === pos.areaIndex);
-                    if (!exists) {
-                        // record the area index where this point was added so copy/cut can use the originating frame
-                        this.selectionPoints.push({ x: pos.x, y: pos.y, areaIndex: (typeof pos.areaIndex === 'number') ? pos.areaIndex : null });
-                        // adding a new anchor invalidates any previous region selection
-                        this.selectionRegion = null;
+                    if (this.mouse.held('left')) {
+                        const exists = this.selectionPoints.some(p => p.x === pos.x && p.y === pos.y && p.areaIndex === pos.areaIndex);
+                        if (!exists) {
+                            // record the area index where this point was added so copy/cut can use the originating frame
+                            this.selectionPoints.push({ x: pos.x, y: pos.y, areaIndex: (typeof pos.areaIndex === 'number') ? pos.areaIndex : null });
+                            // adding a new anchor invalidates any previous region selection
+                            this.selectionRegion = null;
+                        }
+                    } else if (this.mouse.held('right')) {
+                        // remove any existing selection point at this pixel (and area)
+                        this.selectionPoints = this.selectionPoints.filter(p => !(p.x === pos.x && p.y === pos.y && p.areaIndex === pos.areaIndex));
                     }
                 }
             }
@@ -1712,6 +1753,39 @@ export class SpriteScene extends Scene {
                 }
             }
 
+            // While a shape tool (line/box) is active, Shift+Left click adds
+            // individual selection points along the shape instead of drawing.
+            // The last added point becomes the new starting point for chaining.
+            if (this.currentTool && this.keys.held('Shift') && this.mouse.pressed('left') && this.selectionPoints && this.selectionPoints.length > 0) {
+                const pos = this.getPos(this.mouse.pos);
+                if (pos && pos.inside) {
+                    const start = this.selectionPoints[this.selectionPoints.length - 1];
+                    const end = { x: pos.x, y: pos.y };
+                    const filled = this.keys.held('Alt');
+                    let pixels = [];
+                    if (this.currentTool === 'line' && typeof this.computeLinePixels === 'function') {
+                        pixels = this.computeLinePixels(start, end) || [];
+                    } else if (this.currentTool === 'box' && typeof this.computeBoxPixels === 'function') {
+                        pixels = this.computeBoxPixels(start, end, filled) || [];
+                    }
+
+                    if (pixels && pixels.length) {
+                        const areaIndex = (typeof start.areaIndex === 'number') ? start.areaIndex : (typeof pos.areaIndex === 'number' ? pos.areaIndex : null);
+                        for (const p of pixels) {
+                            const exists = this.selectionPoints.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === areaIndex);
+                            if (!exists) {
+                                this.selectionPoints.push({ x: p.x, y: p.y, areaIndex });
+                            }
+                        }
+                        // Ensure the end point is the last element so it becomes the next start.
+                        const endExists = this.selectionPoints.some(sp => sp.x === end.x && sp.y === end.y && sp.areaIndex === areaIndex);
+                        if (!endExists) {
+                            this.selectionPoints.push({ x: end.x, y: end.y, areaIndex });
+                        }
+                    }
+                }
+            }
+
             // If two points are present and user presses 'b', create a region selection (don't draw).
             // This sets up for cut/copy/paste workflows.
             if (this.selectionPoints.length === 2) {
@@ -1734,9 +1808,85 @@ export class SpriteScene extends Scene {
             // Copy/Cut operate on active selectionRegion or explicit selectionPoints.
             // Holding 'v' previews clipboard; releasing 'v' pastes at the mouse pixel.
             try {
+                // Helper to pull transferable content from the system clipboard into this.clipboard.
+                // When pasteAfter is true, also immediately paste at the mouse position.
+                const fetchSystemClipboard = async (pasteAfter) => {
+                    try {
+                        if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function') return;
+                        const txt = await navigator.clipboard.readText();
+                        if (!txt) return;
+                        const doPasteNow = !!pasteAfter;
+                        const applyPaste = () => {
+                            if (!doPasteNow) return;
+                            if (this.clipboard) {
+                                this.doPaste(this.mouse && this.mouse.pos);
+                                this._justPasted = true;
+                            }
+                        };
+
+                        // If it's an image data URL, convert into image data for paste/preview
+                        if (typeof txt === 'string' && txt.startsWith('data:image')) {
+                            try {
+                                const img = new Image();
+                                img.src = txt;
+                                await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+                                const c = document.createElement('canvas');
+                                c.width = img.width; c.height = img.height;
+                                const cx = c.getContext('2d');
+                                cx.clearRect(0,0,c.width,c.height);
+                                cx.drawImage(img,0,0);
+                                const imgd = cx.getImageData(0,0,c.width,c.height);
+                                this.clipboard = { type: 'image', w: c.width, h: c.height, data: imgd.data, originOffset: { ox: 0, oy: 0 } };
+                                applyPaste();
+                                return;
+                            } catch (e) {
+                                // fall through
+                            }
+                        }
+
+                        // Try to parse JSON representing our clipboard structure
+                        try {
+                            const obj = JSON.parse(txt);
+                            if (obj && (obj.type === 'points' || obj.type === 'image')) {
+                                // For image represented as dataURL, convert similarly
+                                if (obj.type === 'image' && obj.data && typeof obj.data === 'string' && obj.data.startsWith('data:image')) {
+                                    try {
+                                        const img = new Image();
+                                        img.src = obj.data;
+                                        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+                                        const c = document.createElement('canvas');
+                                        c.width = img.width; c.height = img.height;
+                                        const cx = c.getContext('2d');
+                                        cx.clearRect(0,0,c.width,c.height);
+                                        cx.drawImage(img,0,0);
+                                        const imgd = cx.getImageData(0,0,c.width,c.height);
+                                        this.clipboard = { type: 'image', w: c.width, h: c.height, data: imgd.data, originOffset: obj.originOffset || { ox: 0, oy: 0 } };
+                                        applyPaste();
+                                        return;
+                                    } catch (e) { /* ignore */ }
+                                } else {
+                                    // Points or already-structured image payload (dense numeric array) may be large; trust JSON
+                                    this.clipboard = obj;
+                                    applyPaste();
+                                    return;
+                                }
+                            }
+                        } catch (e) {
+                            // nothing usable on clipboard
+                        }
+                    } catch (e) {
+                        // ignore clipboard read failures (permissions, insecure context)
+                    }
+                };
+
                 if (this.keys.held('v')) {
                     this.clipboardPreview = true;
-                    this.keys.setPasscode('pasteMode'); 
+                    this.keys.setPasscode('pasteMode');
+                }
+                // On initial press, prefer system clipboard so preview uses latest external content.
+                if (this.keys.pressed('v')) {
+                    // Always try to refresh from system clipboard; if it succeeds it overwrites any local copy.
+                    fetchSystemClipboard(false);
                 }
                 if (this.keys.pressed('c')) {
                     if (this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) this.doCopy();
@@ -1751,70 +1901,8 @@ export class SpriteScene extends Scene {
                         // mark that a paste just occurred so we can avoid key-order races
                         this._justPasted = true;
                     } else {
-                        // Try to read transferable content from system clipboard (async).
-                        (async () => {
-                            try {
-                                // Prefer reading text (data URL or JSON) since it's most widely supported.
-                                if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
-                                    const txt = await navigator.clipboard.readText();
-                                    if (txt) {
-                                        // If it's an image data URL, convert into image data for paste
-                                        if (typeof txt === 'string' && txt.startsWith('data:image')) {
-                                            try {
-                                                const img = new Image();
-                                                img.src = txt;
-                                                await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
-                                                const c = document.createElement('canvas');
-                                                c.width = img.width; c.height = img.height;
-                                                const cx = c.getContext('2d');
-                                                cx.clearRect(0,0,c.width,c.height);
-                                                cx.drawImage(img,0,0);
-                                                const imgd = cx.getImageData(0,0,c.width,c.height);
-                                                // store as image clipboard so doPaste can use it
-                                                this.clipboard = { type: 'image', w: c.width, h: c.height, data: imgd.data, originOffset: { ox: 0, oy: 0 } };
-                                                this.doPaste(this.mouse && this.mouse.pos);
-                                                this._justPasted = true;
-                                            } catch (e) {
-                                                // fall through
-                                            }
-                                        } else {
-                                            // Try to parse JSON representing our clipboard structure
-                                            try {
-                                                const obj = JSON.parse(txt);
-                                                if (obj && (obj.type === 'points' || obj.type === 'image')) {
-                                                    // For image represented as dataURL, convert similarly
-                                                    if (obj.type === 'image' && obj.data && typeof obj.data === 'string' && obj.data.startsWith('data:image')) {
-                                                        try {
-                                                            const img = new Image();
-                                                            img.src = obj.data;
-                                                            await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
-                                                            const c = document.createElement('canvas');
-                                                            c.width = img.width; c.height = img.height;
-                                                            const cx = c.getContext('2d');
-                                                            cx.clearRect(0,0,c.width,c.height);
-                                                            cx.drawImage(img,0,0);
-                                                            const imgd = cx.getImageData(0,0,c.width,c.height);
-                                                            this.clipboard = { type: 'image', w: c.width, h: c.height, data: imgd.data, originOffset: obj.originOffset || { ox: 0, oy: 0 } };
-                                                            this.doPaste(this.mouse && this.mouse.pos);
-                                                            this._justPasted = true;
-                                                        } catch (e) { /* ignore */ }
-                                                    } else {
-                                                        // Points or already-structured image payload (dense numeric array) may be large; trust JSON
-                                                        this.clipboard = obj;
-                                                        this.doPaste(this.mouse && this.mouse.pos);
-                                                        this._justPasted = true;
-                                                    }
-                                                }
-                                            } catch (e) {
-                                                // nothing usable on clipboard
-                                            }
-                                        }
-                                    }
-                                }
-                            } catch (e) {
-                                // ignore clipboard read failures (permissions, insecure context)
-                            }
-                        })();
+                        // No local data yet: pull from system clipboard and paste once ready.
+                        fetchSystemClipboard(true);
                     }
                     this.clipboardPreview = false;
                     this._clipboardPreviewDragging = null;

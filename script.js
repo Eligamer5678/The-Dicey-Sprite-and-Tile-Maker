@@ -315,7 +315,7 @@ class Game {
             if (this._coordinatedSweepInterval) clearInterval(this._coordinatedSweepInterval);
             this._coordinatedSweepInterval = setInterval(() => {
                 // Indicate we're attempting a coordinated sweep (even if no candidate is found)
-                console.log('[Script] coordinated sweeper tick - attempting sweep');
+                //console.log('[Script] coordinated sweeper tick - attempting sweep');
                 // run the coordinated sweep in background; using test params: requiredCount=5, stepMs=5000
                 this.server.coordinatedSweepAttempt({ maxAgeMs: 10 * 1000, requiredCount: 5, stepMs: 5000 })
                     .then(removed => {
