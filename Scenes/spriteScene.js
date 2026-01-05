@@ -599,6 +599,214 @@ export class SpriteScene extends Scene {
             }
         } catch (e) { console.warn('Failed to register drawSelected debug signal', e); }
 
+        // Debug: procedural textures on the current frame.
+        // texture(type, ...args)
+        // 1) texture("pointLight", centerX, centerY, gradStart, gradEnd, lerpCenter)
+        // 2) texture("points", count, color, seed=1)
+        // 3) texture("linear", gradStart, gradEnd, lerpCenter, angleDeg)
+        try {
+            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
+                window.Debug.createSignal('texture', (type, ...args) => {
+                    try {
+                        const sheet = this.currentSprite;
+                        const anim = this.selectedAnimation;
+                        const frameIdx = this.selectedFrame;
+                        if (!sheet) return false;
+                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                        if (!frameCanvas) return false;
+
+                        const px = frameCanvas.width;
+                        const py = frameCanvas.height;
+                        const ctx = frameCanvas.getContext('2d');
+                        let img;
+                        try { img = ctx.getImageData(0, 0, px, py); } catch (e) { return false; }
+                        const data = img.data;
+
+                        const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+                        // Parse a color spec which may be an array [r,g,b,a, 'rgba'|'hsva'] or any
+                        // Color.convertColor-compatible input.
+                        const parseColorSpec = (spec) => {
+                            try {
+                                if (Array.isArray(spec) && spec.length >= 3) {
+                                    const v0 = Number(spec[0]) || 0;
+                                    const v1 = Number(spec[1]) || 0;
+                                    const v2 = Number(spec[2]) || 0;
+                                    let va = (spec[3] === undefined || spec[3] === null) ? 1 : Number(spec[3]);
+                                    let mode = String(spec[4] || 'rgba').toLowerCase();
+                                    if (mode.indexOf('hsv') !== -1) {
+                                        // Treat as HSVA. H in [0,1] or [0,360], S/V/A in [0,1] (A also accepts 0-255).
+                                        let h = v0;
+                                        let s = v1;
+                                        let vv = v2;
+                                        if (h > 1) h = h / 360;
+                                        s = clamp01(s);
+                                        vv = clamp01(vv);
+                                        if (va > 1) va = va / 255;
+                                        va = clamp01(va);
+                                        return { color: new Color(h, s, vv, va, 'hsv'), space: 'hsv' };
+                                    } else {
+                                        // Treat as RGBA. R/G/B in 0-255, A in [0,1] or 0-255.
+                                        let a = va;
+                                        if (a > 1) a = a / 255;
+                                        a = clamp01(a);
+                                        return { color: new Color(v0, v1, v2, a, 'rgb'), space: 'rgb' };
+                                    }
+                                }
+                                const col = Color.convertColor(spec);
+                                return { color: col, space: (col.type === 'hsv' ? 'hsv' : 'rgb') };
+                            } catch (e) {
+                                return { color: Color.fromHex('#000000FF'), space: 'rgb' };
+                            }
+                        };
+
+                        const mixColors = (infoA, infoB, t) => {
+                            t = clamp01(t);
+                            const useHsv = (infoA.space === 'hsv' || infoB.space === 'hsv');
+                            if (useHsv) {
+                                const c0 = infoA.color.toHsv();
+                                const c1 = infoB.color.toHsv();
+                                const h = c0.a + (c1.a - c0.a) * t;
+                                const s = c0.b + (c1.b - c0.b) * t;
+                                const v = c0.c + (c1.c - c0.c) * t;
+                                const a = c0.d + (c1.d - c0.d) * t;
+                                const rgb = new Color(h, s, v, a, 'hsv').toRgb();
+                                return { r: rgb.a, g: rgb.b, b: rgb.c, a: rgb.d };
+                            }
+                            const c0 = infoA.color.toRgb();
+                            const c1 = infoB.color.toRgb();
+                            const r = c0.a + (c1.a - c0.a) * t;
+                            const g = c0.b + (c1.b - c0.b) * t;
+                            const b = c0.c + (c1.c - c0.c) * t;
+                            const a = c0.d + (c1.d - c0.d) * t;
+                            return { r, g, b, a };
+                        };
+
+                        const writePixel = (x, y, col) => {
+                            if (x < 0 || y < 0 || x >= px || y >= py) return;
+                            const idx = (y * px + x) * 4;
+                            data[idx]   = Math.max(0, Math.min(255, Math.round(col.r || 0)));
+                            data[idx+1] = Math.max(0, Math.min(255, Math.round(col.g || 0)));
+                            data[idx+2] = Math.max(0, Math.min(255, Math.round(col.b || 0)));
+                            const alpha = (col.a === undefined || col.a === null) ? 1 : col.a;
+                            const a255 = Math.max(0, Math.min(255, Math.round(alpha * 255)));
+                            data[idx+3] = a255;
+                        };
+
+                        const kind = String(type || '').toLowerCase();
+
+                        if (kind === 'pointlight') {
+                            const cx = Number(args[0]);
+                            const cy = Number(args[1]);
+                            const startInfo = parseColorSpec(args[2] !== undefined ? args[2] : ['#000000']);
+                            const endInfo = parseColorSpec(args[3] !== undefined ? args[3] : ['#FFFFFFFF']);
+                            const bias = clamp01(args[4] !== undefined ? Number(args[4]) : 0);
+
+                            const centerX = Number.isFinite(cx) ? cx : (px - 1) / 2;
+                            const centerY = Number.isFinite(cy) ? cy : (py - 1) / 2;
+                            // maximum distance to any corner for radial falloff
+                            const corners = [
+                                { x: 0, y: 0 },
+                                { x: px - 1, y: 0 },
+                                { x: 0, y: py - 1 },
+                                { x: px - 1, y: py - 1 }
+                            ];
+                            let maxR = 1;
+                            for (const c of corners) {
+                                const dx = c.x - centerX;
+                                const dy = c.y - centerY;
+                                const d = Math.sqrt(dx*dx + dy*dy);
+                                if (d > maxR) maxR = d;
+                            }
+
+                            for (let y = 0; y < py; y++) {
+                                for (let x = 0; x < px; x++) {
+                                    const dx = x - centerX;
+                                    const dy = y - centerY;
+                                    const dist = Math.sqrt(dx*dx + dy*dy);
+                                    let tRaw = dist / maxR;
+                                    if (!Number.isFinite(tRaw)) tRaw = 0;
+                                    tRaw = clamp01(tRaw);
+                                    // Bias towards center: blend linear and quadratic falloff.
+                                    const t = (1 - bias) * tRaw + bias * tRaw * tRaw;
+                                    const col = mixColors(startInfo, endInfo, t);
+                                    writePixel(x, y, col);
+                                }
+                            }
+                        } else if (kind === 'points') {
+                            const count = Math.max(0, Math.floor(Number(args[0]) || 0));
+                            const colorInfo = parseColorSpec(args[1] !== undefined ? args[1] : ['#FFFFFFFF']);
+                            let seed = args[2] !== undefined ? Number(args[2]) : 1;
+                            if (!Number.isFinite(seed) || seed === 0) seed = 1;
+                            const rng = () => {
+                                seed = (seed * 1664525 + 1013904223) >>> 0;
+                                return seed / 4294967296;
+                            };
+
+                            const col = mixColors(colorInfo, colorInfo, 0); // just normalize to RGBA
+                            for (let i = 0; i < count; i++) {
+                                const x = Math.floor(rng() * px);
+                                const y = Math.floor(rng() * py);
+                                writePixel(x, y, col);
+                            }
+                        } else if (kind === 'linear') {
+                            const startInfo = parseColorSpec(args[0] !== undefined ? args[0] : ['#000000']);
+                            const endInfo = parseColorSpec(args[1] !== undefined ? args[1] : ['#FFFFFFFF']);
+                            const bias = clamp01(args[2] !== undefined ? Number(args[2]) : 0);
+                            const angleDeg = args[3] !== undefined ? Number(args[3]) : 0;
+                            const angleRad = (Number.isFinite(angleDeg) ? angleDeg : 0) * Math.PI / 180;
+                            const dxDir = Math.cos(angleRad) || 1;
+                            const dyDir = Math.sin(angleRad) || 0;
+                            const cx = (px - 1) / 2;
+                            const cy = (py - 1) / 2;
+
+                            // Compute maximum projection length to normalize into [0,1].
+                            const corners = [
+                                { x: 0, y: 0 },
+                                { x: px - 1, y: 0 },
+                                { x: 0, y: py - 1 },
+                                { x: px - 1, y: py - 1 }
+                            ];
+                            let maxProj = 1;
+                            for (const c of corners) {
+                                const vx = c.x - cx;
+                                const vy = c.y - cy;
+                                const p = Math.abs(vx * dxDir + vy * dyDir);
+                                if (p > maxProj) maxProj = p;
+                            }
+
+                            for (let y = 0; y < py; y++) {
+                                for (let x = 0; x < px; x++) {
+                                    const vx = x - cx;
+                                    const vy = y - cy;
+                                    const proj = vx * dxDir + vy * dyDir;
+                                    let tRaw = (proj / maxProj + 1) * 0.5; // map [-maxProj,maxProj] -> [0,1]
+                                    if (!Number.isFinite(tRaw)) tRaw = 0;
+                                    tRaw = clamp01(tRaw);
+                                    const t = (1 - bias) * tRaw + bias * tRaw * tRaw;
+                                    const col = mixColors(startInfo, endInfo, t);
+                                    writePixel(x, y, col);
+                                }
+                            }
+                        } else {
+                            // unknown texture type
+                            return false;
+                        }
+
+                        // write back and update packed sheet
+                        try { ctx.putImageData(img, 0, 0); } catch (e) { return false; }
+                        if (typeof sheet._rebuildSheetCanvas === 'function') {
+                            try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                        }
+                        return true;
+                    } catch (err) {
+                        window.Debug && window.Debug.error && window.Debug.error('texture signal failed: ' + err);
+                        return false;
+                    }
+                });
+            }
+        } catch (e) { console.warn('Failed to register texture debug signal', e); }
+
         // Register debug signals for onion-skin control: layerAlpha(alpha), toggleOnion()
         try {
             if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {

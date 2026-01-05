@@ -559,7 +559,7 @@ export default class FrameSelect {
 
         // handle click selection: if left button was released over a frame slot (frames + groups)
 
-        if (this.mouse && this.mouse.released && this.mouse.released('left')) {
+        if (this.mouse.released('left') || this.mouse.pressed('right')) {
             const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
             const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
             // compute slots combining groups and frames
@@ -591,11 +591,11 @@ export default class FrameSelect {
                     if (item.type === 'frame'){
                         try {
                             const i = item.index;
-                            if (this.keys && this.keys.held && this.keys.held('Shift')) {
+                            if (this.keys.held('Shift')&& !this.mouse.held('right')) {
                                 if (this._multiSelected.has(i)) this._multiSelected.delete(i);
                                 else this._multiSelected.add(i);
                             } else {
-                                if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
+                                if (this._multiSelected && this._multiSelected.size > 0 && !this.mouse.held('right')) this._multiSelected.clear();
                                 if (this.scene) this.scene.selectedFrame = i;
                             }
                         } catch (e) { if (this.scene) this.scene.selectedFrame = item.index; }
@@ -622,24 +622,106 @@ export default class FrameSelect {
             }
         }
 
-        // Handle merge key: press 'm' to merge multiple selected frames into one new frame (keep originals)
+        // Handle merge key: press 'm' to merge multiple selected frames into one new frame (keep originals).
+        // If there is an active pixel/region selection in the SpriteScene, treat it as a mask so only
+        // pixels inside the selection are merged; pixels outside keep the base frame.
         try {
             if (this.keys.released('m')) {
                 if (this._multiSelected.size >= 2) {
-                    const anim = this.scene.selectedAnimation;
+                    const anim = this.scene && this.scene.selectedAnimation;
                     if (!anim || !this.sprite || !this.sprite._frames || !this.sprite._frames.has(anim)) return;
                     const arr = this.sprite._frames.get(anim);
                     // compute indices in ascending order
-                    const idxs = Array.from(this._multiSelected).filter(i => typeof i === 'number' && i >= 0 && i < arr.length).sort((a,b)=>a-b);
+                    const idxs = Array.from(this._multiSelected)
+                        .filter(i => typeof i === 'number' && i >= 0 && i < arr.length)
+                        .sort((a,b)=>a-b);
                     if (idxs.length < 2) return;
                     try {
                         const px = this.sprite.slicePx || 16;
                         const out = document.createElement('canvas'); out.width = px; out.height = px;
-                        const ctx = out.getContext('2d'); ctx.clearRect(0,0,px,px);
-                        for (const idx of idxs) {
-                            const src = this.sprite.getFrame(anim, idx);
-                            if (src) ctx.drawImage(src, 0, 0);
+                        const ctx = out.getContext('2d');
+                        ctx.clearRect(0,0,px,px);
+
+                        // Build a pixel mask from the scene's selection (points or rectangular region).
+                        let hasMask = false;
+                        const mask = new Set(); // keys "x,y"
+                        try {
+                            const scene = this.scene;
+                            if (scene) {
+                                const selPts = Array.isArray(scene.selectionPoints) ? scene.selectionPoints : [];
+                                const selReg = scene.selectionRegion;
+
+                                if (selPts.length > 0) {
+                                    for (const p of selPts) {
+                                        if (!p) continue;
+                                        const mx = Math.max(0, Math.min(px-1, p.x|0));
+                                        const my = Math.max(0, Math.min(px-1, p.y|0));
+                                        mask.add(mx + ',' + my);
+                                    }
+                                    if (mask.size > 0) hasMask = true;
+                                } else if (selReg && selReg.start && selReg.end) {
+                                    const minX = Math.max(0, Math.min(selReg.start.x, selReg.end.x));
+                                    const minY = Math.max(0, Math.min(selReg.start.y, selReg.end.y));
+                                    const maxX = Math.min(px-1, Math.max(selReg.start.x, selReg.end.x));
+                                    const maxY = Math.min(px-1, Math.max(selReg.start.y, selReg.end.y));
+                                    for (let y = minY; y <= maxY; y++) {
+                                        for (let x = minX; x <= maxX; x++) {
+                                            mask.add(x + ',' + y);
+                                        }
+                                    }
+                                    if (mask.size > 0) hasMask = true;
+                                }
+                            }
+                        } catch (e) { /* ignore selection mask errors */ }
+
+                        // If no selection mask, fall back to original full-frame merge behaviour.
+                        if (!hasMask) {
+                            for (const idx of idxs) {
+                                const src = this.sprite.getFrame(anim, idx);
+                                if (src) ctx.drawImage(src, 0, 0);
+                            }
+                        } else {
+                            // With a mask: start from the base frame (first selected), then for each
+                            // additional frame copy only pixels OUTSIDE the mask into the output.
+                            // Pixels inside the selection mask are "protected" and keep the base frame.
+                            const baseIdx = idxs[0];
+                            const base = this.sprite.getFrame(anim, baseIdx);
+                            if (base) ctx.drawImage(base, 0, 0);
+
+                            const dstImage = ctx.getImageData(0, 0, px, px);
+                            const dstData = dstImage.data;
+
+                            for (let k = 1; k < idxs.length; k++) {
+                                const idx = idxs[k];
+                                const src = this.sprite.getFrame(anim, idx);
+                                if (!src) continue;
+                                let sctx = null;
+                                try { sctx = src.getContext('2d'); } catch (e) { sctx = null; }
+                                if (!sctx) continue;
+                                let srcImage;
+                                try { srcImage = sctx.getImageData(0, 0, px, px); } catch (e) { srcImage = null; }
+                                if (!srcImage) continue;
+                                const srcData = srcImage.data;
+
+                                // Apply masked copy: only pixels OUTSIDE the mask and non-transparent overwrite dst.
+                                for (let y = 0; y < px; y++) {
+                                    for (let x = 0; x < px; x++) {
+                                        const key = x + ',' + y;
+                                        if (mask.has(key)) continue; // skip selected pixels
+                                        const off = (y * px + x) * 4;
+                                        const a = srcData[off+3];
+                                        if (a === 0) continue; // keep existing pixel when fully transparent
+                                        dstData[off]   = srcData[off];
+                                        dstData[off+1] = srcData[off+1];
+                                        dstData[off+2] = srcData[off+2];
+                                        dstData[off+3] = a;
+                                    }
+                                }
+                            }
+
+                            ctx.putImageData(dstImage, 0, 0);
                         }
+
                         // append merged frame and rebuild
                         arr.push(out);
                         this.sprite._rebuildSheetCanvas();
