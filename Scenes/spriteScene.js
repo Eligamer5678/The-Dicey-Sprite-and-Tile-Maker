@@ -3115,14 +3115,19 @@ export class SpriteScene extends Scene {
                             }
                         } catch (e) { /* ignore struct op errors */ }
                     } else if (op.type === 'draw' && Array.isArray(op.pixels)) {
-                        // Apply pixels respecting last-modified times to reduce flicker.
+                        // Apply incoming draw ops as-is and rely on server/update
+                        // ordering, instead of comparing client-local timestamps.
+                        // Using Date.now() across machines can easily become
+                        // skewed (one clock ahead/behind), which caused one
+                        // client to "always win" and the other client's edits
+                        // to be ignored. We now accept all remote pixels and
+                        // let the latest-arriving update win visually.
                         const toApply = [];
                         for (const p of op.pixels) {
                             try {
-                                const px = Number(p.x), py = Number(p.y);
-                                const last = this._getPixelModified(op.anim, op.frame, px, py) || 0;
-                                // If local has a newer modification, skip applying older remote op
-                                if (last && last > (op.time || 0)) continue;
+                                const px = Number(p.x);
+                                const py = Number(p.y);
+                                if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
                                 toApply.push({ x: px, y: py, color: p.color || '#000000' });
                             } catch (e) { continue; }
                         }
