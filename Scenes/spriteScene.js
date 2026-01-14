@@ -177,12 +177,17 @@ export class SpriteScene extends Scene {
                     sheet.insertFrame = (animation, index) => {
                         const res = _origInsert(animation, index);
                         try {
-                            // compute logical count
+                            // compute logical count AFTER insertion
                             const arr = sheet._frames.get(animation) || [];
                             let logical = 0; for (let i=0;i<arr.length;i++){ const e=arr[i]; if(!e) continue; if(e.__groupStart||e.__groupEnd) continue; logical++; }
                             if (this.server && !this._suppressOutgoing) {
                                 const diff = {};
+                                // update metadata with new logical frame count
                                 diff['meta/animations/' + encodeURIComponent(animation)] = logical;
+                                // also send an explicit structural op so peers know WHICH index was inserted
+                                const opIndex = (typeof index === 'number' && index >= 0) ? Number(index) : Math.max(0, logical - 1);
+                                const id = (Date.now()) + '_' + Math.random().toString(36).slice(2,6);
+                                diff['edits/' + id] = { type: 'struct', action: 'insertFrame', anim: animation, index: opIndex, client: this.clientId, time: Date.now() };
                                 try { this.server.sendDiff(diff); } catch(e){}
                             }
                         } catch(e){}
@@ -192,13 +197,27 @@ export class SpriteScene extends Scene {
                 if (typeof sheet.popFrame === 'function') {
                     const _origPop = sheet.popFrame.bind(sheet);
                     sheet.popFrame = (animation, index) => {
+                        // compute logical count BEFORE deletion so we can infer which index was removed when index is undefined
+                        let preLogical = 0;
+                        try {
+                            const preArr = sheet._frames.get(animation) || [];
+                            for (let i=0;i<preArr.length;i++){ const e=preArr[i]; if(!e) continue; if(e.__groupStart||e.__groupEnd) continue; preLogical++; }
+                        } catch(e) {}
+
                         const res = _origPop(animation, index);
                         try {
                             const arr = sheet._frames.get(animation) || [];
                             let logical = 0; for (let i=0;i<arr.length;i++){ const e=arr[i]; if(!e) continue; if(e.__groupStart||e.__groupEnd) continue; logical++; }
                             if (this.server && !this._suppressOutgoing) {
                                 const diff = {};
+                                // update metadata with new logical frame count
                                 diff['meta/animations/' + encodeURIComponent(animation)] = logical;
+                                // and send a structural op describing exactly which logical index was deleted
+                                let opIndex;
+                                if (typeof index === 'number' && index >= 0) opIndex = Number(index);
+                                else opIndex = Math.max(0, preLogical - 1); // last logical frame prior to deletion
+                                const id = (Date.now()) + '_' + Math.random().toString(36).slice(2,6);
+                                diff['edits/' + id] = { type: 'struct', action: 'deleteFrame', anim: animation, index: opIndex, client: this.clientId, time: Date.now() };
                                 try { this.server.sendDiff(diff); } catch(e){}
                             }
                         } catch(e){}
@@ -2989,12 +3008,29 @@ export class SpriteScene extends Scene {
 
             let applied = 0;
 
-            // First apply metadata structural changes (create/remove frames) while suppressing outgoing echoes
+            // Detect which animations have explicit structural ops in this batch so we
+            // don't also try to "fix up" their frame counts using only totals.
+            const structAnims = new Set();
+            try {
+                if (edits && typeof edits === 'object') {
+                    for (const id of Object.keys(edits)) {
+                        try {
+                            const op = edits[id];
+                            if (op && op.type === 'struct' && op.anim) structAnims.add(op.anim);
+                        } catch (e) { continue; }
+                    }
+                }
+            } catch (e) { /* ignore struct detection errors */ }
+
+            // First apply metadata structural changes (create/remove frames) while suppressing outgoing echoes.
+            // Skip animations that already have explicit struct ops in this batch to avoid double-applying
+            // inserts/deletes and desynchronizing indices.
             if (meta && typeof meta === 'object') {
                 try {
                     this._suppressOutgoing = true;
                     for (const anim of Object.keys(meta)) {
                         try {
+                            if (structAnims.has(anim)) continue; // this anim handled by struct ops below
                             const targetCount = Number(meta[anim]) || 0;
                             // ensure frames array exists
                             if (!this.currentSprite._frames.has(anim)) this.currentSprite._frames.set(anim, []);
@@ -3008,7 +3044,7 @@ export class SpriteScene extends Scene {
                                     try { this.currentSprite.insertFrame(anim); } catch(e){}
                                 }
                             } else if (logical > targetCount) {
-                                // remove frames
+                                // remove frames (from the end when no struct ops are present)
                                 for (let k = 0; k < (logical - targetCount); k++) {
                                     try { this.currentSprite.popFrame(anim); } catch(e){}
                                 }
@@ -3064,7 +3100,21 @@ export class SpriteScene extends Scene {
                     continue;
                 }
                 try {
-                    if (op.type === 'draw' && Array.isArray(op.pixels)) {
+                    if (op.type === 'struct') {
+                        // Structural operations: explicit insert/delete of frames at a logical index.
+                        try {
+                            if (!this.currentSprite) { /* nothing to apply */ }
+                            else if (op.action === 'insertFrame') {
+                                const idx = (typeof op.index === 'number' && op.index >= 0) ? Number(op.index) : undefined;
+                                try { this._suppressOutgoing = true; this.currentSprite.insertFrame(op.anim, idx); } finally { this._suppressOutgoing = false; }
+                                applied++;
+                            } else if (op.action === 'deleteFrame') {
+                                const idx = (typeof op.index === 'number' && op.index >= 0) ? Number(op.index) : undefined;
+                                try { this._suppressOutgoing = true; this.currentSprite.popFrame(op.anim, idx); } finally { this._suppressOutgoing = false; }
+                                applied++;
+                            }
+                        } catch (e) { /* ignore struct op errors */ }
+                    } else if (op.type === 'draw' && Array.isArray(op.pixels)) {
                         // Apply pixels respecting last-modified times to reduce flicker.
                         const toApply = [];
                         for (const p of op.pixels) {
@@ -3700,11 +3750,11 @@ export class SpriteScene extends Scene {
                         // (neighboring frames) with reduced alpha so users see motion context.
                         try {
                             const drawCtx = this.Draw && this.Draw.ctx;
-                            const onionEnabled = (!this.tilemode) && ((typeof this.onionSkin === 'boolean') ? this.onionSkin : true);
+                            const onionEnabled = (!this.tilemode) && ((typeof this.onionSkin === 'boolean') ? this.onionSkin : false);
                             // If FrameSelect has multi-selected frames, composite those instead (disabled when tilemode)
                             const multiSet = (!this.tilemode && this.FrameSelect && this.FrameSelect._multiSelected) ? this.FrameSelect._multiSelected : null;
                             const framesArr = (sheet && sheet._frames && effAnim) ? (sheet._frames.get(effAnim) || []) : [];
-                            const baseAlpha = (typeof this.onionAlpha === 'number') ? this.onionAlpha : 0.35;
+                            const baseAlpha = (typeof this.onionAlpha === 'number') ? this.onionAlpha : 1;
 
                             if (effAnim !== null && drawCtx && multiSet && multiSet.size >= 2) {
                                 try {

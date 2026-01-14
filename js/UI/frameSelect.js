@@ -84,6 +84,54 @@ export default class FrameSelect {
         return Array.isArray(arr) ? arr : [];
     }
 
+    // Copy all non-transparent pixels from a source canvas into the given
+    // logical frame index on the sprite using modifyFrame/setPixel so that
+    // multiplayer edit buffering sees the changes.
+    _copyCanvasToFrame(anim, frameIndex, srcCanvas){
+        try {
+            if (!this.sprite || !srcCanvas) return false;
+            if (typeof frameIndex !== 'number' || frameIndex < 0) return false;
+            const w = srcCanvas.width | 0;
+            const h = srcCanvas.height | 0;
+            if (!w || !h) return false;
+            const sctx = srcCanvas.getContext('2d');
+            if (!sctx) return false;
+            let img;
+            try { img = sctx.getImageData(0, 0, w, h); } catch (e) { return false; }
+            const data = img.data;
+            const pixels = [];
+            const toHex = (c) => {
+                const v = Math.max(0, Math.min(255, c|0));
+                const s = v.toString(16);
+                return s.length === 1 ? '0' + s : s;
+            };
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    const off = (y * w + x) * 4;
+                    const a = data[off+3];
+                    if (a === 0) continue;
+                    const r = data[off];
+                    const g = data[off+1];
+                    const b = data[off+2];
+                    const hex = '#' + toHex(r) + toHex(g) + toHex(b) + toHex(a);
+                    pixels.push({ x, y, color: hex, blendType: 'replace' });
+                }
+            }
+            if (pixels.length === 0) return true;
+            if (typeof this.sprite.modifyFrame === 'function') {
+                this.sprite.modifyFrame(anim, frameIndex, pixels);
+            } else if (typeof this.sprite.setPixel === 'function') {
+                for (const p of pixels) {
+                    try { this.sprite.setPixel(anim, frameIndex, p.x, p.y, p.color, 'replace'); } catch (e) {}
+                }
+            }
+            return true;
+        } catch (e) {
+            console.warn('FrameSelect _copyCanvasToFrame failed', e);
+            return false;
+        }
+    }
+
     _addFrameGroup(anim, indices){
         if (!this.sprite) return null;
         if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
@@ -722,13 +770,40 @@ export default class FrameSelect {
                             ctx.putImageData(dstImage, 0, 0);
                         }
 
-                        // append merged frame and rebuild
-                        arr.push(out);
-                        this.sprite._rebuildSheetCanvas();
-                        this.scene.selectedFrame = arr.length - 1;
-                        // clear multi selection after merge
-                        this._multiSelected.clear();
-                        this.mouse.addMask(1); 
+                        // append merged frame via SpriteSheet API so multiplayer metadata stays in sync
+                        let newLogicalIndex = null;
+                        try {
+                            if (typeof this.sprite.insertFrame === 'function') {
+                                // insertFrame without index appends a new logical frame
+                                this.sprite.insertFrame(anim);
+                                // compute logical index of the last frame (newly appended)
+                                const arrNow = (this.sprite._frames && this.sprite._frames.get(anim)) || [];
+                                let logicalCount = 0;
+                                for (let i = 0; i < arrNow.length; i++) {
+                                    const e = arrNow[i];
+                                    if (!e) continue;
+                                    if (e.__groupStart || e.__groupEnd) continue;
+                                    logicalCount++;
+                                }
+                                newLogicalIndex = Math.max(0, logicalCount - 1);
+                            } else {
+                                // fallback: push directly if insertFrame is unavailable
+                                arr.push(out);
+                                newLogicalIndex = Math.max(0, arr.length - 1);
+                            }
+
+                            // copy merged pixels into the new frame canvas using modifyFrame so
+                            // multiplayer edit buffering picks up the changes.
+                            try {
+                                if (newLogicalIndex !== null) this._copyCanvasToFrame(anim, newLogicalIndex, out);
+                            } catch (e) { console.warn('FrameSelect merge copy failed', e); }
+
+                            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                            if (this.scene && newLogicalIndex !== null) this.scene.selectedFrame = newLogicalIndex;
+                            // clear multi selection after merge
+                            if (this._multiSelected) this._multiSelected.clear();
+                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                        } catch (e) { console.warn('FrameSelect merge append failed', e); }
                     } catch (e) { console.warn('FrameSelect merge failed', e); }
                 }
             }
@@ -816,13 +891,34 @@ export default class FrameSelect {
                     if (this._lastDeleted && this.sprite) {
                         const info = this._lastDeleted;
                         try {
-                            if (!this.sprite._frames.has(info.anim)) this.sprite._frames.set(info.anim, []);
-                            const arr = this.sprite._frames.get(info.anim);
-                            // insert the canvas back at original index
-                            arr.splice(info.index, 0, info.canvas);
+                            const anim = info.anim;
+                            const logicalIndex = Number(info.index) || 0;
+                            if (typeof this.sprite.insertFrame === 'function') {
+                                // use insertFrame so frame count stays in sync across clients
+                                this.sprite.insertFrame(anim, logicalIndex);
+                                try {
+                                    const restored = (typeof this.sprite.getFrame === 'function')
+                                        ? this.sprite.getFrame(anim, logicalIndex)
+                                        : null;
+                                    if (restored && restored.getContext) {
+                                        const rctx = restored.getContext('2d');
+                                        rctx.clearRect(0, 0, restored.width, restored.height);
+                                        if (info.canvas) rctx.drawImage(info.canvas, 0, 0);
+                                    } else if (this.sprite && this.sprite._frames && this.sprite._frames.has(anim)) {
+                                        // fallback: directly splice into underlying frames array at logical index
+                                        const arr = this.sprite._frames.get(anim) || [];
+                                        arr.splice(logicalIndex, 0, info.canvas);
+                                    }
+                                } catch (e) { console.warn('FrameSelect undo copy failed', e); }
+                            } else {
+                                // legacy fallback when insertFrame is unavailable
+                                if (!this.sprite._frames.has(anim)) this.sprite._frames.set(anim, []);
+                                const arr = this.sprite._frames.get(anim);
+                                arr.splice(logicalIndex, 0, info.canvas);
+                            }
                             if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
                             // restore selection to restored frame
-                            if (this.scene) this.scene.selectedFrame = info.index;
+                            if (this.scene) this.scene.selectedFrame = logicalIndex;
                             // clear saved undo
                             this._lastDeleted = null;
                             // mask input (use addMask to avoid interfering with overlapping UI regions)
@@ -835,7 +931,7 @@ export default class FrameSelect {
             console.warn('FrameSelect undo handling failed', e);
         }
 
-        // Duplicate selected frame with 'v', and move frames with ArrowUp/ArrowDown
+        // Duplicate selected frame with '/', and move frames with ArrowUp/ArrowDown
         try {
             if (this.keys && this.keys.released) {
                 const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
@@ -852,31 +948,53 @@ export default class FrameSelect {
                             // gather multi-selection indices (valid)
                             const selIdxs = Array.from(this._multiSelected || []).filter(i=>typeof i === 'number' && i>=0 && i < arr.length).map(Number).sort((a,b)=>a-b);
                             if (selIdxs.length >= 1) {
-                                // duplicate all selected frames in order, inserting after the last selected index
-                                const clones = [];
+                                // duplicate all selected frames in order, appending new frames at the END so
+                                // that structural changes play nicely with multiplayer metadata.
+                                const newLogicalIndices = [];
                                 for (const idx of selIdxs) {
                                     try {
                                         const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, idx) : null;
-                                        const clone = document.createElement('canvas');
-                                        clone.width = this.sprite.slicePx || (src ? src.width : 16);
-                                        clone.height = this.sprite.slicePx || (src ? src.height : 16);
-                                        const ctx = clone.getContext('2d');
-                                        if (src) ctx.drawImage(src, 0, 0);
-                                        clones.push(clone);
+                                        if (!src) continue;
+                                        if (typeof this.sprite.insertFrame === 'function') {
+                                            this.sprite.insertFrame(anim); // append new blank frame
+                                            // compute logical index of new last frame
+                                            const arrNow = (this.sprite._frames && this.sprite._frames.get(anim)) || [];
+                                            let logicalCount = 0;
+                                            for (let i = 0; i < arrNow.length; i++) {
+                                                const e = arrNow[i];
+                                                if (!e) continue;
+                                                if (e.__groupStart || e.__groupEnd) continue;
+                                                logicalCount++;
+                                            }
+                                            const newLogical = Math.max(0, logicalCount - 1);
+                                            try {
+                                                const dest = (typeof this.sprite.getFrame === 'function')
+                                                    ? this.sprite.getFrame(anim, newLogical)
+                                                    : null;
+                                                if (dest && dest.getContext) {
+                                                    // Prefer modifyFrame-based copy so edits are synced.
+                                                    this._copyCanvasToFrame(anim, newLogical, src);
+                                                }
+                                            } catch (e) { console.warn('FrameSelect duplicate copy failed', e); }
+                                            newLogicalIndices.push(newLogical);
+                                        } else {
+                                            // fallback: no insertFrame, just clone and push
+                                            const clone = document.createElement('canvas');
+                                            clone.width = this.sprite.slicePx || src.width || 16;
+                                            clone.height = this.sprite.slicePx || src.height || 16;
+                                            const ctx = clone.getContext('2d');
+                                            ctx.drawImage(src, 0, 0);
+                                            arr.push(clone);
+                                            newLogicalIndices.push(Math.max(0, arr.length - 1));
+                                        }
                                     } catch (e) { console.warn('FrameSelect duplicate per-frame failed', e); }
                                 }
-                                const insertPos = Math.max.apply(null, selIdxs) + 1;
-                                // insert clones preserving order
-                                arr.splice(insertPos, 0, ...clones);
                                 // if selection exactly matches a group, duplicate the group metadata as well
                                 try {
                                     const groups = this._getFrameGroups(anim);
                                     const matching = groups.find(g => Array.isArray(g.indices) && g.indices.length === selIdxs.length && g.indices.every((v,i)=>v === selIdxs[i]));
-                                    if (matching) {
-                                        // create a new group with indices pointing to the newly inserted clones
-                                        const newIndices = [];
-                                        for (let i = 0; i < clones.length; i++) newIndices.push(insertPos + i);
-                                        const newGroup = { id: 'g' + (Date.now().toString(36) + Math.random().toString(36).slice(2,6)), indices: newIndices, collapsed: matching.collapsed, layered: matching.layered };
+                                    if (matching && newLogicalIndices.length === selIdxs.length) {
+                                        const newGroup = { id: 'g' + (Date.now().toString(36) + Math.random().toString(36).slice(2,6)), indices: newLogicalIndices.slice(), collapsed: matching.collapsed, layered: matching.layered };
                                         groups.push(newGroup);
                                         if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
                                         this.sprite._frameGroups.set(anim, groups);
@@ -885,10 +1003,10 @@ export default class FrameSelect {
                                     }
                                 } catch (e) { console.warn('FrameSelect duplicate group metadata failed', e); }
                                 if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
-                                // select newly inserted frames
+                                // select newly appended frames
                                 if (this._multiSelected) this._multiSelected.clear();
-                                for (let i = 0; i < clones.length; i++) this._multiSelected.add(insertPos + i);
-                                if (this.scene) this.scene.selectedFrame = insertPos;
+                                for (const ni of newLogicalIndices) this._multiSelected.add(ni);
+                                if (this.scene && newLogicalIndices.length > 0) this.scene.selectedFrame = newLogicalIndices[0];
                                 try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                             } else {
                                 // fallback: duplicate single selected frame (existing behavior)
@@ -896,14 +1014,39 @@ export default class FrameSelect {
                                 if (sel !== null && sel !== undefined && sel >= 0 && sel < arr.length) {
                                     try {
                                         const src = this.sprite.getFrame(anim, sel);
-                                        const clone = document.createElement('canvas');
-                                        clone.width = this.sprite.slicePx || (src ? src.width : 16);
-                                        clone.height = this.sprite.slicePx || (src ? src.height : 16);
-                                        const ctx = clone.getContext('2d');
-                                        if (src) ctx.drawImage(src, 0, 0);
-                                        arr.splice(sel + 1, 0, clone);
-                                        if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
-                                        if (this.scene) this.scene.selectedFrame = sel + 1;
+                                        if (src && typeof this.sprite.insertFrame === 'function') {
+                                            this.sprite.insertFrame(anim); // append new blank frame
+                                            // compute logical index of new last frame
+                                            const arrNow = (this.sprite._frames && this.sprite._frames.get(anim)) || [];
+                                            let logicalCount = 0;
+                                            for (let i = 0; i < arrNow.length; i++) {
+                                                const e = arrNow[i];
+                                                if (!e) continue;
+                                                if (e.__groupStart || e.__groupEnd) continue;
+                                                logicalCount++;
+                                            }
+                                            const newLogical = Math.max(0, logicalCount - 1);
+                                            try {
+                                                const dest = (typeof this.sprite.getFrame === 'function')
+                                                    ? this.sprite.getFrame(anim, newLogical)
+                                                    : null;
+                                                if (dest && dest.getContext) {
+                                                    // Prefer modifyFrame-based copy so edits are synced.
+                                                    this._copyCanvasToFrame(anim, newLogical, src);
+                                                }
+                                            } catch (e) { console.warn('FrameSelect single duplicate copy failed', e); }
+                                            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                            if (this.scene) this.scene.selectedFrame = newLogical;
+                                        } else if (src) {
+                                            const clone = document.createElement('canvas');
+                                            clone.width = this.sprite.slicePx || (src ? src.width : 16);
+                                            clone.height = this.sprite.slicePx || (src ? src.height : 16);
+                                            const ctx = clone.getContext('2d');
+                                            ctx.drawImage(src, 0, 0);
+                                            arr.splice(sel + 1, 0, clone);
+                                            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                            if (this.scene) this.scene.selectedFrame = sel + 1;
+                                        }
                                         try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                     } catch (e) { console.warn('FrameSelect duplicate failed', e); }
                                 }
