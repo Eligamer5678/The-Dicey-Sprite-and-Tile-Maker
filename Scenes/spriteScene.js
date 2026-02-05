@@ -305,6 +305,14 @@ export class SpriteScene extends Scene {
         this.selectionPoints = [];
         this.currentTool = null;
 
+        // Pixel-perfect drawing mode (toggle with 'a'). When enabled, the pen
+        // tool tracks the last few pixels in the current stroke and avoids
+        // drawing "L"-shaped corners by restoring the bend pixel.
+        this.pixelPerfect = true;
+        this._pixelPerfectStrokeActive = false;
+        this._pixelPerfectHistory = [];
+        this._pixelPerfectOriginals = new Map();
+
         // region-based selection (for cut/copy/paste)
         this.selectionRegion = null;
         // clipboard stores { w, h, data(Uint8ClampedArray), originOffset: {ox,oy} }
@@ -1539,6 +1547,13 @@ export class SpriteScene extends Scene {
                 if (this.keys.released('7')) this.adjustChannel = 's';
                 if (this.keys.released('8')) this.adjustChannel = 'v';
                 if (this.keys.released('9')) this.adjustChannel = 'a';
+
+                // Toggle pixel-perfect drawing mode with 'a'. When enabled,
+                // the pen tool performs corner-cutting to avoid "L" shapes.
+                if (this.keys.released('a') || this.keys.released('A')) {
+                    this.pixelPerfect = !this.pixelPerfect;
+                    try { console.log('Pixel-perfect mode:', this.pixelPerfect); } catch (e) {}
+                }
                 // Quick select: press '5' to emit the debug 'select' signal using the current pen color.
                 // Hold Shift while pressing '5' to use a lowered buffer (0.5).
                 if (this.keys.comboPressed(['s','Alt'])) {
@@ -1764,19 +1779,33 @@ export class SpriteScene extends Scene {
             const color = this.penColor || '#000000';
             const side = Math.max(1, Math.min(4, this.brushSize || 1));
             const half = Math.floor((side - 1) / 2);
+            const areaIndexForPos = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
+
+            // Reset pixel-perfect stroke bookkeeping when no buttons are held.
+            if (!this.mouse.held('left') && !this.mouse.held('right')) {
+                this._pixelPerfectStrokeActive = false;
+                this._pixelPerfectHistory = [];
+                this._pixelPerfectOriginals = new Map();
+            }
+
             if (this.mouse.held('left')) { // draw an NxN square centered on cursor (top-left bias for even sizes)
                 const sx = pos.x - half;
                 const sy = pos.y - half;
+                const usePixelPerfect = !!this.pixelPerfect && side === 1 && (!this.selectionPoints || this.selectionPoints.length === 0);
+
                 // If explicit selection points exist, respect them as a mask and write per-pixel skipping masked pixels.
                 if (this.selectionPoints && this.selectionPoints.length > 0) {
                     for (let yy = 0; yy < side; yy++) {
                         for (let xx = 0; xx < side; xx++) {
                             const px = sx + xx;
                             const py = sy + yy;
-                            if (this.isPixelMasked(px, py, (typeof pos.areaIndex === 'number') ? pos.areaIndex : null)) continue;
+                            if (this.isPixelMasked(px, py, areaIndexForPos)) continue;
                             try { if (typeof sheet.setPixel === 'function') sheet.setPixel(targetAnim, targetFrame, px, py, color, 'replace'); else if (typeof sheet.modifyFrame === 'function') sheet.modifyFrame(targetAnim, targetFrame, { x: px, y: py, color, blendType: 'replace' }); } catch (e) {}
                         }
                     }
+                } else if (usePixelPerfect) {
+                    // Pixel-perfect single-pixel drawing with corner cutting.
+                    this._applyPixelPerfectPixel(sheet, targetAnim, targetFrame, sx, sy, color, areaIndexForPos);
                 } else if (typeof sheet.fillRect === 'function') {
                     sheet.fillRect(targetAnim, targetFrame, sx, sy, side, side, color, 'replace');
                 } else {
@@ -1795,15 +1824,19 @@ export class SpriteScene extends Scene {
                 const eraseColor = '#00000000';
                 const sx = pos.x - half;
                 const sy = pos.y - half;
+                const usePixelPerfect = !!this.pixelPerfect && side === 1 && (!this.selectionPoints || this.selectionPoints.length === 0);
+
                 if (this.selectionPoints && this.selectionPoints.length > 0) {
                     for (let yy = 0; yy < side; yy++) {
                         for (let xx = 0; xx < side; xx++) {
                             const px = sx + xx;
                             const py = sy + yy;
-                            if (this.isPixelMasked(px, py, (typeof pos.areaIndex === 'number') ? pos.areaIndex : null)) continue;
+                            if (this.isPixelMasked(px, py, areaIndexForPos)) continue;
                             try { if (typeof sheet.setPixel === 'function') sheet.setPixel(targetAnim, targetFrame, px, py, eraseColor, 'replace'); else if (typeof sheet.modifyFrame === 'function') sheet.modifyFrame(targetAnim, targetFrame, { x: px, y: py, color: eraseColor, blendType: 'replace' }); } catch (e) {}
                         }
                     }
+                } else if (usePixelPerfect) {
+                    this._applyPixelPerfectPixel(sheet, targetAnim, targetFrame, sx, sy, eraseColor, areaIndexForPos);
                 } else if (typeof sheet.fillRect === 'function') {
                     sheet.fillRect(targetAnim, targetFrame, sx, sy, side, side, eraseColor, 'replace');
                 } else {
@@ -1821,6 +1854,102 @@ export class SpriteScene extends Scene {
         } catch (e) {
             console.warn('penTool failed', e);
         }
+    }
+
+    _resetPixelPerfectStroke() {
+        this._pixelPerfectStrokeActive = false;
+        this._pixelPerfectHistory = [];
+        this._pixelPerfectOriginals = new Map();
+    }
+
+    _applyPixelPerfectPixel(sheet, anim, frameIdx, x, y, color, areaIndex) {
+        try {
+            if (!sheet) return;
+
+            // Initialize stroke state on first pixel of a stroke
+            if (!this._pixelPerfectStrokeActive) {
+                this._pixelPerfectStrokeActive = true;
+                this._pixelPerfectHistory = [];
+                this._pixelPerfectOriginals = new Map();
+            }
+
+            const key = `${anim}:${frameIdx}:${x},${y}`;
+            // Cache original color for this pixel once per stroke so we can restore it
+            if (!this._pixelPerfectOriginals.has(key)) {
+                try {
+                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                    if (frameCanvas && frameCanvas.getContext) {
+                        const ctx = frameCanvas.getContext('2d');
+                        const d = ctx.getImageData(x, y, 1, 1).data;
+                        const origHex = this.rgbaToHex(d[0], d[1], d[2], d[3]);
+                        this._pixelPerfectOriginals.set(key, origHex);
+                    }
+                } catch (e) { /* ignore sampling errors */ }
+            }
+
+            // Draw the requested pixel
+            try {
+                if (typeof sheet.setPixel === 'function') sheet.setPixel(anim, frameIdx, x, y, color, 'replace');
+                else if (typeof sheet.modifyFrame === 'function') sheet.modifyFrame(anim, frameIdx, { x, y, color, blendType: 'replace' });
+            } catch (e) { /* ignore draw errors */ }
+
+            const last = this._pixelPerfectHistory.length > 0 ? this._pixelPerfectHistory[this._pixelPerfectHistory.length - 1] : null;
+            if (last && last.x === x && last.y === y && last.anim === anim && last.frameIdx === frameIdx) {
+                // avoid duplicating the same point in history
+                return;
+            }
+
+            const entry = { x, y, anim, frameIdx, areaIndex };
+            this._pixelPerfectHistory.push(entry);
+            if (this._pixelPerfectHistory.length > 3) this._pixelPerfectHistory.shift();
+
+            // When we have three recent pixels, check for an L-shaped corner and
+            // restore the bend pixel if needed.
+            if (this._pixelPerfectHistory.length === 3) {
+                const p1 = this._pixelPerfectHistory[0];
+                const p2 = this._pixelPerfectHistory[1];
+                const p3 = this._pixelPerfectHistory[2];
+                if (this._isPixelPerfectLBend(p1, p2, p3)) {
+                    const midKey = `${p2.anim}:${p2.frameIdx}:${p2.x},${p2.y}`;
+                    const orig = this._pixelPerfectOriginals.get(midKey);
+                    if (orig) {
+                        try {
+                            if (typeof sheet.setPixel === 'function') sheet.setPixel(p2.anim, p2.frameIdx, p2.x, p2.y, orig, 'replace');
+                            else if (typeof sheet.modifyFrame === 'function') sheet.modifyFrame(p2.anim, p2.frameIdx, { x: p2.x, y: p2.y, color: orig, blendType: 'replace' });
+                        } catch (e) { /* ignore restore errors */ }
+                    }
+                    // Remove the bend from history so the path continues from p1->p3
+                    this._pixelPerfectHistory.splice(1, 1);
+                }
+            }
+        } catch (e) {
+            // ignore pixel-perfect errors and let normal drawing continue on next stroke
+        }
+    }
+
+    _isPixelPerfectLBend(p1, p2, p3) {
+        if (!p1 || !p2 || !p3) return false;
+        // Must be in the same frame and area
+        if (p1.anim !== p2.anim || p2.anim !== p3.anim) return false;
+        if (p1.frameIdx !== p2.frameIdx || p2.frameIdx !== p3.frameIdx) return false;
+        if (p1.areaIndex !== p2.areaIndex || p2.areaIndex !== p3.areaIndex) return false;
+
+        const dx13 = p3.x - p1.x;
+        const dy13 = p3.y - p1.y;
+        // endpoints must be diagonal neighbors
+        if (Math.abs(dx13) !== 1 || Math.abs(dy13) !== 1) return false;
+
+        const adj12x = Math.abs(p2.x - p1.x);
+        const adj12y = Math.abs(p2.y - p1.y);
+        const adj23x = Math.abs(p3.x - p2.x);
+        const adj23y = Math.abs(p3.y - p2.y);
+        if (Math.max(adj12x, adj12y) !== 1) return false;
+        if (Math.max(adj23x, adj23y) !== 1) return false;
+
+        // Two possible patterns: vertical then horizontal, or horizontal then vertical.
+        const pattern1 = (p1.x === p2.x && p2.y === p3.y); // step in Y then in X
+        const pattern2 = (p1.y === p2.y && p2.x === p3.x); // step in X then in Y
+        return pattern1 || pattern2;
     }
 
     selectionTool() {
@@ -2307,7 +2436,7 @@ export class SpriteScene extends Scene {
                         // If target color equals fill color, nothing to do
                         if (srcR === fillR && srcG === fillG && srcB === fillB && srcA === fillA) return;
 
-                        const shiftHeld = this.keys.held('a');
+                        const shiftHeld = this.keys.held('Shift');
                         if (shiftHeld) {
                             // Global exact replace: replace every pixel matching src color
                             for (let p = 0; p < w * h; p++) {

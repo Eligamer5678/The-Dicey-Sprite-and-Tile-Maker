@@ -31,6 +31,7 @@
 - '/' to duplicate frame
 - f to fill region
 - shift+f to select region
+- Pressing a toggles pixel perfect drawing when the pen size is 1 (i.e. cornercutting)
 
 
 - Press the upper left corner to access the console
@@ -66,7 +67,12 @@
 - msg() to message players.
 
 - **Latest update**
-- Added full online colab
+- Updated tile mode (shift+t to change tile grid size)
+- Can export tile mode as a tilesheet, and import tilesheet as tilemode grid.
+- Basic pen tool updated: Pixel perfect drawing (i.e. cornercutting), Press a to toggle.
+- Made shift+f select by color region
+- Selection is now incluive (box select, s, select signal, all don't remove the previous selction anymore, if you need it to replace, just right click before selecting to clear selection)
+
 
 
 
