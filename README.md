@@ -60,7 +60,6 @@
 - Press 'y' to mirror the selected frame. Toggles between locked-on-frame & selected
 
 - **Online colab**
-- Before anything, everyone must start with the same file. (does not do base sync yet)
 - Type enableColab() into the built in console.
 - Click create/join/the text box. Clicking anywhere else will make the menu disapear.
 - You can type name(Username) to make your cursor show your username.
@@ -72,7 +71,7 @@
 - Basic pen tool updated: Pixel perfect drawing (i.e. cornercutting), Press a to toggle.
 - Made shift+f select by color region
 - Selection is now incluive (box select, s, select signal, all don't remove the previous selction anymore, if you need it to replace, just right click before selecting to clear selection)
-
+- Colab now does an initial sync, so no need to share the file first.
 
 
 

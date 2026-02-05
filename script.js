@@ -292,6 +292,24 @@ class Game {
 
             try { if (this.server && typeof this.server.unpause === 'function') this.server.unpause(); } catch (e) {}
 
+            // Request an initial full-sync snapshot from the host and pause edits until it arrives
+            try {
+                const syncId = 'sync_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,6);
+                const diff = {
+                    'sync/requestId': syncId,
+                    'sync/requester': (this.server && this.server.playerId) ? this.server.playerId : 'p2',
+                    'sync/status': 'pending',
+                    'sync/paused': true,
+                    'sync/snapshot': null,
+                    'sync/acks': null,
+                    'sync/message': 'initial-join'
+                };
+                this.server.sendDiff(diff);
+                statusLabel.textContent = 'Status: Syncing...';
+            } catch (e) {
+                console.warn('Failed to request sync snapshot', e);
+            }
+
             const snapshot = await this.server.fetch('state');
             if (snapshot) this.remoteStateSignal.emit(snapshot);
 

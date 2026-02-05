@@ -275,6 +275,15 @@ export class SpriteScene extends Scene {
                 this._cursorCleanupId = setInterval(() => { try { this._cleanupCursors(); } catch (e) {} }, 2000);
             } catch (e) {}
         } catch (e) { console.warn('multiplayer hooks setup failed', e); }
+
+        // Sync handshake state (initial full-sync when a collaborator joins)
+        this._syncPaused = false;             // true while sync pause banner visible
+        this._syncOverlay = null;             // DOM overlay shown during sync
+        this._syncOverlayLabel = null;        // overlay text node
+        this._lastSyncRequestId = null;       // last request id we responded to
+        this._lastSyncSnapshotId = null;      // last snapshot id we applied
+        this._syncApplyInFlight = null;       // promise guard for applying snapshot
+        this._syncBuildInFlight = null;       // request id currently being built
         
         
         this.zoom = new Vector(1,1)
@@ -1312,7 +1321,9 @@ export class SpriteScene extends Scene {
         // call parent behaviour
         if (super.onSwitchFrom) try { super.onSwitchFrom(resources); } catch(e){}
         
-
+        // remove sync overlay if present
+        try { if (this._syncOverlay && this._syncOverlay.parentNode) this._syncOverlay.remove(); } catch (e) {}
+        this._syncOverlay = null; this._syncOverlayLabel = null;
         this._colorInput = null; this._colorLabel = null;
     }
 
@@ -3571,6 +3582,11 @@ export class SpriteScene extends Scene {
     applyRemoteState(state) {
         try {
             if (!state) return;
+            // Handle sync handshake (pause + full snapshot) before applying incremental edits
+            try {
+                const blocking = this._handleSyncState(state.sync || null);
+                if (blocking) return; // wait until sync completes before applying edits
+            } catch (e) { console.warn('applyRemoteState sync handler failed', e); }
             // state may contain an `edits` object (map of id -> op)
             const edits = state.edits || null;
             // also handle structural metadata under state.meta.animations
@@ -3723,6 +3739,271 @@ export class SpriteScene extends Scene {
                 try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
             }
         } catch (e) { console.warn('applyRemoteState failed', e); }
+    }
+
+    // Sync handshake handler: coordinates pause, snapshot build/apply and acknowledgements.
+    // Returns true when callers should skip further remote processing (while paused).
+    _handleSyncState(sync) {
+        if (!sync || typeof sync !== 'object') return false;
+        const status = sync.status || 'idle';
+        const requestId = sync.requestId || sync.reqId || null;
+        const paused = !!sync.paused;
+
+        // New request -> reset applied guard so we accept the incoming snapshot
+        if (status === 'pending' && requestId && this._lastSyncSnapshotId !== requestId) {
+            this._lastSyncSnapshotId = null;
+        }
+
+        if (paused) this._enterSyncPause('Syncing...');
+        else if (!paused && this._syncPaused && status === 'done') this._exitSyncPause();
+
+        // Host builds and publishes a full snapshot once per request
+        if (status === 'pending' && requestId && this._isHostClient() && this._syncBuildInFlight !== requestId && this._lastSyncRequestId !== requestId) {
+            this._syncBuildInFlight = requestId;
+            try {
+                const snapshot = this._buildFullSnapshot();
+                if (snapshot) {
+                    const diff = {};
+                    diff['sync/requestId'] = requestId;
+                    diff['sync/status'] = 'ready';
+                    diff['sync/host'] = this.clientId;
+                    diff['sync/paused'] = true;
+                    diff['sync/snapshot'] = snapshot;
+                    diff['sync/message'] = 'snapshot-ready';
+                    diff['sync/acks'] = null;
+                    if (sync.requester) diff['sync/requester'] = sync.requester;
+                    try { if (this.server && this.server.sendDiff) this.server.sendDiff(diff); } catch (e) { console.warn('sync snapshot send failed', e); }
+                    this._lastSyncRequestId = requestId;
+                }
+            } finally {
+                this._syncBuildInFlight = null;
+            }
+        }
+
+        // Apply snapshot when ready
+        if (status === 'ready' && requestId && sync.snapshot) {
+            const alreadyApplied = (this._lastSyncSnapshotId === requestId);
+            if (!alreadyApplied && (!this._syncApplyInFlight || this._syncApplyInFlight.id !== requestId)) {
+                const promise = (async () => {
+                    try {
+                        await this._applySnapshot(sync.snapshot, requestId);
+                        this._lastSyncSnapshotId = requestId;
+                        this._sendSyncAck(requestId);
+                    } catch (e) {
+                        console.warn('apply snapshot failed', e);
+                    }
+                })();
+                this._syncApplyInFlight = { id: requestId, promise };
+            }
+        }
+
+        // Host finishes sync once requester acks
+        const requester = sync.requester || null;
+        const acks = (sync.acks && typeof sync.acks === 'object') ? sync.acks : null;
+        // Consider sync complete if requester acked OR any client has acked this requestId
+        const anyAcked = (() => {
+            if (!acks) return false;
+            const values = Object.values(acks);
+            return values.some(v => v === requestId);
+        })();
+        const requesterAcked = requester && acks && acks[requester] === requestId;
+        if (status === 'ready' && requestId && this._isHostClient() && (requesterAcked || anyAcked)) {
+            const diff = {
+                'sync/status': 'done',
+                'sync/paused': false,
+                'sync/lastComplete': requestId,
+                'sync/snapshot': null,
+                'sync/acks': null,
+                'sync/message': null
+            };
+            try { if (this.server && this.server.sendDiff) this.server.sendDiff(diff); } catch (e) { console.warn('sync completion send failed', e); }
+        }
+
+        if (status === 'done' && this._syncPaused) this._exitSyncPause();
+
+        // Block downstream remote processing while syncing to avoid diverging edits
+        if ((paused || status === 'pending' || status === 'ready') && status !== 'done') return true;
+        return false;
+    }
+
+    _isHostClient() {
+        try { return (this.server && this.server.playerId === 'p1'); } catch (e) { return false; }
+    }
+
+    _ensureSyncOverlay(message = 'Syncing...') {
+        if (this._syncOverlay) {
+            if (this._syncOverlayLabel && message) this._syncOverlayLabel.textContent = message;
+            return this._syncOverlay;
+        }
+        const size = new Vector(380, 120);
+        const pos = new Vector((1920 - size.x) / 2, (1080 - size.y) / 2);
+        const panel = createHDiv('sync-overlay', pos, size, '#000000CC', {
+            borderRadius: '10px',
+            border: '1px solid #666',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#fff',
+            fontSize: '18px',
+            fontFamily: 'sans-serif',
+            padding: '12px',
+            gap: '6px',
+            backdropFilter: 'blur(4px)'
+        }, 'UI');
+        panel.style.pointerEvents = 'auto';
+        panel.style.zIndex = 2000;
+        const label = document.createElement('div');
+        label.textContent = message;
+        label.style.color = '#fff';
+        label.style.textAlign = 'center';
+        label.style.fontSize = '18px';
+        label.style.width = '100%';
+        label.setAttribute('data-ui','1');
+        panel.appendChild(label);
+        panel.style.display = 'none';
+        this._syncOverlay = panel;
+        this._syncOverlayLabel = label;
+        return panel;
+    }
+
+    _showSyncOverlay(message = 'Syncing...') {
+        const panel = this._ensureSyncOverlay(message);
+        if (this._syncOverlayLabel && message) this._syncOverlayLabel.textContent = message;
+        if (panel) panel.style.display = 'flex';
+    }
+
+    _hideSyncOverlay() {
+        if (this._syncOverlay) {
+            this._syncOverlay.style.display = 'none';
+        }
+    }
+
+    _enterSyncPause(message = 'Syncing...') {
+        this._syncPaused = true;
+        try { this.pause(); } catch (e) { this.paused = true; }
+        this._showSyncOverlay(message);
+    }
+
+    _exitSyncPause() {
+        this._syncPaused = false;
+        this._hideSyncOverlay();
+        try { this.unpause(); } catch (e) { this.paused = false; }
+    }
+
+    _buildFullSnapshot() {
+        try {
+            const sheet = this.currentSprite;
+            if (!sheet || !sheet._frames) return null;
+            const snap = {
+                slicePx: sheet.slicePx || 16,
+                time: Date.now(),
+                client: this.clientId,
+                frames: {},
+                animations: {},
+                tileCols: this.tileCols,
+                tileRows: this.tileRows,
+            };
+            if (Array.isArray(this._areaBindings)) snap.bindings = this._areaBindings.slice();
+            if (Array.isArray(this._areaTransforms)) snap.transforms = this._areaTransforms.slice();
+            const animNames = Array.from(sheet._frames.keys());
+            let row = 0;
+            for (const name of animNames) {
+                const arr = sheet._frames.get(name) || [];
+                const frames = [];
+                let logical = 0;
+                for (let i = 0; i < arr.length; i++) {
+                    const entry = arr[i];
+                    if (!entry || entry.__groupStart || entry.__groupEnd) continue;
+                    const frameCanvas = sheet.getFrame(name, logical);
+                    let dataUrl = null;
+                    try { dataUrl = frameCanvas && frameCanvas.toDataURL ? frameCanvas.toDataURL('image/png') : null; } catch (e) { dataUrl = null; }
+                    frames.push(dataUrl);
+                    logical++;
+                }
+                snap.frames[name] = frames;
+                snap.animations[name] = { row, frames: frames.length };
+                row++;
+            }
+            return snap;
+        } catch (e) {
+            console.warn('_buildFullSnapshot failed', e);
+            return null;
+        }
+    }
+
+    async _applySnapshot(snapshot, requestId = null) {
+        if (!snapshot || !snapshot.frames) return false;
+        this._enterSyncPause('Syncing...');
+        this._suppressOutgoing = true;
+        try {
+            const slice = Number(snapshot.slicePx || (this.currentSprite && this.currentSprite.slicePx) || 16);
+            const sheet = this.currentSprite || SpriteSheet.createNew(slice, 'idle');
+            if (!this.currentSprite) this.currentSprite = sheet;
+            try { if (typeof sheet.disposeAll === 'function') sheet.disposeAll(); } catch (e) { /* ignore */ }
+            sheet.slicePx = slice;
+            sheet._frames = new Map();
+            sheet.animations = new Map();
+
+            const animNames = Object.keys(snapshot.frames || {});
+            let row = 0;
+            for (const name of animNames) {
+                const frameUrls = snapshot.frames[name] || [];
+                const arr = [];
+                for (const dataUrl of frameUrls) {
+                    const c = document.createElement('canvas');
+                    c.width = slice; c.height = slice;
+                    const ctx = c.getContext('2d');
+                    ctx.clearRect(0, 0, c.width, c.height);
+                    if (dataUrl) {
+                        try { await this._drawDataUrlToCanvas(ctx, dataUrl, slice, slice); } catch (e) { /* blank on error */ }
+                    }
+                    arr.push(c);
+                }
+                sheet._frames.set(name, arr);
+                sheet.animations.set(name, { row, frameCount: arr.length });
+                row++;
+            }
+            try { sheet._rebuildSheetCanvas(); } catch (e) {}
+            this.selectedAnimation = animNames[0] || this.selectedAnimation || 'idle';
+            this.selectedFrame = 0;
+            if (this.FrameSelect) {
+                this.FrameSelect.sprite = sheet;
+                try { if (this.FrameSelect._multiSelected) this.FrameSelect._multiSelected.clear(); } catch (e) {}
+                try { if (typeof this.FrameSelect.rebuild === 'function') this.FrameSelect.rebuild(); } catch (e) {}
+            }
+            if (Number.isFinite(snapshot.tileCols)) this.tileCols = snapshot.tileCols;
+            if (Number.isFinite(snapshot.tileRows)) this.tileRows = snapshot.tileRows;
+            if (Array.isArray(snapshot.bindings)) this._areaBindings = snapshot.bindings;
+            if (Array.isArray(snapshot.transforms)) this._areaTransforms = snapshot.transforms;
+            return true;
+        } catch (e) {
+            console.warn('_applySnapshot failed', e);
+            return false;
+        } finally {
+            this._suppressOutgoing = false;
+        }
+    }
+
+    _drawDataUrlToCanvas(ctx, dataUrl, w, h) {
+        return new Promise((resolve) => {
+            if (!ctx || !dataUrl) { resolve(false); return; }
+            const img = new Image();
+            img.onload = () => {
+                try { ctx.clearRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h); } catch (e) { /* ignore */ }
+                resolve(true);
+            };
+            img.onerror = () => resolve(false);
+            img.src = dataUrl;
+        });
+    }
+
+    _sendSyncAck(requestId) {
+        if (!requestId || !this.server || !this.server.sendDiff) return;
+        const diff = {};
+        const ackId = (this.playerId) ? this.playerId : (this.clientId || 'client');
+        diff['sync/acks/' + ackId] = requestId;
+        try { this.server.sendDiff(diff); } catch (e) { console.warn('sync ack send failed', e); }
     }
 
     // Helper: mark a pixel as modified locally at given timestamp (ms)
