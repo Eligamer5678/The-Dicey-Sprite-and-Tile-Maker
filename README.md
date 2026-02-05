@@ -15,7 +15,6 @@
 - While holding v, you can use r to rotate & f to flip the selection
 - Backspace to delete current frame
 - Exports as 1 animation per row, having empty space to the side of the rightmost frames.
-- 
 - Press 'n' to add a bit of noise to the image 
 - Shift click multiple frames to layer them in the preview, click m to fully merge.
 - Useful for stuff like layering or onion skin
@@ -31,6 +30,7 @@
 - up/down keys to move the frame
 - '/' to duplicate frame
 - f to fill region
+- shift+f to select region
 
 
 - Press the upper left corner to access the console
@@ -40,6 +40,7 @@
 - "resize(sliceSize,resizeContent=true)" - *resizes the canvas*
 - "copy(hex)" - *copys pen color*
 - "select(hex,buffer)" - *selects all pixels of this color* 
+- "replace(hex1,hex2,include=[frame|animation|all],buffer=1)"
 - "grayscale()" - grayscales the frame
 - "toggleOnion" - toggles onion skinning
 - "layerAlpha" - multi-select layer & onion skin visibility
@@ -47,12 +48,22 @@
 - "save" - save the program (autosaves every 30seconds by default)
 - "clearSave" - wipes all save data (WARNING: CANNOT BE UNDONE)
 - "enableColab" - Enables realtime online colab with Firebase, so you can edit sprites with freinds!
+- "name(username)" - Show a username above your cursor
+- "msg(text)" - Message others (shows in the console for other users)
 
 - **Tile mode**
-- Press t to enter
+- Press t to enter.
+- Press shift+t to choose grid size.
 - r to rotate, shift-r to actually rotate the frame data
 - alt+f to flip, alt+shift+f to actully flip the frame data
 - Press 'y' to mirror the selected frame. Toggles between locked-on-frame & selected
+
+- **Online colab**
+- Before anything, everyone must start with the same file. (does not do base sync yet)
+- Type enableColab() into the built in console.
+- Click create/join/the text box. Clicking anywhere else will make the menu disapear.
+- You can type name(Username) to make your cursor show your username.
+- msg() to message players.
 
 - **Latest update**
 - Added full online colab

@@ -312,6 +312,9 @@ export class SpriteScene extends Scene {
         // transient flag set when a paste just occurred to avoid key-order races
         this._justPasted = false;
         this.tilemode = false;
+        // tile grid configuration (columns x rows) when tilemode is enabled.
+        this.tileCols = 3;
+        this.tileRows = 3;
 
         // cache of draw areas rendered this tick so input mapping can hit the correct one
         this._drawAreas = [];
@@ -461,6 +464,27 @@ export class SpriteScene extends Scene {
                     });
                 } catch (e) {
                     console.warn('Failed to register CopyColor debug signal', e);
+                }
+                // Configure tile-mode grid size: tileArray(cols, rows).
+                // Example: tileArray(5,5) -> 5x5 grid of mirrored tiles.
+                try {
+                    window.Debug.createSignal('tileArray', (cols = 3, rows = cols) => {
+                        try {
+                            const toInt = (v, def) => {
+                                const n = Math.floor(Number(v));
+                                return Number.isFinite(n) && n > 0 ? n : def;
+                            };
+                            const c = Math.max(1, toInt(cols, this.tileCols || 3));
+                            const r = Math.max(1, toInt(rows, this.tileRows || 3));
+                            this.tileCols = c;
+                            this.tileRows = r;
+                            window.Debug && window.Debug.log && window.Debug.log('Tile array size set to', c + 'x' + r);
+                        } catch (err) {
+                            window.Debug && window.Debug.error && window.Debug.error('tileArray signal failed: ' + err);
+                        }
+                    });
+                } catch (e) {
+                    console.warn('Failed to register tileArray debug signal', e);
                 }
             }
         } catch (e) {}
@@ -1079,7 +1103,7 @@ export class SpriteScene extends Scene {
 
         // Autosave defaults
         this._autosaveEnabled = true;
-        this._autosaveIntervalSeconds = 60;
+        this._autosaveIntervalSeconds = 5;
         this._autosaveIntervalId = null;
 
         
@@ -1128,6 +1152,48 @@ export class SpriteScene extends Scene {
                         } catch (e) {}
                         return;
                     }
+
+                    // If metadata includes a slice size, apply it so cursor/grid math matches
+                    // the saved sprite instead of defaulting to 16x16.
+                    try {
+                        if (meta && typeof meta.slicePx === 'number' && meta.slicePx > 0) {
+                            this.currentSprite.slicePx = Math.floor(meta.slicePx);
+                        }
+                    } catch (e) { /* non-fatal */ }
+
+                    // Restore tile-mode layout (grid size, bindings, preview transforms) if present
+                    try {
+                        const layout = meta && meta.tileLayout ? meta.tileLayout : null;
+                        if (layout && typeof layout === 'object') {
+                            const parseDim = (v, fallback) => {
+                                const n = Math.floor(Number(v));
+                                return Number.isFinite(n) && n > 0 ? n : fallback;
+                            };
+                            const cols = parseDim(layout.tileCols, (this.tileCols|0) || 3);
+                            const rows = parseDim(layout.tileRows, (this.tileRows|0) || cols);
+                            this.tileCols = Math.max(1, cols);
+                            this.tileRows = Math.max(1, rows);
+                            this.tilemode = !!layout.tilemode;
+                            if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
+                            if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
+                            if (Array.isArray(layout.bindings)) {
+                                for (const b of layout.bindings) {
+                                    if (!b) continue;
+                                    const i = Number(b.areaIndex);
+                                    if (!Number.isFinite(i) || i < 0) continue;
+                                    this._areaBindings[i] = { anim: b.anim, index: Number(b.index) };
+                                }
+                            }
+                            if (Array.isArray(layout.transforms)) {
+                                for (const t of layout.transforms) {
+                                    if (!t) continue;
+                                    const i = Number(t.areaIndex);
+                                    if (!Number.isFinite(i) || i < 0) continue;
+                                    this._areaTransforms[i] = { rot: (t.rot || 0), flipH: !!t.flipH };
+                                }
+                            }
+                        }
+                    } catch (e) { /* ignore tile layout restore errors */ }
 
                     // Reconstruct frames from saved per-frame images
                     if (!this.currentSprite || !this.currentSprite._frames) return;
@@ -1498,11 +1564,36 @@ export class SpriteScene extends Scene {
                 }
             }
         } catch (e) { /* ignore */ }
-        if (this.keys.released('t')){
-            if(this.tilemode) {
-                this.tilemode = false;
+        // Toggle / configure tilemode.
+        // Plain 't' or 'T' toggles tilemode.
+        // Shift+T prompts for a tile grid size before enabling (or reconfiguring) tilemode.
+        if (this.keys.released('t') || this.keys.released('T')) {
+            const shiftHeld = !!(this.keys && this.keys.held && this.keys.held('Shift'));
+            if (!shiftHeld) {
+                this.tilemode = !this.tilemode;
             } else {
-                this.tilemode = true;
+                try {
+                    const defCols = Math.max(1, (this.tileCols|0) || 3);
+                    const defRows = Math.max(1, (this.tileRows|0) || defCols);
+                    const defStr = defCols === defRows ? String(defRows) : (defRows + 'x' + defCols);
+                    const input = window.prompt('Grid size (default "3x3")', defStr);
+                    if (input != null) {
+                        const raw = String(input).trim().toLowerCase();
+                        if (raw.length > 0) {
+                            const normalized = raw.replace(/x/gi, ',').replace(/\s+/g, '');
+                            const parts = normalized.split(',').filter(p => p.length > 0);
+                            const parseDim = (v, fallback) => {
+                                const n = Math.floor(Number(v));
+                                return Number.isFinite(n) && n > 0 ? n : fallback;
+                            };
+                            const rows = parseDim(parts[0], defRows);
+                            const cols = parseDim(parts[1] !== undefined ? parts[1] : rows, defCols);
+                            this.tileRows = Math.max(1, rows);
+                            this.tileCols = Math.max(1, cols);
+                            this.tilemode = true;
+                        }
+                    }
+                } catch (e) { /* ignore prompt / parse errors */ }
             }
         }
         try {
@@ -2959,7 +3050,7 @@ export class SpriteScene extends Scene {
                     }
                 } catch (e) { /* ignore frames save errors */ }
 
-                // Minimal metadata: slice size, animations and frame counts, groups
+                // Minimal metadata: slice size, animations and frame counts, groups, tile layout
                 const meta = { name: keyName, slicePx: (sprite && sprite.slicePx) || null, animations: {} };
                 try {
                     if (sprite && sprite._frames && typeof sprite._frames.entries === 'function') {
@@ -2976,6 +3067,35 @@ export class SpriteScene extends Scene {
                         }
                     }
                 } catch (e) {}
+
+                // Persist tile-mode layout (grid size, bindings, preview transforms)
+                try {
+                    const layout = {};
+                    layout.tilemode = !!this.tilemode;
+                    layout.tileCols = Math.max(1, (this.tileCols|0) || 3);
+                    layout.tileRows = Math.max(1, (this.tileRows|0) || 3);
+                    layout.bindings = [];
+                    layout.transforms = [];
+                    if (Array.isArray(this._areaBindings)) {
+                        for (let i = 0; i < this._areaBindings.length; i++) {
+                            const b = this._areaBindings[i];
+                            if (!b || b.anim === undefined || b.index === undefined) continue;
+                            layout.bindings.push({ areaIndex: i, anim: b.anim, index: Number(b.index) });
+                        }
+                    }
+                    if (Array.isArray(this._areaTransforms)) {
+                        for (let i = 0; i < this._areaTransforms.length; i++) {
+                            const t = this._areaTransforms[i];
+                            if (!t) continue;
+                            const rot = (t.rot || 0);
+                            const flipH = !!t.flipH;
+                            if (rot !== 0 || flipH) {
+                                layout.transforms.push({ areaIndex: i, rot, flipH });
+                            }
+                        }
+                    }
+                    meta.tileLayout = layout;
+                } catch (e) { /* ignore tile layout save errors */ }
 
                 try { this.saver.set('sprites_meta/' + keyName, meta); } catch (e) {}
                 return true;
@@ -3916,18 +4036,25 @@ export class SpriteScene extends Scene {
             const size = new Vector(384, 384);
             const center = new Vector((uiW - size.x) / 2, (uiH - size.y) / 2);
 
-            // Build all displayed tile positions (center + neighbors when tilemode)
+            // Build all displayed tile positions.
+            // When tilemode is off, show a single central area.
+            // When tilemode is on, show a tileCols x tileRows grid centered on this area.
             const positions = [];
-            positions.push(center.clone());
-            if (this.tilemode) {
-                positions.push(center.clone().add(size));
-                positions.push(center.clone().sub(size));
-                positions.push(new Vector(center.x, center.y + size.y));
-                positions.push(new Vector(center.x, center.y - size.y));
-                positions.push(new Vector(center.x + size.x, center.y - size.y));
-                positions.push(new Vector(center.x + size.x, center.y));
-                positions.push(new Vector(center.x - size.x, center.y));
-                positions.push(new Vector(center.x - size.x, center.y + size.y));
+            if (!this.tilemode) {
+                positions.push(center.clone());
+            } else {
+                const cols = Math.max(1, (this.tileCols|0) || 1);
+                const rows = Math.max(1, (this.tileRows|0) || 1);
+                const midCol = Math.floor(cols / 2);
+                const midRow = Math.floor(rows / 2);
+                for (let row = 0; row < rows; row++) {
+                    for (let col = 0; col < cols; col++) {
+                        const offsetX = (col - midCol) * size.x;
+                        const offsetY = (row - midRow) * size.y;
+                        const p = center.clone().add(new Vector(offsetX, offsetY));
+                        positions.push(p);
+                    }
+                }
             }
 
             // compute and cache area infos for input mapping
@@ -4011,17 +4138,6 @@ export class SpriteScene extends Scene {
 
             // draw border
             this.Draw.rect(pos, size, '#FFFFFF88', false, true, 2, '#FFFFFF88');
-
-            // show binding label if this area is bound to a frame; otherwise show faint mirrored note when tilemode
-            try {
-                if (typeof areaIndex === 'number' && Array.isArray(this._areaBindings) && this._areaBindings[areaIndex]) {
-                    const b = this._areaBindings[areaIndex];
-                    const label = (b && b.anim) ? `${b.anim}:${b.index}` : String(b && b.index);
-                    this.Draw.text(label, new Vector(pos.x + 6, pos.y + 14), '#FFFFFF', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
-                } else if (this.tilemode) {
-                    this.Draw.text('(mirrored)', new Vector(pos.x + 6, pos.y + 14), '#AAAAAA', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
-                }
-            } catch (e) { }
 
             // draw the frame image centered inside the box with some padding
             if (sheet) {
@@ -4159,6 +4275,17 @@ export class SpriteScene extends Scene {
                     // fallback when not in tilemode: draw the packed sheet (will show full sheet)
                     this.Draw.image(sheet.sheet, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
                 }
+
+                // After drawing the frame, show binding label (or mirrored note) so text appears above the art.
+                try {
+                    if (typeof areaIndex === 'number' && Array.isArray(this._areaBindings) && this._areaBindings[areaIndex]) {
+                        const b = this._areaBindings[areaIndex];
+                        const label = (b && b.anim) ? `${b.anim}:${b.index}` : String(b && b.index);
+                        this.Draw.text(label, new Vector(pos.x + 6, pos.y + 14), '#FFFFFF', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
+                    } else if (this.tilemode) {
+                        this.Draw.text('(mirrored)', new Vector(pos.x + 6, pos.y + 14), '#AAAAAA', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
+                    }
+                } catch (e) { }
 
                 // Draw a pixel cursor preview if the mouse is over the draw area
                 this.displayCursor(dstPos,dstW,dstH)

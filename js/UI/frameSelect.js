@@ -239,6 +239,16 @@ export default class FrameSelect {
             const files = ev.target.files || [];
             if (!files || files.length === 0) return;
             const file = files[0];
+            // Ask whether this file should be treated as a spritesheet (default) or tilesheet
+            let importMode = 'spritesheet';
+            try {
+                const choice = window.prompt('Import as? 1 = spritesheet, 2 = tilesheet', '1');
+                if (choice !== null) {
+                    const v = String(choice).trim();
+                    if (v === '2') importMode = 'tilesheet';
+                    else importMode = 'spritesheet';
+                }
+            } catch (e) { /* ignore and fall back to spritesheet */ }
             // Prefer createImageBitmap for reliable decoding. Fallback to Image if unavailable.
             let bitmap = null;
             try {
@@ -259,14 +269,14 @@ export default class FrameSelect {
             // Prompt for slice size
             const defaultSlice = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
             let sliceStr = window.prompt('Enter slice size (px) for frames (one tile size)', String(defaultSlice));
-            if (!sliceStr) { URL.revokeObjectURL(url); return; }
+            if (!sliceStr) { try { if (img && img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src); } catch(e){} return; }
             let slice = parseInt(sliceStr, 10);
             if (isNaN(slice) || slice <= 0) slice = defaultSlice;
             const srcW = bitmap ? bitmap.width : img.width;
             const srcH = bitmap ? bitmap.height : img.height;
             const cols = Math.max(1, Math.floor(srcW / slice));
             const rows = Math.max(1, Math.floor(srcH / slice));
-            console.log('Importing spritesheet:', file.name, 'img', srcW + 'x' + srcH, 'slice', slice, 'cols', cols, 'rows', rows);
+            console.log('Importing spritesheet:', file.name, 'img', srcW + 'x' + srcH, 'slice', slice, 'cols', cols, 'rows', rows, 'mode', importMode);
             // Build SpriteSheet
             const ss = new SpriteSheet(img, slice);
             ss._frames = new Map();
@@ -307,11 +317,35 @@ export default class FrameSelect {
             // apply to scene
             if (this.scene){
                 this.scene.currentSprite = ss;
-                const firstAnim = Array.from(ss._frames.keys())[0] || 'idle';
+                const animNames = Array.from(ss._frames.keys());
+                const firstAnim = animNames[0] || 'idle';
                 this.scene.selectedAnimation = firstAnim;
                 // materialize frames for the first animation so preview shows up
                 try { if (typeof ss._materializeAnimation === 'function') ss._materializeAnimation(firstAnim); } catch(e) {}
                 this.scene.selectedFrame = 0;
+
+                // If importing as a tilesheet, enable tilemode and mirror the grid.
+                if (importMode === 'tilesheet') {
+                    try {
+                        const scene = this.scene;
+                        scene.tileCols = cols;
+                        scene.tileRows = rows;
+                        scene.tilemode = true;
+                        // reset any existing bindings/transforms
+                        scene._areaBindings = [];
+                        scene._areaTransforms = [];
+                        // Map each grid row to its own animation, each column to a frame in that animation.
+                        const names = animNames && animNames.length ? animNames : Array.from(ss._frames.keys());
+                        for (let r = 0; r < rows; r++){
+                            const animName = names[r] || names[0] || firstAnim;
+                            for (let c = 0; c < cols; c++){
+                                const areaIndex = r * cols + c;
+                                scene._areaBindings[areaIndex] = { anim: animName, index: c };
+                                scene._areaTransforms[areaIndex] = { rot: 0, flipH: false };
+                            }
+                        }
+                    } catch (e) { console.warn('tilesheet import tilemode setup failed', e); }
+                }
             }
             this.sprite = ss;
             // cleanup URL object if we used Image fallback
@@ -326,6 +360,16 @@ export default class FrameSelect {
         try{
             const sheet = this.sprite && this.sprite.sheet ? this.sprite.sheet : null;
             if (!sheet) { alert('No sprite sheet to export'); return; }
+            // Ask whether to export as spritesheet (packed) or tilesheet (current tile-mode view)
+            let exportMode = 'spritesheet';
+            try {
+                const choice = window.prompt('Export as? 1 = spritesheet, 2 = tilesheet', '1');
+                if (choice !== null) {
+                    const v = String(choice).trim();
+                    if (v === '2') exportMode = 'tilesheet';
+                    else exportMode = 'spritesheet';
+                }
+            } catch (e) { /* ignore and keep spritesheet */ }
             const defaultName = (this.scene && this.scene.currentSprite && this.scene.currentSprite.name) ? this.scene.currentSprite.name : 'spritesheet';
             const filenamePrompt = window.prompt('Export filename', defaultName + '.png');
             // If the user cancelled the prompt (null), abort export and do not download.
@@ -351,66 +395,109 @@ export default class FrameSelect {
             // ensure packed sheet is available (may have been deferred for performance)
             try { if (this.sprite && typeof this.sprite.ensurePackedSheet === 'function') this.sprite.ensurePackedSheet(); } catch(e) {}
 
-            // If the current animation contains layered groups, build an export canvas
-            // that collapses layered groups into single frames so the exported PNG
-            // contains merged frames. Otherwise use the existing packed sheet canvas.
+            // Build an export canvas depending on mode
             let exportCanvas = null;
-            try {
-                const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
-                const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
-                const groups = this._getFrameGroups(anim);
-                const hasLayered = Array.isArray(groups) && groups.some(g => !!g.layered);
-                if (anim && framesArr.length > 0 && hasLayered) {
-                    // Build logical sequence collapsing layered groups
-                    const seq = [];
-                    for (let i = 0; i < framesArr.length; i++){
-                        const grp = groups.find(g => Math.min.apply(null, g.indices) === i);
-                        if (grp && grp.layered) {
-                            seq.push({ type: 'group', group: grp });
-                            i = Math.max.apply(null, grp.indices);
-                            continue;
-                        }
-                        seq.push({ type: 'frame', index: i });
-                    }
-                    // create per-logical-frame canvases (slicePx x slicePx)
-                    const slice = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
-                    const framesCanv = [];
-                    for (const e of seq){
-                        const fc = document.createElement('canvas');
-                        fc.width = slice; fc.height = slice;
-                        const fctx = fc.getContext('2d');
-                        if (e.type === 'frame'){
-                            try {
-                                const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, e.index) : null;
-                                if (src && src.getContext) fctx.drawImage(src, 0, 0);
-                            } catch (err) { /* ignore */ }
-                        } else if (e.type === 'group'){
-                            // composite each member frame in order
-                            const idxs = Array.isArray(e.group.indices) ? e.group.indices.slice().sort((a,b)=>a-b) : [];
-                            for (const fi of idxs){
-                                try {
-                                    const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, fi) : null;
-                                    if (src && src.getContext) fctx.drawImage(src, 0, 0);
-                                } catch (err) { /* ignore */ }
-                            }
-                        }
-                        framesCanv.push(fc);
-                    }
-                    // tile into a grid (max 8 columns)
-                    const n = framesCanv.length;
-                    const cols = Math.min(8, Math.max(1, n));
-                    const rows = Math.ceil(n / cols);
+            if (exportMode === 'tilesheet' && this.scene && this.scene.currentSprite) {
+                try {
+                    const scene = this.scene;
+                    const slice = scene.currentSprite.slicePx || (this.sprite && this.sprite.slicePx) || 16;
+                    const cols = Math.max(1, (scene.tileCols|0) || 3);
+                    const rows = Math.max(1, (scene.tileRows|0) || 3);
+                    const areaCount = cols * rows;
+                    // Prepare canvas sized to the tile grid
                     exportCanvas = document.createElement('canvas');
                     exportCanvas.width = cols * slice;
                     exportCanvas.height = rows * slice;
                     const ectx = exportCanvas.getContext('2d');
-                    for (let i = 0; i < n; i++){
-                        const r = Math.floor(i / cols);
-                        const c = i % cols;
-                        ectx.drawImage(framesCanv[i], c * slice, r * slice);
+                    try { ectx.imageSmoothingEnabled = false; } catch (e) {}
+                    // For each area, determine bound frame (or selected frame) and draw into grid
+                    for (let idx = 0; idx < areaCount; idx++) {
+                        const r = Math.floor(idx / cols);
+                        const c = idx % cols;
+                        const binding = (Array.isArray(scene._areaBindings) && scene._areaBindings[idx]) ? scene._areaBindings[idx] : null;
+                        const anim = binding && binding.anim ? binding.anim : scene.selectedAnimation;
+                        const frameIndex = binding && typeof binding.index === 'number' ? binding.index : scene.selectedFrame;
+                        const frameCanvas = (anim && typeof scene.currentSprite.getFrame === 'function') ? scene.currentSprite.getFrame(anim, frameIndex) : null;
+                        if (!frameCanvas) continue;
+                        const transform = (Array.isArray(scene._areaTransforms) && scene._areaTransforms[idx]) ? scene._areaTransforms[idx] : null;
+                        const hasTransform = !!(transform && ((transform.rot || 0) !== 0 || transform.flipH));
+                        const dx = c * slice;
+                        const dy = r * slice;
+                        if (!hasTransform) {
+                            try {
+                                ectx.drawImage(frameCanvas, 0, 0, frameCanvas.width, frameCanvas.height, dx, dy, slice, slice);
+                            } catch (e) { /* ignore */ }
+                        } else {
+                            try {
+                                ectx.save();
+                                ectx.translate(dx + slice / 2, dy + slice / 2);
+                                if (transform.flipH) ectx.scale(-1, 1);
+                                ectx.rotate((transform.rot || 0) * Math.PI / 180);
+                                ectx.drawImage(frameCanvas, -slice / 2, -slice / 2, slice, slice);
+                                ectx.restore();
+                            } catch (e) { /* ignore */ }
+                        }
                     }
-                }
-            } catch (err) { console.warn('build merged export canvas failed', err); }
+                } catch (err) { console.warn('tilesheet export build failed', err); }
+            } else {
+                // Original spritesheet export: optionally merge layered groups for the current animation
+                try {
+                    const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                    const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
+                    const groups = this._getFrameGroups(anim);
+                    const hasLayered = Array.isArray(groups) && groups.some(g => !!g.layered);
+                    if (anim && framesArr.length > 0 && hasLayered) {
+                        // Build logical sequence collapsing layered groups
+                        const seq = [];
+                        for (let i = 0; i < framesArr.length; i++){
+                            const grp = groups.find(g => Math.min.apply(null, g.indices) === i);
+                            if (grp && grp.layered) {
+                                seq.push({ type: 'group', group: grp });
+                                i = Math.max.apply(null, grp.indices);
+                                continue;
+                            }
+                            seq.push({ type: 'frame', index: i });
+                        }
+                        // create per-logical-frame canvases (slicePx x slicePx)
+                        const slice = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+                        const framesCanv = [];
+                        for (const e of seq){
+                            const fc = document.createElement('canvas');
+                            fc.width = slice; fc.height = slice;
+                            const fctx = fc.getContext('2d');
+                            if (e.type === 'frame'){
+                                try {
+                                    const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, e.index) : null;
+                                    if (src && src.getContext) fctx.drawImage(src, 0, 0);
+                                } catch (err) { /* ignore */ }
+                            } else if (e.type === 'group'){
+                                // composite each member frame in order
+                                const idxs = Array.isArray(e.group.indices) ? e.group.indices.slice().sort((a,b)=>a-b) : [];
+                                for (const fi of idxs){
+                                    try {
+                                        const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, fi) : null;
+                                        if (src && src.getContext) fctx.drawImage(src, 0, 0);
+                                    } catch (err) { /* ignore */ }
+                                }
+                            }
+                            framesCanv.push(fc);
+                        }
+                        // tile into a grid (max 8 columns)
+                        const n = framesCanv.length;
+                        const cols = Math.min(8, Math.max(1, n));
+                        const rows = Math.ceil(n / cols);
+                        exportCanvas = document.createElement('canvas');
+                        exportCanvas.width = cols * slice;
+                        exportCanvas.height = rows * slice;
+                        const ectx = exportCanvas.getContext('2d');
+                        for (let i = 0; i < n; i++){
+                            const r = Math.floor(i / cols);
+                            const c = i % cols;
+                            ectx.drawImage(framesCanv[i], c * slice, r * slice);
+                        }
+                    }
+                } catch (err) { console.warn('build merged export canvas failed', err); }
+            }
 
             const blob = await new Promise((res)=> {
                 if (exportCanvas && exportCanvas.toBlob) return exportCanvas.toBlob((b)=>res(b), 'image/png');
