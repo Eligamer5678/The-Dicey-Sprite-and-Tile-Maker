@@ -19,7 +19,6 @@ export default class FrameSelect {
         this.UIDraw = UIDraw;
         this.layer = layer;
         this.scrollPos = 0
-        this._lastDeleted = null; // store last deleted frame for simple undo
         this._animTimer = 0;
         this._animIndex = 0;
         this._animFps = 8;
@@ -953,11 +952,7 @@ export default class FrameSelect {
                     const sel = this.scene.selectedFrame;
                     const arr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
                     if (anim && sel !== null && arr.length > 0 && sel >= 0 && sel < arr.length) {
-                        // capture removed frame for undo
-                        const removed = this.sprite.popFrame(anim, sel);
-                        if (removed) {
-                            this._lastDeleted = { anim: anim, index: sel, canvas: removed };
-                        }
+                        this.sprite.popFrame(anim, sel);
                         // clamp selectedFrame to new range
                         const newLen = (this.sprite._frames.get(anim) || []).length;
                         if (newLen === 0) this.scene.selectedFrame = 0;
@@ -969,53 +964,6 @@ export default class FrameSelect {
             }
         } catch (e) {
             console.warn('FrameSelect delete handling failed', e);
-        }
-
-        // undo delete (Ctrl+Z or Meta+Z)
-        try {
-            if (this.keys && typeof this.keys.comboPressed === 'function') {
-                if (this.keys.comboPressed(['Control','z']) || this.keys.comboPressed(['Meta','z'])) {
-                    if (this._lastDeleted && this.sprite) {
-                        const info = this._lastDeleted;
-                        try {
-                            const anim = info.anim;
-                            const logicalIndex = Number(info.index) || 0;
-                            if (typeof this.sprite.insertFrame === 'function') {
-                                // use insertFrame so frame count stays in sync across clients
-                                this.sprite.insertFrame(anim, logicalIndex);
-                                try {
-                                    const restored = (typeof this.sprite.getFrame === 'function')
-                                        ? this.sprite.getFrame(anim, logicalIndex)
-                                        : null;
-                                    if (restored && restored.getContext) {
-                                        const rctx = restored.getContext('2d');
-                                        rctx.clearRect(0, 0, restored.width, restored.height);
-                                        if (info.canvas) rctx.drawImage(info.canvas, 0, 0);
-                                    } else if (this.sprite && this.sprite._frames && this.sprite._frames.has(anim)) {
-                                        // fallback: directly splice into underlying frames array at logical index
-                                        const arr = this.sprite._frames.get(anim) || [];
-                                        arr.splice(logicalIndex, 0, info.canvas);
-                                    }
-                                } catch (e) { console.warn('FrameSelect undo copy failed', e); }
-                            } else {
-                                // legacy fallback when insertFrame is unavailable
-                                if (!this.sprite._frames.has(anim)) this.sprite._frames.set(anim, []);
-                                const arr = this.sprite._frames.get(anim);
-                                arr.splice(logicalIndex, 0, info.canvas);
-                            }
-                            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
-                            // restore selection to restored frame
-                            if (this.scene) this.scene.selectedFrame = logicalIndex;
-                            // clear saved undo
-                            this._lastDeleted = null;
-                            // mask input (use addMask to avoid interfering with overlapping UI regions)
-                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
-                        } catch (e) { console.warn('FrameSelect undo failed', e); }
-                    }
-                }
-            }
-        } catch (e) {
-            console.warn('FrameSelect undo handling failed', e);
         }
 
         // Duplicate selected frame with '/', and move frames with ArrowUp/ArrowDown

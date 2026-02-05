@@ -132,6 +132,7 @@ export class SpriteScene extends Scene {
                 if (typeof sheet.modifyFrame === 'function') {
                     const _origModify = sheet.modifyFrame.bind(sheet);
                     sheet.modifyFrame = (animation, index, changes) => {
+                        try { this._recordUndoPixels(animation, index, changes); } catch (e) { /* ignore undo capture errors */ }
                         const res = _origModify(animation, index, changes);
                         try {
                             const pixels = [];
@@ -160,6 +161,7 @@ export class SpriteScene extends Scene {
                 if (typeof sheet.setPixel === 'function') {
                     const _origSet = sheet.setPixel.bind(sheet);
                     sheet.setPixel = (animation, index, x, y, color, blendType) => {
+                        try { this._recordUndoPixels(animation, index, { x, y, color, blendType }); } catch (e) { /* ignore undo capture errors */ }
                         const res = _origSet(animation, index, x, y, color, blendType);
                         try {
                             const now = Date.now(); try { this._markPixelModified(animation, Number(index), Number(x), Number(y), now); } catch(e){}
@@ -197,6 +199,12 @@ export class SpriteScene extends Scene {
                 if (typeof sheet.popFrame === 'function') {
                     const _origPop = sheet.popFrame.bind(sheet);
                     sheet.popFrame = (animation, index) => {
+                        // capture frame canvas for undo before deletion
+                        let removedCanvas = null;
+                        try {
+                            const logicalIdx = (typeof index === 'number' && index >= 0) ? Number(index) : 0;
+                            removedCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(animation, logicalIdx) : null;
+                        } catch (e) { /* ignore capture errors */ }
                         // compute logical count BEFORE deletion so we can infer which index was removed when index is undefined
                         let preLogical = 0;
                         try {
@@ -218,6 +226,10 @@ export class SpriteScene extends Scene {
                                 else opIndex = Math.max(0, preLogical - 1); // last logical frame prior to deletion
                                 const id = (Date.now()) + '_' + Math.random().toString(36).slice(2,6);
                                 diff['edits/' + id] = { type: 'struct', action: 'deleteFrame', anim: animation, index: opIndex, client: this.clientId, time: Date.now() };
+                                try {
+                                    const dataUrl = removedCanvas && removedCanvas.toDataURL ? removedCanvas.toDataURL('image/png') : null;
+                                    this._pushUndo({ type: 'delete-frame', anim: animation, index: opIndex, dataUrl, size: sheet.slicePx || 16, time: Date.now() });
+                                } catch (e) { /* ignore undo capture errors */ }
                                 try { this.server.sendDiff(diff); } catch(e){}
                             }
                         } catch(e){}
@@ -284,6 +296,15 @@ export class SpriteScene extends Scene {
         this._lastSyncSnapshotId = null;      // last snapshot id we applied
         this._syncApplyInFlight = null;       // promise guard for applying snapshot
         this._syncBuildInFlight = null;       // request id currently being built
+
+        // Undo/redo stacks for pixel edits and frame deletions
+        this._undoStack = [];
+        this._redoStack = [];
+        this._undoMax = 200;
+        this._undoTimeWindowMs = 30000; // 30s window for frame delete undo validity
+        this._ignoreUndoCapture = false; // skip capturing when replaying undo/redo
+        this._undoMergeMs = 100; // merge consecutive pixel edits within this window
+        this._bypassMirrorWrap = false; // allow tools to skip mirror wrapper when they already mirror
         
         
         this.zoom = new Vector(1,1)
@@ -296,6 +317,8 @@ export class SpriteScene extends Scene {
         this.selectedFrame = 0
         // brush size: 1..4 (mapped to square sizes 1,3,5,7)
         this.brushSize = 1;
+        this.penMirrorH = false;
+        this.penMirrorV = false;
         // which channel to adjust with h/k: 'h'|'s'|'v'|'a'
         this.adjustChannel = 'v';
         // linear adjustment amount (0-1 for S/V/A, wrapped for H)
@@ -1546,6 +1569,7 @@ export class SpriteScene extends Scene {
         this.mouse.setMask(0)
         this.FrameSelect.update()
         this.mouse.setPower(0)
+        this._ensureMirrorWrapper()
         // handle numeric keys to change brush size (1..4)
         try {
             if (this.keys && this.keys.released) {
@@ -1597,6 +1621,20 @@ export class SpriteScene extends Scene {
                 }
             }
         } catch (e) { /* ignore */ }
+
+        // Undo / Redo shortcuts
+        try {
+            const ctrlDown = this.keys.held('Control') || this.keys.held('ControlLeft') || this.keys.held('ControlRight') || this.keys.held('Meta');
+            if (ctrlDown && this.keys.released('z')) {
+                if (this.keys.held('Shift')) {
+                    try { this.redo(); } catch (e) { console.warn('redo failed', e); }
+                } else {
+                    try { this.undo(); } catch (e) { console.warn('undo failed', e); }
+                }
+            } else if (ctrlDown && (this.keys.released('y') || this.keys.released('Y'))) {
+                try { this.redo(); } catch (e) { console.warn('redo failed', e); }
+            }
+        } catch (e) { /* ignore undo key errors */ }
         // Toggle / configure tilemode.
         // Plain 't' or 'T' toggles tilemode.
         // Shift+T prompts for a tile grid size before enabling (or reconfiguring) tilemode.
@@ -1744,6 +1782,22 @@ export class SpriteScene extends Scene {
                         }
                     } catch (e) { /* ignore transform key errors */ }
 
+                // Toggle pen mirroring: '[' horizontal, ']' vertical
+                try {
+                    if (this.keys && typeof this.keys.pressed === 'function') {
+                        if (this.keys.pressed('[')) {
+                            this.penMirrorH = !this.penMirrorH;
+                            this._pixelPerfectStrokeActive = false;
+                            this._applyInitialMirror('h');
+                        }
+                        if (this.keys.pressed(']')) {
+                            this.penMirrorV = !this.penMirrorV;
+                            this._pixelPerfectStrokeActive = false;
+                            this._applyInitialMirror('v');
+                        }
+                    }
+                } catch (e) { /* ignore mirror toggle errors */ }
+
                 // tools (pen) operate during ticks
                 this.selectionTool && this.selectionTool();
                 this.penTool && this.penTool();
@@ -1791,6 +1845,47 @@ export class SpriteScene extends Scene {
             const side = Math.max(1, Math.min(4, this.brushSize || 1));
             const half = Math.floor((side - 1) / 2);
             const areaIndexForPos = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
+            const mirrorH = !!this.penMirrorH;
+            const mirrorV = !!this.penMirrorV;
+            const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(targetAnim, targetFrame) : null;
+            const frameW = frameCanvas ? frameCanvas.width : null;
+            const frameH = frameCanvas ? frameCanvas.height : null;
+            const mirrorActive = (mirrorH || mirrorV) && frameW !== null && frameH !== null;
+
+            const prevBypass = this._bypassMirrorWrap;
+            this._bypassMirrorWrap = true; // pen handles mirroring itself
+
+            try {
+
+            const applyPixel = (px, py, col, usePixelPerfect) => {
+                if (frameW !== null && frameH !== null) {
+                    if (px < 0 || py < 0 || px >= frameW || py >= frameH) return;
+                }
+                if (this.isPixelMasked(px, py, areaIndexForPos)) return;
+                if (usePixelPerfect) {
+                    this._applyPixelPerfectPixel(sheet, targetAnim, targetFrame, px, py, col, areaIndexForPos);
+                } else {
+                    try { sheet.setPixel(targetAnim, targetFrame, px, py, col, 'replace'); }
+                    catch (e) {
+                        try { sheet.modifyFrame(targetAnim, targetFrame, { x: px, y: py, color: col, blendType: 'replace' }); } catch (er) { /* ignore */ }
+                    }
+                }
+            };
+
+            const applyMirrored = (px, py, col, usePixelPerfect) => {
+                const coords = [];
+                coords.push({ x: px, y: py });
+                if (mirrorH && frameW !== null) coords.push({ x: frameW - 1 - px, y: py });
+                if (mirrorV && frameH !== null) coords.push({ x: px, y: frameH - 1 - py });
+                if (mirrorH && mirrorV && frameW !== null && frameH !== null) coords.push({ x: frameW - 1 - px, y: frameH - 1 - py });
+                const seen = new Set();
+                for (const c of coords) {
+                    const key = c.x + ',' + c.y;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    applyPixel(c.x, c.y, col, usePixelPerfect);
+                }
+            };
 
             // Reset pixel-perfect stroke bookkeeping when no buttons are held.
             if (!this.mouse.held('left') && !this.mouse.held('right')) {
@@ -1803,26 +1898,24 @@ export class SpriteScene extends Scene {
                 const sx = pos.x - half;
                 const sy = pos.y - half;
                 const usePixelPerfect = !!this.pixelPerfect && side === 1 && (!this.selectionPoints || this.selectionPoints.length === 0);
-
                 // If explicit selection points exist, respect them as a mask and write per-pixel skipping masked pixels.
                 if (this.selectionPoints && this.selectionPoints.length > 0) {
                     for (let yy = 0; yy < side; yy++) {
                         for (let xx = 0; xx < side; xx++) {
                             const px = sx + xx;
                             const py = sy + yy;
-                            if (this.isPixelMasked(px, py, areaIndexForPos)) continue;
-                            try { if (typeof sheet.setPixel === 'function') sheet.setPixel(targetAnim, targetFrame, px, py, color, 'replace'); else if (typeof sheet.modifyFrame === 'function') sheet.modifyFrame(targetAnim, targetFrame, { x: px, y: py, color, blendType: 'replace' }); } catch (e) {}
+                            applyMirrored(px, py, color, usePixelPerfect);
                         }
                     }
                 } else if (usePixelPerfect) {
                     // Pixel-perfect single-pixel drawing with corner cutting.
-                    this._applyPixelPerfectPixel(sheet, targetAnim, targetFrame, sx, sy, color, areaIndexForPos);
-                } else if (typeof sheet.fillRect === 'function') {
+                    applyMirrored(sx, sy, color, true);
+                } else if (!mirrorActive && typeof sheet.fillRect === 'function') {
                     sheet.fillRect(targetAnim, targetFrame, sx, sy, side, side, color, 'replace');
                 } else {
                     for (let yy = 0; yy < side; yy++) {
                         for (let xx = 0; xx < side; xx++) {
-                            try { sheet.setPixel(targetAnim, targetFrame, sx + xx, sy + yy, color, 'replace'); } catch (e) {}
+                            applyMirrored(sx + xx, sy + yy, color, false);
                         }
                     }
                 }
@@ -1836,30 +1929,32 @@ export class SpriteScene extends Scene {
                 const sx = pos.x - half;
                 const sy = pos.y - half;
                 const usePixelPerfect = !!this.pixelPerfect && side === 1 && (!this.selectionPoints || this.selectionPoints.length === 0);
-
                 if (this.selectionPoints && this.selectionPoints.length > 0) {
                     for (let yy = 0; yy < side; yy++) {
                         for (let xx = 0; xx < side; xx++) {
                             const px = sx + xx;
                             const py = sy + yy;
-                            if (this.isPixelMasked(px, py, areaIndexForPos)) continue;
-                            try { if (typeof sheet.setPixel === 'function') sheet.setPixel(targetAnim, targetFrame, px, py, eraseColor, 'replace'); else if (typeof sheet.modifyFrame === 'function') sheet.modifyFrame(targetAnim, targetFrame, { x: px, y: py, color: eraseColor, blendType: 'replace' }); } catch (e) {}
+                            applyMirrored(px, py, eraseColor, usePixelPerfect);
                         }
                     }
                 } else if (usePixelPerfect) {
-                    this._applyPixelPerfectPixel(sheet, targetAnim, targetFrame, sx, sy, eraseColor, areaIndexForPos);
-                } else if (typeof sheet.fillRect === 'function') {
+                    applyMirrored(sx, sy, eraseColor, true);
+                } else if (!mirrorActive && typeof sheet.fillRect === 'function') {
                     sheet.fillRect(targetAnim, targetFrame, sx, sy, side, side, eraseColor, 'replace');
                 } else {
                     for (let yy = 0; yy < side; yy++) {
                         for (let xx = 0; xx < side; xx++) {
-                            try { sheet.setPixel(targetAnim, targetFrame, sx + xx, sy + yy, eraseColor, 'replace'); } catch (e) {}
+                            applyMirrored(sx + xx, sy + yy, eraseColor, false);
                         }
                     }
                 }
                 if (typeof sheet._rebuildSheetCanvas === 'function') {
                     try { sheet._rebuildSheetCanvas(); } catch (e) {}
                 }
+            }
+
+            } finally {
+                this._bypassMirrorWrap = prevBypass;
             }
             
         } catch (e) {
@@ -1871,6 +1966,190 @@ export class SpriteScene extends Scene {
         this._pixelPerfectStrokeActive = false;
         this._pixelPerfectHistory = [];
         this._pixelPerfectOriginals = new Map();
+    }
+
+    // Ensure the current sprite has mirror-aware wrappers so any edit (not just pen) is mirrored.
+    _ensureMirrorWrapper() {
+        try {
+            const sheet = this.currentSprite;
+            if (!sheet || sheet._mirrorWrappedForScene) return;
+            const scene = this;
+
+            const origModify = (typeof sheet.modifyFrame === 'function') ? sheet.modifyFrame.bind(sheet) : null;
+            const origSetPixel = (typeof sheet.setPixel === 'function') ? sheet.setPixel.bind(sheet) : null;
+            const origFillRect = (typeof sheet.fillRect === 'function') ? sheet.fillRect.bind(sheet) : null;
+
+            const mirrorChanges = (anim, frameIdx, changes) => {
+                if (!scene.penMirrorH && !scene.penMirrorV) return changes;
+                const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                const w = frameCanvas ? frameCanvas.width : null;
+                const h = frameCanvas ? frameCanvas.height : null;
+                if (w === null || h === null) return changes;
+                if (scene._bypassMirrorWrap) return changes;
+                const arr = Array.isArray(changes) ? changes : [changes];
+                const out = [];
+                const seen = new Set();
+                for (const c of arr) {
+                    if (!c || c.x === undefined || c.y === undefined) continue;
+                    const color = c.color || c.col || c.c;
+                    const blendType = c.blendType || 'replace';
+                    const coords = [];
+                    coords.push({ x: c.x, y: c.y, color, blendType });
+                    if (scene.penMirrorH) coords.push({ x: w - 1 - c.x, y: c.y, color, blendType });
+                    if (scene.penMirrorV) coords.push({ x: c.x, y: h - 1 - c.y, color, blendType });
+                    if (scene.penMirrorH && scene.penMirrorV) coords.push({ x: w - 1 - c.x, y: h - 1 - c.y, color, blendType });
+                    for (const p of coords) {
+                        if (p.x < 0 || p.y < 0 || p.x >= w || p.y >= h) continue;
+                        const key = p.x + ',' + p.y + ',' + (p.blendType || 'replace');
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        out.push(p);
+                    }
+                }
+                return out;
+            };
+
+            if (origModify) {
+                sheet.modifyFrame = function(anim, frameIdx, changes) {
+                    if (!scene.penMirrorH && !scene.penMirrorV) return origModify(anim, frameIdx, changes);
+                    if (scene._bypassMirrorWrap) return origModify(anim, frameIdx, changes);
+                    const mirrored = mirrorChanges(anim, frameIdx, changes);
+                    if (!mirrored || mirrored.length === 0) return;
+                    return origModify(anim, frameIdx, mirrored);
+                };
+            }
+
+            if (origSetPixel) {
+                sheet.setPixel = function(anim, frameIdx, x, y, color, blendType) {
+                    if (!scene.penMirrorH && !scene.penMirrorV) return origSetPixel(anim, frameIdx, x, y, color, blendType);
+                    if (scene._bypassMirrorWrap) return origSetPixel(anim, frameIdx, x, y, color, blendType);
+                    const changes = mirrorChanges(anim, frameIdx, { x, y, color, blendType });
+                    if (!changes || changes.length === 0) return;
+                    for (const c of changes) {
+                        origSetPixel(anim, frameIdx, c.x, c.y, c.color, c.blendType);
+                    }
+                };
+            }
+
+            if (origFillRect) {
+                sheet.fillRect = function(anim, frameIdx, x, y, wRect, hRect, color, blendType) {
+                    if (!scene.penMirrorH && !scene.penMirrorV) return origFillRect(anim, frameIdx, x, y, wRect, hRect, color, blendType);
+                    if (scene._bypassMirrorWrap) return origFillRect(anim, frameIdx, x, y, wRect, hRect, color, blendType);
+                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                    const fw = frameCanvas ? frameCanvas.width : null;
+                    const fh = frameCanvas ? frameCanvas.height : null;
+                    if (fw === null || fh === null) return origFillRect(anim, frameIdx, x, y, wRect, hRect, color, blendType);
+                    const pixels = [];
+                    for (let yy = 0; yy < hRect; yy++) {
+                        for (let xx = 0; xx < wRect; xx++) {
+                            pixels.push({ x: x + xx, y: y + yy, color, blendType });
+                        }
+                    }
+                    const mirrored = mirrorChanges(anim, frameIdx, pixels);
+                    if (mirrored && mirrored.length) {
+                        if (origModify) origModify(anim, frameIdx, mirrored);
+                        else if (origSetPixel) {
+                            for (const c of mirrored) origSetPixel(anim, frameIdx, c.x, c.y, c.color, c.blendType);
+                        }
+                    }
+                };
+            }
+
+            sheet._mirrorWrappedForScene = true;
+        } catch (e) { /* ignore wrapper errors */ }
+    }
+
+    // When mirror is toggled, immediately copy the side under the cursor to the opposite side (flipped).
+    _applyInitialMirror(axis) {
+        try {
+            if (!axis || (axis !== 'h' && axis !== 'v')) return;
+            const sheet = this.currentSprite;
+            if (!sheet || !this.mouse) return;
+            const pos = this.getPos(this.mouse.pos);
+            if (!pos || !pos.inside) return;
+
+            // resolve target anim/frame similar to pen tool
+            const areaBinding = (pos && typeof pos.areaIndex === 'number' && Array.isArray(this._areaBindings)) ? this._areaBindings[pos.areaIndex] : null;
+            const anim = (areaBinding && areaBinding.anim) ? areaBinding.anim : this.selectedAnimation;
+            const frameIdx = (areaBinding && typeof areaBinding.index === 'number') ? areaBinding.index : this.selectedFrame;
+
+            const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+            if (!frameCanvas || !frameCanvas.getContext) return;
+            const w = frameCanvas.width;
+            const h = frameCanvas.height;
+            if (!w || !h) return;
+            const ctx = frameCanvas.getContext('2d');
+            const img = ctx.getImageData(0, 0, w, h);
+            const data = img.data;
+
+            const changes = [];
+            if (axis === 'h') {
+                const mid = Math.floor(w / 2);
+                const copyLeft = pos.x < w / 2;
+                if (copyLeft) {
+                    // copy left -> right
+                    for (let y = 0; y < h; y++) {
+                        for (let x = mid; x < w; x++) {
+                            const srcX = w - 1 - x; // mirror from left side
+                            const idx = (y * w + srcX) * 4;
+                            const hex = this.rgbaToHex(data[idx], data[idx + 1], data[idx + 2], data[idx + 3]);
+                            changes.push({ x, y, color: hex, blendType: 'replace' });
+                        }
+                    }
+                } else {
+                    // copy right -> left
+                    for (let y = 0; y < h; y++) {
+                        for (let x = 0; x < mid; x++) {
+                            const srcX = w - 1 - x; // mirror from right side
+                            const idx = (y * w + srcX) * 4;
+                            const hex = this.rgbaToHex(data[idx], data[idx + 1], data[idx + 2], data[idx + 3]);
+                            changes.push({ x, y, color: hex, blendType: 'replace' });
+                        }
+                    }
+                }
+            } else if (axis === 'v') {
+                const mid = Math.floor(h / 2);
+                const copyTop = pos.y < h / 2;
+                if (copyTop) {
+                    // copy top -> bottom
+                    for (let y = mid; y < h; y++) {
+                        const srcY = h - 1 - y; // mirror from top
+                        for (let x = 0; x < w; x++) {
+                            const idx = (srcY * w + x) * 4;
+                            const hex = this.rgbaToHex(data[idx], data[idx + 1], data[idx + 2], data[idx + 3]);
+                            changes.push({ x, y, color: hex, blendType: 'replace' });
+                        }
+                    }
+                } else {
+                    // copy bottom -> top
+                    for (let y = 0; y < mid; y++) {
+                        const srcY = h - 1 - y; // mirror from bottom
+                        for (let x = 0; x < w; x++) {
+                            const idx = (srcY * w + x) * 4;
+                            const hex = this.rgbaToHex(data[idx], data[idx + 1], data[idx + 2], data[idx + 3]);
+                            changes.push({ x, y, color: hex, blendType: 'replace' });
+                        }
+                    }
+                }
+            }
+
+            if (!changes.length) return;
+            const prevBypass = this._bypassMirrorWrap;
+            this._bypassMirrorWrap = true; // avoid double-mirroring inside wrapper
+            try {
+                try { this._recordUndoPixels(anim, frameIdx, changes); } catch (e) { /* ignore undo capture errors */ }
+                try { sheet.modifyFrame(anim, frameIdx, changes); } catch (e) {
+                    for (const c of changes) {
+                        try { sheet.setPixel(anim, frameIdx, c.x, c.y, c.color, 'replace'); } catch (er) { /* ignore */ }
+                    }
+                }
+                try { if (sheet._rebuildSheetCanvas) sheet._rebuildSheetCanvas(); } catch (e) { /* ignore */ }
+            } finally {
+                this._bypassMirrorWrap = prevBypass;
+            }
+        } catch (e) {
+            console.warn('initial mirror failed', e);
+        }
     }
 
     _applyPixelPerfectPixel(sheet, anim, frameIdx, x, y, color, areaIndex) {
@@ -2487,6 +2766,11 @@ export class SpriteScene extends Scene {
                         // write back and rebuild sheet
                         ctx.putImageData(img, 0, 0);
                         if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                        // Mirror the result immediately when mirror modes are active
+                        try {
+                            if (this.penMirrorH) this._applyInitialMirror('h');
+                            if (this.penMirrorV) this._applyInitialMirror('v');
+                        } catch (e) { /* ignore mirror apply errors */ }
                     } catch (e) {
                         // ignore image read/write errors
                     }
@@ -4006,6 +4290,172 @@ export class SpriteScene extends Scene {
         try { this.server.sendDiff(diff); } catch (e) { console.warn('sync ack send failed', e); }
     }
 
+    // --- Undo / Redo helpers ---
+    _pushUndo(entry) {
+        if (!entry || this._ignoreUndoCapture) return;
+        this._undoStack.push(entry);
+        // trim to max and clear redo on new action
+        if (this._undoStack.length > this._undoMax) this._undoStack.shift();
+        this._redoStack = [];
+    }
+
+    _recordUndoPixels(anim, frameIdx, changes) {
+        if (this._ignoreUndoCapture) return;
+        const sheet = this.currentSprite;
+        if (!sheet || !sheet.getFrame) return;
+        const frame = sheet.getFrame(anim, frameIdx);
+        if (!frame || !frame.getContext) return;
+        const ctx = frame.getContext('2d');
+        const w = frame.width, h = frame.height;
+        if (!w || !h) return;
+
+        const coords = [];
+        if (Array.isArray(changes)) {
+            for (const c of changes) {
+                if (!c || c.x === undefined || c.y === undefined) continue;
+                coords.push({ x: Number(c.x), y: Number(c.y), next: c.color || c.col || c.c || '#000000' });
+            }
+        } else if (changes && changes.x !== undefined && changes.y !== undefined) {
+            coords.push({ x: Number(changes.x), y: Number(changes.y), next: changes.color || changes.col || changes.c || '#000000' });
+        }
+        if (!coords.length) return;
+
+        let img;
+        try { img = ctx.getImageData(0, 0, w, h); } catch (e) { return; }
+        const data = img.data;
+        // Deduplicate coords inside the batch
+        const samples = [];
+        const seen = new Map(); // key: "x,y" -> index in samples
+        for (const c of coords) {
+            const x = Math.max(0, Math.min(w - 1, Math.floor(c.x)));
+            const y = Math.max(0, Math.min(h - 1, Math.floor(c.y)));
+            const key = x + ',' + y;
+            const idx = (y * w + x) * 4;
+            const r = data[idx];
+            const g = data[idx + 1];
+            const b = data[idx + 2];
+            const a = data[idx + 3];
+            const prevHex = this.rgbaToHex(r, g, b, a);
+            const nextHex = c.next || '#000000';
+            if (seen.has(key)) {
+                // Keep earliest prev, update next to latest
+                const sIdx = seen.get(key);
+                samples[sIdx].next = nextHex;
+            } else {
+                seen.set(key, samples.length);
+                samples.push({ x, y, prev: prevHex, next: nextHex });
+            }
+        }
+        if (!samples.length) return;
+
+        const now = Date.now();
+        const last = this._undoStack[this._undoStack.length - 1];
+        const canMerge = last && last.type === 'pixels' && last.anim === anim && last.frame === Number(frameIdx) && (now - last.time) <= this._undoMergeMs;
+        if (canMerge) {
+            // Merge into last entry while preserving original prev colors
+            const map = new Map();
+            for (let i = 0; i < last.pixels.length; i++) {
+                const p = last.pixels[i];
+                map.set(p.x + ',' + p.y, { idx: i, prev: p.prev });
+            }
+            for (const s of samples) {
+                const key = s.x + ',' + s.y;
+                if (map.has(key)) {
+                    const entry = map.get(key);
+                    last.pixels[entry.idx].next = s.next;
+                    // keep existing prev (earliest)
+                } else {
+                    last.pixels.push(s);
+                    map.set(key, { idx: last.pixels.length - 1, prev: s.prev });
+                }
+            }
+            last.time = now;
+            this._redoStack = []; // new edits invalidate redo even when merged
+        } else {
+            this._pushUndo({ type: 'pixels', anim, frame: Number(frameIdx) || 0, pixels: samples, time: now });
+        }
+    }
+
+    _applyPixelBatch(anim, frameIdx, pixels, useNext) {
+        if (!pixels || pixels.length === 0) return;
+        const sheet = this.currentSprite;
+        if (!sheet) return;
+        const changes = pixels.map(p => ({ x: p.x, y: p.y, color: useNext ? p.next : p.prev, blendType: 'replace' }));
+        try { sheet.modifyFrame(anim, frameIdx, changes); } catch (e) {
+            // fallback per-pixel
+            for (const p of changes) {
+                try { sheet.setPixel(anim, frameIdx, p.x, p.y, p.color, 'replace'); } catch (er) { /* ignore */ }
+            }
+        }
+        try { if (sheet._rebuildSheetCanvas) sheet._rebuildSheetCanvas(); } catch (e) { /* ignore */ }
+    }
+
+    undo() {
+        if (!this._undoStack || this._undoStack.length === 0) return false;
+        const now = Date.now();
+        let entry = null;
+        while (this._undoStack.length > 0) {
+            const cand = this._undoStack.pop();
+            if (cand.type === 'delete-frame' && this._undoTimeWindowMs && cand.time && (now - cand.time) > this._undoTimeWindowMs) {
+                continue; // expired frame delete
+            }
+            entry = cand; break;
+        }
+        if (!entry) return false;
+        this._ignoreUndoCapture = true;
+        try {
+            if (entry.type === 'pixels') {
+                this._applyPixelBatch(entry.anim, entry.frame, entry.pixels, false);
+            } else if (entry.type === 'delete-frame') {
+                this._restoreDeletedFrame(entry);
+            }
+            this._redoStack.push(entry);
+            if (this._redoStack.length > this._undoMax) this._redoStack.shift();
+        } finally {
+            this._ignoreUndoCapture = false;
+        }
+        return true;
+    }
+
+    redo() {
+        if (!this._redoStack || this._redoStack.length === 0) return false;
+        const entry = this._redoStack.pop();
+        this._ignoreUndoCapture = true;
+        try {
+            if (entry.type === 'pixels') {
+                this._applyPixelBatch(entry.anim, entry.frame, entry.pixels, true);
+            } else if (entry.type === 'delete-frame') {
+                // redo delete: re-apply removal
+                try { this.currentSprite && this.currentSprite.popFrame(entry.anim, entry.index); } catch (e) { /* ignore */ }
+            }
+            this._undoStack.push(entry);
+        } finally {
+            this._ignoreUndoCapture = false;
+        }
+        return true;
+    }
+
+    _restoreDeletedFrame(entry) {
+        if (!entry || !entry.dataUrl) return;
+        const sheet = this.currentSprite;
+        if (!sheet) return;
+        const slice = entry.size || sheet.slicePx || 16;
+        try { sheet.insertFrame(entry.anim, entry.index); } catch (e) { /* ignore */ }
+        const frame = sheet.getFrame(entry.anim, entry.index);
+        if (frame && frame.getContext) {
+            const ctx = frame.getContext('2d');
+            ctx.clearRect(0, 0, frame.width, frame.height);
+            const img = new Image();
+            img.onload = () => {
+                try { ctx.drawImage(img, 0, 0, slice, slice); if (sheet._rebuildSheetCanvas) sheet._rebuildSheetCanvas(); } catch (e) { /* ignore */ }
+            };
+            img.src = entry.dataUrl;
+        }
+        // restore selection to the reinstated frame
+        this.selectedAnimation = entry.anim;
+        this.selectedFrame = entry.index;
+    }
+
     // Helper: mark a pixel as modified locally at given timestamp (ms)
     _markPixelModified(anim, frameIdx, x, y, timestamp) {
         try {
@@ -4573,6 +5023,18 @@ export class SpriteScene extends Scene {
 
             // draw border
             this.Draw.rect(pos, size, '#FFFFFF88', false, true, 2, '#FFFFFF88');
+
+            // show active mirror axes for the pen tool
+            try {
+                const midX = pos.x + size.x / 2;
+                const midY = pos.y + size.y / 2;
+                if (this.penMirrorH) {
+                    this.Draw.line(new Vector(midX, pos.y), new Vector(midX, pos.y + size.y), '#FFFFFF88', 2);
+                }
+                if (this.penMirrorV) {
+                    this.Draw.line(new Vector(pos.x, midY), new Vector(pos.x + size.x, midY), '#FFFFFF88', 2);
+                }
+            } catch (e) { /* ignore mirror guideline errors */ }
 
             // draw the frame image centered inside the box with some padding
             if (sheet) {
