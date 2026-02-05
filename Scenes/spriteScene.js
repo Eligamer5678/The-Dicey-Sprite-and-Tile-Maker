@@ -480,6 +480,10 @@ export class SpriteScene extends Scene {
                     const tr = Math.round(rgbCol.a || 0);
                     const tg = Math.round(rgbCol.b || 0);
                     const tb = Math.round(rgbCol.c || 0);
+                    // If an explicit alpha is present (e.g. 8-digit hex), treat the
+                    // selection as alpha-exclusive instead of RGB distance based.
+                    const hasAlpha = (rgbCol && typeof rgbCol.d === 'number');
+                    const ta = hasAlpha ? Math.round((rgbCol.d || 0) * 255) : null;
 
                     const sheet = this.currentSprite;
                     const anim = this.selectedAnimation;
@@ -509,13 +513,20 @@ export class SpriteScene extends Scene {
                             const r = data[i];
                             const g = data[i + 1];
                             const b = data[i + 2];
+                            const a = data[i + 3];
+
                             const dr = r - tr;
                             const dg = g - tg;
                             const db = b - tb;
                             const distSq = dr * dr + dg * dg + db * db;
-                            if (distSq <= maxDistSq) {
-                                matches.push({ x, y });
-                            }
+                            if (distSq > maxDistSq) continue;
+
+                            // If no alpha was supplied in the target color, ignore
+                            // pixel alpha. If alpha was supplied (8-digit hex), also
+                            // require exact alpha match.
+                            if (hasAlpha && a !== ta) continue;
+
+                            matches.push({ x, y });
                         }
                     }
 
@@ -529,6 +540,123 @@ export class SpriteScene extends Scene {
             });
         } catch (e) {
             console.warn('Failed to register select debug signal', e);
+        }
+
+        // Register ReplaceColor debug signal: replace(hex1, hex2, include='frame'|'animation'|'all', buffer=1)
+        try {
+            window.Debug.createSignal('replace', (hex1, hex2, include = 'frame', buffer = 1) => {
+                try {
+                    if (!hex1 || !hex2) {
+                        window.Debug && window.Debug.log && window.Debug.log('ReplaceColor: missing hex1 or hex2 argument');
+                        return;
+                    }
+                    const sheet = this.currentSprite;
+                    if (!sheet) {
+                        window.Debug && window.Debug.log && window.Debug.log('ReplaceColor: no current sprite');
+                        return;
+                    }
+
+                    const tol = (typeof buffer === 'number') ? buffer : (parseFloat(buffer) || 1);
+
+                    const srcCol = Color.convertColor(hex1).toRgb();
+                    const dstCol = Color.convertColor(hex2).toRgb();
+                    const sr = Math.round(srcCol.a || 0);
+                    const sg = Math.round(srcCol.b || 0);
+                    const sb = Math.round(srcCol.c || 0);
+                    const hasSrcAlpha = (srcCol && typeof srcCol.d === 'number');
+                    const sa = hasSrcAlpha ? Math.round((srcCol.d || 0) * 255) : null;
+
+                    const dr = Math.round(dstCol.a || 0);
+                    const dg = Math.round(dstCol.b || 0);
+                    const db = Math.round(dstCol.c || 0);
+                    const da = Math.round(((dstCol.d === undefined ? 1 : dstCol.d) || 0) * 255);
+
+                    const maxDistSq = tol * tol;
+
+                    // Build list of (anim, frameIdx) targets based on include mode.
+                    const targets = [];
+                    const currentAnim = this.selectedAnimation;
+                    const currentFrameIdx = this.selectedFrame;
+
+                    const safeInclude = (typeof include === 'string') ? include.toLowerCase() : 'frame';
+                    if (safeInclude === 'animation') {
+                        try {
+                            const arr = (sheet._frames && sheet._frames.get(currentAnim)) || [];
+                            for (let i = 0; i < arr.length; i++) {
+                                targets.push({ anim: currentAnim, frameIdx: i });
+                            }
+                        } catch (e) { /* ignore frame enumeration errors */ }
+                    } else if (safeInclude === 'all') {
+                        try {
+                            if (sheet._frames && typeof sheet._frames.entries === 'function') {
+                                for (const [animName, arr] of sheet._frames.entries()) {
+                                    if (!Array.isArray(arr)) continue;
+                                    for (let i = 0; i < arr.length; i++) {
+                                        targets.push({ anim: animName, frameIdx: i });
+                                    }
+                                }
+                            }
+                        } catch (e) { /* ignore global frame enumeration errors */ }
+                    } else {
+                        // default: only the currently selected frame
+                        targets.push({ anim: currentAnim, frameIdx: currentFrameIdx });
+                    }
+
+                    let replacedCount = 0;
+
+                    for (const t of targets) {
+                        if (!t || t.anim === undefined || t.frameIdx === undefined) continue;
+                        let frameCanvas = null;
+                        try { frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(t.anim, t.frameIdx) : null; } catch (e) { frameCanvas = null; }
+                        if (!frameCanvas) continue;
+
+                        const ctx = frameCanvas.getContext('2d');
+                        const w = frameCanvas.width;
+                        const h = frameCanvas.height;
+                        let img;
+                        try { img = ctx.getImageData(0, 0, w, h); } catch (e) { continue; }
+                        const data = img.data;
+
+                        for (let y = 0; y < h; y++) {
+                            for (let x = 0; x < w; x++) {
+                                const i = (y * w + x) * 4;
+                                const r = data[i];
+                                const g = data[i + 1];
+                                const b = data[i + 2];
+                                const a = data[i + 3];
+
+                                const rr = r - sr;
+                                const gg = g - sg;
+                                const bb = b - sb;
+                                const distSq = rr * rr + gg * gg + bb * bb;
+                                if (distSq > maxDistSq) continue;
+
+                                // If hex1 included alpha, also require exact alpha match.
+                                if (hasSrcAlpha && a !== sa) continue;
+
+                                data[i] = dr;
+                                data[i + 1] = dg;
+                                data[i + 2] = db;
+                                data[i + 3] = da;
+                                replacedCount++;
+                            }
+                        }
+
+                        try { ctx.putImageData(img, 0, 0); } catch (e) { /* ignore putImageData errors */ }
+                    }
+
+                    // rebuild packed sheet so editor view updates
+                    if (typeof sheet._rebuildSheetCanvas === 'function') {
+                        try { sheet._rebuildSheetCanvas(); } catch (e) { /* ignore */ }
+                    }
+
+                    window.Debug && window.Debug.log && window.Debug.log(`ReplaceColor: replaced ${replacedCount} pixels from ${hex1} to ${hex2} (include=${safeInclude}, tol=${tol})`);
+                } catch (err) {
+                    window.Debug && window.Debug.error && window.Debug.error('ReplaceColor failed: ' + err);
+                }
+            });
+        } catch (e) {
+            console.warn('Failed to register replace debug signal', e);
         }
 
         // Debug: draw the current pen color into all selected pixels/region
@@ -1805,20 +1933,34 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            // If two points are present and user presses 'b', create a region selection (don't draw).
-            // This sets up for cut/copy/paste workflows.
+            // If two points are present and user presses 'b', perform a box select
+            // but materialize it as a normal per-pixel selection instead of a
+            // special rectangular region ("green box"). This keeps pixel art
+            // workflows simple and consistent.
             if (this.selectionPoints.length === 2) {
                 if (this.keys.pressed('b')) {
                     const start = this.selectionPoints[0];
                     const end = this.selectionPoints[1];
-                    const filled = this.keys.held('Alt');
-                    // store as a selection region instead of committing pixels
-                        // record the areaIndex for the region if both points came from the same area
-                        let areaIdx = null;
-                        if (start && end && start.areaIndex === end.areaIndex) areaIdx = start.areaIndex;
-                        this.selectionRegion = { start: { x: start.x, y: start.y }, end: { x: end.x, y: end.y }, filled, areaIndex: areaIdx };
-                    // consume anchor points
+                    const filled = true; // box select should generally select the full area
+
+                    let pixels = [];
+                    if (typeof this.computeBoxPixels === 'function') {
+                        pixels = this.computeBoxPixels(start, end, filled) || [];
+                    }
+
+                    // Determine area index for the selection if both anchors share one
+                    let areaIdx = null;
+                    if (start && end && start.areaIndex === end.areaIndex) areaIdx = start.areaIndex;
+
+                    // Replace the two anchor points with a dense pixel selection
                     this.selectionPoints = [];
+                    for (const p of pixels) {
+                        this.selectionPoints.push({ x: p.x, y: p.y, areaIndex: areaIdx });
+                    }
+
+                    // Clear any previous rectangular region state so all tools
+                    // operate purely on pixel selections.
+                    this.selectionRegion = null;
                     this.currentTool = null;
                 }
             }
