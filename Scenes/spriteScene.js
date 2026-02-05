@@ -2115,10 +2115,14 @@ export class SpriteScene extends Scene {
                 console.warn('clipboard op failed', e);
             }
 
-            // Fill bucket: on 'f' release, flood-fill the area under the mouse
+            // Fill bucket / flood-select: on 'f' (or 'F') release, flood-fill the area
+            // under the mouse. When Shift is held, we select the region
+            // instead of painting it.
             try {
                 // Prevent fill while clipboard preview/pasting (v) is active
-                if (this.keys.held('f', true) > 1 || this.keys.pressed('f')&&!this.keys.held('Alt')) {
+                const fHeldTime = Math.max(this.keys.held('f', true), this.keys.held('F', true));
+                const fPressed = (this.keys.pressed('f') || this.keys.pressed('F'));
+                if (fHeldTime > 1 || (fPressed && !this.keys.held('Alt'))) {
                     console.log('hello')
                     const pos = this.getPos(this.mouse && this.mouse.pos);
                     if (!pos || !pos.inside) return;
@@ -2147,7 +2151,37 @@ export class SpriteScene extends Scene {
                         if (sx < 0 || sy < 0 || sx >= w || sy >= h) return;
                         const startIdx = (sy * w + sx) * 4;
                         const srcR = data[startIdx], srcG = data[startIdx+1], srcB = data[startIdx+2], srcA = data[startIdx+3];
-                        // target fill color from penColor (convert to rgba 0..255)
+                        // If Shift is held, perform a flood-select instead of paint:
+                        // build selectionPoints for the connected region matching src color.
+                        if (this.keys.held('Shift')) {
+                            const wStride = w;
+                            const stack = [];
+                            const visited = new Set();
+                            const areaIndex = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
+                            const newPoints = [];
+                            stack.push(sy * w + sx);
+                            while (stack.length) {
+                                const p = stack.pop();
+                                if (visited.has(p)) continue;
+                                visited.add(p);
+                                const y = Math.floor(p / wStride);
+                                const x = p % wStride;
+                                const idx = (y * wStride + x) * 4;
+                                // match source color exactly
+                                if (data[idx] !== srcR || data[idx+1] !== srcG || data[idx+2] !== srcB || data[idx+3] !== srcA) continue;
+                                newPoints.push({ x, y, areaIndex });
+                                // push neighbors
+                                if (x > 0) stack.push(p - 1);
+                                if (x < wStride - 1) stack.push(p + 1);
+                                if (y > 0) stack.push(p - wStride);
+                                if (y < h - 1) stack.push(p + wStride);
+                            }
+                            this.selectionPoints = newPoints;
+                            this.selectionRegion = null;
+                            return;
+                        }
+
+                        // Otherwise, perform a paint fill using the current pen color.
                         const fillCol = Color.convertColor(this.penColor || '#000000');
                         const fRgb = fillCol.toRgb();
                         const fillR = Math.round(fRgb.a || 0);
