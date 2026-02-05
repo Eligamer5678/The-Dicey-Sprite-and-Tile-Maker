@@ -1856,43 +1856,71 @@ export class SpriteScene extends Scene {
                 }
             } catch (e) { console.warn('middle-click eyedropper failed', e); }
 
-            // Shift + Left click to add a point (avoid double-selecting the same pixel)
-            // Shift + Right click to remove a point under the cursor
+            // Shift + Left click to add points (respecting brush size) and
+            // Shift + Right click to remove points under the cursor (also
+            // respecting brush size).
             if (this.keys.held('Shift')) {
                 const pos = this.getPos(this.mouse.pos);
                 if (pos && pos.inside) {
                     if (this.mouse.held('left')) {
-                        const exists = this.selectionPoints.some(p => p.x === pos.x && p.y === pos.y && p.areaIndex === pos.areaIndex);
-                        if (!exists) {
-                            // record the area index where this point was added so copy/cut can use the originating frame
-                            this.selectionPoints.push({ x: pos.x, y: pos.y, areaIndex: (typeof pos.areaIndex === 'number') ? pos.areaIndex : null });
-                            // adding a new anchor invalidates any previous region selection
-                            this.selectionRegion = null;
+                        const side = Math.max(1, Math.min(4, this.brushSize || 1));
+                        const half = Math.floor((side - 1) / 2);
+                        const areaIndex = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
+                        for (let yy = 0; yy < side; yy++) {
+                            for (let xx = 0; xx < side; xx++) {
+                                const px = pos.x - half + xx;
+                                const py = pos.y - half + yy;
+                                const exists = this.selectionPoints.some(p => p.x === px && p.y === py && p.areaIndex === areaIndex);
+                                if (!exists) {
+                                    // record the area index where this point was added so copy/cut can use the originating frame
+                                    this.selectionPoints.push({ x: px, y: py, areaIndex });
+                                    // adding a new anchor invalidates any previous region selection
+                                    this.selectionRegion = null;
+                                }
+                            }
                         }
                     } else if (this.mouse.held('right')) {
-                        // remove any existing selection point at this pixel (and area)
-                        this.selectionPoints = this.selectionPoints.filter(p => !(p.x === pos.x && p.y === pos.y && p.areaIndex === pos.areaIndex));
+                        const side = Math.max(1, Math.min(4, this.brushSize || 1));
+                        const half = Math.floor((side - 1) / 2);
+                        const areaIndex = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
+                        // remove any existing selection point within the brush square at this pixel (and area)
+                        this.selectionPoints = this.selectionPoints.filter(p => {
+                            if (p.areaIndex !== areaIndex) return true;
+                            const dx = p.x - pos.x;
+                            const dy = p.y - pos.y;
+                            return !(dx >= -half && dx < side - half && dy >= -half && dy < side - half);
+                        });
                     }
                 }
             }
 
-            // set tool keys when we have a single anchor point
-            if (this.selectionPoints.length === 1) {
-                if (this.keys.pressed('l')) {
+            // set tool keys when we have a primary anchor point.
+            // Circles support an "even-centered" mode when 4 pixels are selected
+            // and brushSize === 2 (treated as a 2x2 center block).
+            const hasSingleAnchor = (this.selectionPoints.length === 1);
+            const hasEvenCenterAnchor = (this.selectionPoints.length === 4 && this.brushSize === 2);
+            if (hasSingleAnchor || hasEvenCenterAnchor) {
+                if (hasSingleAnchor && this.keys.pressed('l')) {
                     this.currentTool = 'line';
                 }
-                if (this.keys.pressed('b')) {
+                if (hasSingleAnchor && this.keys.pressed('b')) {
                     this.currentTool = 'box';
+                }
+                if (this.keys.pressed('o')) {
+                    this.currentTool = 'circle';
                 }
 
                 // If user clicks left (without Shift) while a tool is active, commit the selection
-                // This draws the computed pixels into the current sprite/frame.
+                // This draws the computed pixels into the current sprite/frame. We then briefly
+                // pause the mouse so the next pen stroke doesn't immediately fire from the
+                // same click event.
                 if (!this.keys.held('Shift') && this.mouse.pressed('left') && this.currentTool) {
                     const pos = this.getPos(this.mouse.pos);
                     if (pos && pos.inside) {
                         const start = this.selectionPoints[0];
                         const end = { x: pos.x, y: pos.y };
                         this.commitSelection(start, end);
+                        try { if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.1); } catch (e) {}
                         // clear selection after commit
                         this.selectionPoints = [];
                         this.currentTool = null;
@@ -1900,7 +1928,7 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            // While a shape tool (line/box) is active, Shift+Left click adds
+            // While a shape tool (line/box/circle) is active, Shift+Left click adds
             // individual selection points along the shape instead of drawing.
             // The last added point becomes the new starting point for chaining.
             if (this.currentTool && this.keys.held('Shift') && this.mouse.pressed('left') && this.selectionPoints && this.selectionPoints.length > 0) {
@@ -1914,6 +1942,8 @@ export class SpriteScene extends Scene {
                         pixels = this.computeLinePixels(start, end) || [];
                     } else if (this.currentTool === 'box' && typeof this.computeBoxPixels === 'function') {
                         pixels = this.computeBoxPixels(start, end, filled) || [];
+                    } else if (this.currentTool === 'circle' && typeof this.computeCirclePixels === 'function') {
+                        pixels = this.computeCirclePixels(start, end, filled) || [];
                     }
 
                     if (pixels && pixels.length) {
@@ -2570,7 +2600,11 @@ export class SpriteScene extends Scene {
                     // p.areaIndex may be undefined/null or a number. Treat undefined as null.
                     const pa = (typeof p.areaIndex === 'number') ? p.areaIndex : null;
                     const ta = (typeof targetAreaIndex === 'number') ? targetAreaIndex : null;
-                    if (pa === ta) return true;
+                    // If pa is null (e.g. selection created by a debug signal
+                    // without area info), treat it as a global mask that
+                    // applies to all areas. Otherwise require an exact area
+                    // match so per-area selections still behave as before.
+                    if (pa === null || pa === ta) return true;
                 }
             }
         } catch (e) {}
@@ -2605,6 +2639,92 @@ export class SpriteScene extends Scene {
         return pixels;
     }
 
+    // Generate list of pixel coordinates for a circle between start and end.
+    // `start` is treated as the center; `end` defines the radius. If `filled`
+    // is true, returns all pixels inside the circle **and** its border;
+    // otherwise only the border.
+    //
+    // When brushSize === 2 and exactly 4 selectionPoints exist, we treat those
+    // 4 pixels as a 2x2 center block and use their averaged center (e.g. 1.5,6.5)
+    // to produce an even-centered circle.
+    computeCirclePixels(start, end, filled) {
+        const pixels = [];
+        if (!start || !end) return pixels;
+
+        // Default center from the provided start point.
+        let cx = start.x;
+        let cy = start.y;
+
+        // Even-centered mode: if the user has selected a 2x2 block (4 pixels)
+        // and brushSize is 2, use the average of those pixels as the circle
+        // center so the circle is centered between pixels instead of on one.
+        try {
+            if (this && this.brushSize === 2 && Array.isArray(this.selectionPoints) && this.selectionPoints.length === 4) {
+                let sumX = 0, sumY = 0;
+                for (const p of this.selectionPoints) {
+                    if (!p) continue;
+                    sumX += p.x;
+                    sumY += p.y;
+                }
+                cx = sumX / 4;
+                cy = sumY / 4;
+            }
+        } catch (e) { /* fall back to integer center on error */ }
+        const dx = end.x - cx;
+        const dy = end.y - cy;
+        const r = Math.max(0, Math.round(Math.sqrt(dx * dx + dy * dy)));
+        if (r === 0) {
+            pixels.push({ x: cx, y: cy });
+            return pixels;
+        }
+
+        const r2 = r * r;
+
+        // use a small band around r^2 for the outline thickness
+        const borderBand = Math.max(1, r);
+
+        // track pixels to avoid duplicates when combining fill + outline
+        const seen = new Set();
+        const addPixel = (x, y) => {
+            const key = x + ',' + y;
+            if (!seen.has(key)) {
+                seen.add(key);
+                pixels.push({ x, y });
+            }
+        };
+
+        // Scan a bounding box around the circle and select pixels whose
+        // distance from center is near the radius (border) or inside (filled).
+        const minX = Math.floor(cx - r);
+        const maxX = Math.ceil(cx + r);
+        const minY = Math.floor(cy - r);
+        const maxY = Math.ceil(cy + r);
+
+        for (let y = minY; y <= maxY; y++) {
+            for (let x = minX; x <= maxX; x++) {
+                const ddx = x - cx;
+                const ddy = y - cy;
+                const dist2 = ddx * ddx + ddy * ddy;
+
+                if (!filled) {
+                    // outline-only: accept pixels whose distance^2 is close to r^2
+                    if (dist2 >= r2 - borderBand && dist2 <= r2 + borderBand) {
+                        addPixel(x, y);
+                    }
+                } else {
+                    // filled: include interior AND outline band
+                    if (dist2 <= r2) {
+                        addPixel(x, y);
+                    }
+                    if (dist2 >= r2 - borderBand && dist2 <= r2 + borderBand) {
+                        addPixel(x, y);
+                    }
+                }
+            }
+        }
+        return pixels;
+    }
+
     // Commit the selection pixels into the current sprite/frame using sheet API.
     commitSelection(start, end) {
         try {
@@ -2618,6 +2738,8 @@ export class SpriteScene extends Scene {
                 pixels = this.computeLinePixels(start, end);
             } else if (tool === 'box') {
                 pixels = this.computeBoxPixels(start, end, filled);
+            } else if (tool === 'circle' && typeof this.computeCirclePixels === 'function') {
+                pixels = this.computeCirclePixels(start, end, filled);
             }
 
             if (!pixels || pixels.length === 0) return;
@@ -4123,6 +4245,20 @@ export class SpriteScene extends Scene {
                     this.drawLine(this.selectionPoints[0], mousePixelPos, '#FFFFFF88');
                 } else if (this.currentTool === 'box' && this.selectionPoints.length === 1) {
                     this.drawBox(this.selectionPoints[0], mousePixelPos, '#FFFFFF88', this.keys.held('Alt'));
+                } else if (this.currentTool === 'circle' && this.selectionPoints && this.selectionPoints.length > 0 && typeof this.computeCirclePixels === 'function') {
+                    // For circles, allow preview with either a single anchor pixel
+                    // or an even-centered 2x2 anchor (4 pixels). In both cases we
+                    // pass the first point; computeCirclePixels will adjust center
+                    // when 4 points + brushSize == 2.
+                    const start = this.selectionPoints[0];
+                    const end = mousePixelPos;
+                    const filled = this.keys.held('Alt');
+                    const circlePixels = this.computeCirclePixels(start, end, filled) || [];
+                    for (const p of circlePixels) {
+                        const cellX = dstPos.x + p.x * cellW;
+                        const cellY = dstPos.y + p.y * cellH;
+                        this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFF44', true);
+                    }
                 }
 
                 // draw brush-sized cursor (NxN where N is this.brushSize)
