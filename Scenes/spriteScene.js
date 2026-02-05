@@ -554,8 +554,15 @@ export class SpriteScene extends Scene {
                         }
                     }
 
-                    // set selection to the matched points
-                    this.selectionPoints = matches;
+                    // Merge color-matched points into any existing selection
+                    const merged = (this.selectionPoints && this.selectionPoints.length > 0)
+                        ? this.selectionPoints.slice()
+                        : [];
+                    for (const p of matches) {
+                        const exists = merged.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === undefined);
+                        if (!exists) merged.push({ x: p.x, y: p.y });
+                    }
+                    this.selectionPoints = merged;
                     this.selectionRegion = null;
                     window.Debug && window.Debug.log && window.Debug.log(`SelectColor: selected ${matches.length} pixels matching ${hex} (tol=${tol})`);
                 } catch (err) {
@@ -2057,7 +2064,8 @@ export class SpriteScene extends Scene {
             // If two points are present and user presses 'b', perform a box select
             // but materialize it as a normal per-pixel selection instead of a
             // special rectangular region ("green box"). This keeps pixel art
-            // workflows simple and consistent.
+            // workflows simple and consistent. The region is now inclusive:
+            // it adds to any existing selectionPoints instead of replacing them.
             if (this.selectionPoints.length === 2) {
                 if (this.keys.pressed('b')) {
                     const start = this.selectionPoints[0];
@@ -2073,11 +2081,19 @@ export class SpriteScene extends Scene {
                     let areaIdx = null;
                     if (start && end && start.areaIndex === end.areaIndex) areaIdx = start.areaIndex;
 
-                    // Replace the two anchor points with a dense pixel selection
-                    this.selectionPoints = [];
+                    // Build a dense pixel selection for the region and merge it
+                    // into any existing selectionPoints (inclusive selection).
+                    const merged = (this.selectionPoints && this.selectionPoints.length > 0)
+                        ? this.selectionPoints.slice()
+                        : [];
                     for (const p of pixels) {
-                        this.selectionPoints.push({ x: p.x, y: p.y, areaIndex: areaIdx });
+                        const exists = merged.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === areaIdx);
+                        if (!exists) {
+                            merged.push({ x: p.x, y: p.y, areaIndex: areaIdx });
+                        }
                     }
+
+                    this.selectionPoints = merged;
 
                     // Clear any previous rectangular region state so all tools
                     // operate purely on pixel selections.
@@ -2267,7 +2283,16 @@ export class SpriteScene extends Scene {
                                 if (y > 0) stack.push(p - wStride);
                                 if (y < h - 1) stack.push(p + wStride);
                             }
-                            this.selectionPoints = newPoints;
+
+                            // Merge flood-selected points into any existing selection
+                            const merged = (this.selectionPoints && this.selectionPoints.length > 0)
+                                ? this.selectionPoints.slice()
+                                : [];
+                            for (const p of newPoints) {
+                                const exists = merged.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === p.areaIndex);
+                                if (!exists) merged.push(p);
+                            }
+                            this.selectionPoints = merged;
                             this.selectionRegion = null;
                             return;
                         }
@@ -4287,17 +4312,47 @@ export class SpriteScene extends Scene {
                     }
                 } catch (e) { }
 
-                // Draw a pixel cursor preview if the mouse is over the draw area
-                this.displayCursor(dstPos,dstW,dstH)
+                // Draw a pixel cursor / selection preview. In tilemode this is
+                // restricted to tiles that mirror the same effective frame as
+                // the tile currently under the mouse cursor.
+                this.displayCursor(dstPos,dstW,dstH,binding,effAnim,effFrame,areaIndex)
             }
         } catch (e) {
             console.warn('displayDrawArea failed', e);
         }
     }
-    displayCursor(dstPos,dstW,dstH){
+    displayCursor(dstPos,dstW,dstH,binding,effAnim,effFrame,areaIndex){
         try {
             const cellW = dstW / this.currentSprite.slicePx;
             const cellH = dstH / this.currentSprite.slicePx;
+
+            // Determine which draw area (if any) the mouse is currently over
+            // so we can limit tilemode previews to matching frame types.
+            const posInfoGlobal = this.getPos(this.mouse && this.mouse.pos);
+            const hoveredInside = !!(posInfoGlobal && posInfoGlobal.inside);
+            const hoveredAreaIndex = hoveredInside ? posInfoGlobal.areaIndex : null;
+
+            if (this.tilemode && typeof hoveredAreaIndex === 'number') {
+                try {
+                    const hoveredBinding = this.getAreaBinding(hoveredAreaIndex) || null;
+                    const hoveredAnim = (hoveredBinding && hoveredBinding.anim) ? hoveredBinding.anim : this.selectedAnimation;
+                    const hoveredFrame = (hoveredBinding && typeof hoveredBinding.index === 'number') ? Number(hoveredBinding.index) : this.selectedFrame;
+
+                    const thisBinding = binding || null;
+                    const thisAnim = (thisBinding && thisBinding.anim) ? thisBinding.anim : effAnim;
+                    const thisFrame = (thisBinding && typeof thisBinding.index === 'number') ? Number(thisBinding.index) : effFrame;
+
+                    // If this tile does not mirror the same effective frame
+                    // as the tile under the cursor, skip all preview drawing
+                    // for this area.
+                    if (!(hoveredAnim === thisAnim && hoveredFrame === thisFrame)) {
+                        return;
+                    }
+                } catch (e) {
+                    // If matching fails for any reason, fall back to drawing
+                    // the preview to avoid breaking basic cursor behavior.
+                }
+            }
 
             // Draw selection points
             if (this.selectionPoints && this.selectionPoints.length > 0) {
@@ -4334,7 +4389,7 @@ export class SpriteScene extends Scene {
                 try {
                     const cb = this.clipboard;
                     // mouse position in frame coords
-                    const posInfo = this.getPos(this.mouse && this.mouse.pos);
+                    const posInfo = posInfoGlobal;
                     if (!posInfo || !posInfo.inside) return;
                     // determine frozen placement if dragging, otherwise compute placement aligning origin under mouse
                     const ox = (cb.originOffset && typeof cb.originOffset.ox === 'number') ? cb.originOffset.ox : 0;
@@ -4398,7 +4453,7 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            const posInfo = this.getPos(this.mouse && this.mouse.pos);
+            const posInfo = posInfoGlobal;
             if (posInfo && posInfo.inside) {
                 const mousePixelPos = { x: posInfo.x, y: posInfo.y };
 
