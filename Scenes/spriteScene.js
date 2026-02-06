@@ -340,7 +340,7 @@ export class SpriteScene extends Scene {
         // Pixel-perfect drawing mode (toggle with 'a'). When enabled, the pen
         // tool tracks the last few pixels in the current stroke and avoids
         // drawing "L"-shaped corners by restoring the bend pixel.
-        this.pixelPerfect = true;
+        this.pixelPerfect = false;
         this._pixelPerfectStrokeActive = false;
         this._pixelPerfectHistory = [];
         this._pixelPerfectOriginals = new Map();
@@ -1228,7 +1228,8 @@ export class SpriteScene extends Scene {
                                     if (!b) continue;
                                     const i = Number(b.areaIndex);
                                     if (!Number.isFinite(i) || i < 0) continue;
-                                    this._areaBindings[i] = { anim: b.anim, index: Number(b.index) };
+                                    const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
+                                    this._areaBindings[i] = { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf : null };
                                 }
                             }
                             if (Array.isArray(layout.transforms)) {
@@ -1738,21 +1739,41 @@ export class SpriteScene extends Scene {
                     if (this.keys && typeof this.keys.released === 'function' && this.keys.released('y')) {
                         const pos = this.getPos(this.mouse && this.mouse.pos);
                         if (pos && pos.inside && typeof pos.areaIndex === 'number') {
-                            // determine which frame to bind: prefer single multi-selected frame in FrameSelect
+                            // determine which frame to bind: prefer primary selection, but capture any layered stack for preview reuse
                             let frameIdx = this.selectedFrame;
                             let anim = this.selectedAnimation;
+                            let stack = [];
+                            const pushFrame = (v) => {
+                                if (!Number.isFinite(v)) return;
+                                const n = Number(v);
+                                if (!stack.includes(n)) stack.push(n);
+                            };
                             try {
+                                pushFrame(frameIdx);
                                 const fs = this.FrameSelect;
-                                if (fs && fs._multiSelected && fs._multiSelected.size === 1) {
-                                    frameIdx = Array.from(fs._multiSelected)[0];
+                                if (fs && fs._multiSelected && fs._multiSelected.size > 0) {
+                                    const arr = Array.from(fs._multiSelected).filter(i => Number.isFinite(i)).map(Number).sort((a,b)=>a-b);
+                                    for (const i of arr) pushFrame(i);
                                 }
-                            } catch (e) {}
+                                // Normalize: sort, dedupe, and discard single-frame stacks so toggle works with legacy bindings
+                                stack = Array.from(new Set(stack)).sort((a,b)=>a-b);
+                                if (stack.length <= 1) stack = [];
+                            } catch (e) { /* ignore stack build errors */ }
                             // Toggle behavior: if area already bound to same anim/frame, clear it
                             const existing = (Array.isArray(this._areaBindings) && this._areaBindings[pos.areaIndex]) ? this._areaBindings[pos.areaIndex] : null;
-                            if (existing && existing.anim === anim && Number(existing.index) === Number(frameIdx)) {
+                            const sameStack = (() => {
+                                if (!existing) return false;
+                                const existingStack = Array.isArray(existing.multiFrames) ? existing.multiFrames : [];
+                                if (existingStack.length !== stack.length) return false;
+                                if (existingStack.length === 0 && stack.length === 0) return true;
+                                for (let i = 0; i < stack.length; i++) if (Number(existingStack[i]) !== Number(stack[i])) return false;
+                                return true;
+                            })();
+                            if (existing && existing.anim === anim && Number(existing.index) === Number(frameIdx) && sameStack) {
                                 this.clearAreaBinding(pos.areaIndex);
                             } else {
-                                this.bindArea(pos.areaIndex, anim, frameIdx);
+                                const savedStack = stack.length >= 2 ? stack : null;
+                                this.bindArea(pos.areaIndex, anim, frameIdx, savedStack);
                             }
                         }
                     }
@@ -3529,7 +3550,9 @@ export class SpriteScene extends Scene {
                         for (let i = 0; i < this._areaBindings.length; i++) {
                             const b = this._areaBindings[i];
                             if (!b || b.anim === undefined || b.index === undefined) continue;
-                            layout.bindings.push({ areaIndex: i, anim: b.anim, index: Number(b.index) });
+                            const entry = { areaIndex: i, anim: b.anim, index: Number(b.index) };
+                            if (Array.isArray(b.multiFrames) && b.multiFrames.length > 0) entry.multiFrames = b.multiFrames.map(v => Number(v));
+                            layout.bindings.push(entry);
                         }
                     }
                     if (Array.isArray(this._areaTransforms)) {
@@ -4188,7 +4211,13 @@ export class SpriteScene extends Scene {
                 tileCols: this.tileCols,
                 tileRows: this.tileRows,
             };
-            if (Array.isArray(this._areaBindings)) snap.bindings = this._areaBindings.slice();
+            if (Array.isArray(this._areaBindings)) {
+                snap.bindings = this._areaBindings.map(b => {
+                    if (!b) return null;
+                    const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
+                    return { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf.slice() : null };
+                });
+            }
             if (Array.isArray(this._areaTransforms)) snap.transforms = this._areaTransforms.slice();
             const animNames = Array.from(sheet._frames.keys());
             let row = 0;
@@ -4258,7 +4287,13 @@ export class SpriteScene extends Scene {
             }
             if (Number.isFinite(snapshot.tileCols)) this.tileCols = snapshot.tileCols;
             if (Number.isFinite(snapshot.tileRows)) this.tileRows = snapshot.tileRows;
-            if (Array.isArray(snapshot.bindings)) this._areaBindings = snapshot.bindings;
+            if (Array.isArray(snapshot.bindings)) {
+                this._areaBindings = snapshot.bindings.map(b => {
+                    if (!b) return null;
+                    const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
+                    return { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf.slice() : null };
+                });
+            }
             if (Array.isArray(snapshot.transforms)) this._areaTransforms = snapshot.transforms;
             return true;
         } catch (e) {
@@ -4759,11 +4794,12 @@ export class SpriteScene extends Scene {
     }
 
     // Bind a specific animation/frame to a rendered area index
-    bindArea(areaIndex, anim, frameIdx) {
+    bindArea(areaIndex, anim, frameIdx, multiFrames = null) {
         try {
             if (typeof areaIndex !== 'number' || areaIndex < 0) return false;
             if (!this._areaBindings) this._areaBindings = [];
-            this._areaBindings[areaIndex] = { anim: anim || this.selectedAnimation, index: Number(frameIdx) || 0 };
+            const stack = Array.isArray(multiFrames) ? multiFrames.filter(i => Number.isFinite(i)).map(i => Number(i)) : null;
+            this._areaBindings[areaIndex] = { anim: anim || this.selectedAnimation, index: Number(frameIdx) || 0, multiFrames: (stack && stack.length > 0) ? stack : null };
             return true;
         } catch (e) { return false; }
     }
@@ -5067,15 +5103,20 @@ export class SpriteScene extends Scene {
                         try {
                             const drawCtx = this.Draw && this.Draw.ctx;
                             const onionEnabled = (!this.tilemode) && ((typeof this.onionSkin === 'boolean') ? this.onionSkin : false);
-                            // If FrameSelect has multi-selected frames, composite those instead (disabled when tilemode)
-                            const multiSet = (!this.tilemode && this.FrameSelect && this.FrameSelect._multiSelected) ? this.FrameSelect._multiSelected : null;
+                            // If a binding captured a frame stack, use it; otherwise fall back to current multi-select (preview-only; edit still targets the primary frame)
+                            let compositeIdxs = null;
+                            if (binding && Array.isArray(binding.multiFrames) && binding.multiFrames.length > 0) {
+                                compositeIdxs = binding.multiFrames.filter(i => Number.isFinite(i)).map(i => Number(i));
+                            } else if (this.FrameSelect && this.FrameSelect._multiSelected) {
+                                compositeIdxs = Array.from(this.FrameSelect._multiSelected).filter(i => typeof i === 'number');
+                            }
                             const framesArr = (sheet && sheet._frames && effAnim) ? (sheet._frames.get(effAnim) || []) : [];
                             const baseAlpha = (typeof this.onionAlpha === 'number') ? this.onionAlpha : 1;
 
-                            if (effAnim !== null && drawCtx && multiSet && multiSet.size >= 2) {
+                            if (effAnim !== null && drawCtx && Array.isArray(compositeIdxs) && compositeIdxs.length >= 2) {
                                 try {
                                     // Build arrays of indices from the multi-selected set
-                                    const idxs = Array.from(multiSet).filter(i => typeof i === 'number' && i >= 0 && i < framesArr.length).sort((a,b)=>a-b);
+                                    const idxs = compositeIdxs.filter(i => typeof i === 'number' && i >= 0 && i < framesArr.length).sort((a,b)=>a-b);
                                     if (idxs.length >= 2) {
                                         const beforeIdxs = idxs.filter(i => i < effFrame);
                                         const afterIdxs = idxs.filter(i => i > effFrame);
