@@ -21,7 +21,9 @@
 - Or click 'g' to group them
 - Clicking l will convert the group into a layered frame
 - Click g on a group to ungroup
-- 1-4 keys change brush size
+- 1-5 keys change brush size
+- Pressing a comination like 3 +4 will use the sum as the brush size (pressing 3 & 4 = size 7)
+- Shift+1-5 = selection becomes brush
 - s to select by color (hold shift to adjust buffer amount)
 - alt+s to draw selected
 - h & k to modify color (if nothing selected, modifies draw color)
@@ -32,7 +34,7 @@
 - f to fill region
 - [ for vertical mirror, and ] for horizontal mirroring
 - shift+f to select region
-- Pressing a toggles pixel perfect drawing when the pen size is 1 (i.e. cornercutting)
+- a to toggle pixel perfect drawing when the pen size is 1 (i.e. cornercutting)
 - ctrl + z = Undo
 
 - Press the upper left corner to access the console
@@ -59,6 +61,7 @@
 - r to rotate, shift-r to actually rotate the frame data
 - alt+f to flip, alt+shift+f to actully flip the frame data
 - Press 'y' to mirror the selected frame. Toggles between locked-on-frame & selected
+- Press space to toggle tile placement
 
 - **Online colab**
 - Type enableColab() into the built in console.
@@ -67,13 +70,9 @@
 - msg() to message players.
 
 - **Latest update**
-- Updated tile mode (shift+t to change tile grid size)
-- Can export tile mode as a tilesheet, and import tilesheet as tilemode grid.
-- Basic pen tool updated: Pixel perfect drawing (i.e. cornercutting), Press a to toggle.
-- Made shift+f select by color region
-- Selection is now incluive (box select, s, select signal, all don't remove the previous selction anymore, if you need it to replace, just right click before selecting to clear selection)
-- Colab now does an initial sync, so no need to share the file first.
-- Proper undo stack implimented. Control z now works! Yay!
+- Updated tile mode: You can now add grid cells with space
+- Brush size can now go MUCH higher. 
+- Custom brush tool: Press a number between 1 & 5 & hold shift at the same time to make selection become the brush shape
 
 
 ### Tilemap maker

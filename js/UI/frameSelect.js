@@ -400,32 +400,97 @@ export default class FrameSelect {
                 try {
                     const scene = this.scene;
                     const slice = scene.currentSprite.slicePx || (this.sprite && this.sprite.slicePx) || 16;
-                    const cols = Math.max(1, (scene.tileCols|0) || 3);
-                    const rows = Math.max(1, (scene.tileRows|0) || 3);
-                    const areaCount = cols * rows;
-                    // Prepare canvas sized to the tile grid
+                    const parseTileKey = (key) => {
+                        if (typeof key !== 'string') return null;
+                        const parts = key.split(',');
+                        if (parts.length !== 2) return null;
+                        const c = Number(parts[0]);
+                        const r = Number(parts[1]);
+                        if (!Number.isFinite(c) || !Number.isFinite(r)) return null;
+                        return { col: c|0, row: r|0 };
+                    };
+
+                    // Collect active tiles; if none, fall back to current grid bounds
+                    const activeTiles = [];
+                    if (scene._tileActive && scene._tileActive.size > 0) {
+                        for (const k of scene._tileActive.values()) {
+                            const c = parseTileKey(k);
+                            if (c) activeTiles.push(c);
+                        }
+                    }
+                    if (activeTiles.length === 0) {
+                        const cols = Math.max(1, (scene.tileCols|0) || 3);
+                        const rows = Math.max(1, (scene.tileRows|0) || cols);
+                        const midC = Math.floor(cols / 2);
+                        const midR = Math.floor(rows / 2);
+                        for (let r = 0; r < rows; r++) {
+                            for (let c = 0; c < cols; c++) {
+                                activeTiles.push({ col: c - midC, row: r - midR });
+                            }
+                        }
+                    }
+
+                    // Compute bounding box of active tiles
+                    let minC = Infinity, maxC = -Infinity, minR = Infinity, maxR = -Infinity;
+                    for (const t of activeTiles) {
+                        minC = Math.min(minC, t.col); maxC = Math.max(maxC, t.col);
+                        minR = Math.min(minR, t.row); maxR = Math.max(maxR, t.row);
+                    }
+                    const spanCols = (maxC - minC + 1);
+                    const spanRows = (maxR - minR + 1);
+
+                    // Prepare canvas sized to bounding box of active tiles
                     exportCanvas = document.createElement('canvas');
-                    exportCanvas.width = cols * slice;
-                    exportCanvas.height = rows * slice;
+                    exportCanvas.width = spanCols * slice;
+                    exportCanvas.height = spanRows * slice;
                     const ectx = exportCanvas.getContext('2d');
                     try { ectx.imageSmoothingEnabled = false; } catch (e) {}
-                    // For each area, determine bound frame (or selected frame) and draw into grid
-                    for (let idx = 0; idx < areaCount; idx++) {
-                        const r = Math.floor(idx / cols);
-                        const c = idx % cols;
-                        const binding = (Array.isArray(scene._areaBindings) && scene._areaBindings[idx]) ? scene._areaBindings[idx] : null;
-                        const anim = binding && binding.anim ? binding.anim : scene.selectedAnimation;
-                        const frameIndex = binding && typeof binding.index === 'number' ? binding.index : scene.selectedFrame;
-                        const frameCanvas = (anim && typeof scene.currentSprite.getFrame === 'function') ? scene.currentSprite.getFrame(anim, frameIndex) : null;
-                        if (!frameCanvas) continue;
-                        const transform = (Array.isArray(scene._areaTransforms) && scene._areaTransforms[idx]) ? scene._areaTransforms[idx] : null;
-                        const hasTransform = !!(transform && ((transform.rot || 0) !== 0 || transform.flipH));
-                        const dx = c * slice;
-                        const dy = r * slice;
-                        if (!hasTransform) {
+
+                    // Helper: fetch area index for coord
+                    const coordKey = (c,r) => `${c},${r}`;
+                    const getAreaIndex = (c,r) => {
+                        const key = coordKey(c,r);
+                        if (scene._tileCoordToIndex && scene._tileCoordToIndex.has(key)) return scene._tileCoordToIndex.get(key);
+                        // fallback: search mapping array
+                        if (Array.isArray(scene._tileIndexToCoord)) {
+                            for (let i = 0; i < scene._tileIndexToCoord.length; i++) {
+                                const entry = scene._tileIndexToCoord[i];
+                                if (entry && entry.col === c && entry.row === r) return i;
+                            }
+                        }
+                        return null;
+                    };
+
+                    // Helper: composite multi-frame stacks
+                    const buildFrame = (anim, idx, multi) => {
+                        const tmp = document.createElement('canvas');
+                        tmp.width = slice; tmp.height = slice;
+                        const tctx = tmp.getContext('2d');
+                        try { tctx.imageSmoothingEnabled = false; } catch (e) {}
+                        const list = (Array.isArray(multi) && multi.length > 0) ? multi : [idx];
+                        for (const fi of list) {
                             try {
-                                ectx.drawImage(frameCanvas, 0, 0, frameCanvas.width, frameCanvas.height, dx, dy, slice, slice);
-                            } catch (e) { /* ignore */ }
+                                const src = (anim && typeof scene.currentSprite.getFrame === 'function') ? scene.currentSprite.getFrame(anim, fi) : null;
+                                if (src) tctx.drawImage(src, 0, 0);
+                            } catch (e) { /* ignore per-frame */ }
+                        }
+                        return tmp;
+                    };
+
+                    for (const t of activeTiles) {
+                        const idx = getAreaIndex(t.col, t.row);
+                        const binding = (Number.isFinite(idx) && Array.isArray(scene._areaBindings)) ? scene._areaBindings[idx] : null;
+                        const anim = (binding && binding.anim) ? binding.anim : scene.selectedAnimation;
+                        const frameIndex = (binding && typeof binding.index === 'number') ? binding.index : scene.selectedFrame;
+                        const multiFrames = (binding && Array.isArray(binding.multiFrames)) ? binding.multiFrames : null;
+                        const frameCanvas = (anim !== null) ? buildFrame(anim, frameIndex, multiFrames) : null;
+                        if (!frameCanvas) continue;
+                        const transform = (Number.isFinite(idx) && Array.isArray(scene._areaTransforms)) ? scene._areaTransforms[idx] : null;
+                        const hasTransform = !!(transform && ((transform.rot || 0) !== 0 || transform.flipH));
+                        const dx = (t.col - minC) * slice;
+                        const dy = (t.row - minR) * slice;
+                        if (!hasTransform) {
+                            try { ectx.drawImage(frameCanvas, 0, 0, frameCanvas.width, frameCanvas.height, dx, dy, slice, slice); } catch (e) { /* ignore */ }
                         } else {
                             try {
                                 ectx.save();
@@ -437,6 +502,30 @@ export default class FrameSelect {
                             } catch (e) { /* ignore */ }
                         }
                     }
+
+                    // Build extra metadata for tilesheet export
+                    exportCanvas._tilesheetMeta = {
+                        slice,
+                        minCol: minC,
+                        minRow: minR,
+                        cols: spanCols,
+                        rows: spanRows,
+                        activeTiles: activeTiles.map(t => ({ col: t.col, row: t.row })),
+                        bindings: (() => {
+                            const arr = [];
+                            for (const t of activeTiles) {
+                                const idx = getAreaIndex(t.col, t.row);
+                                const binding = (Number.isFinite(idx) && Array.isArray(scene._areaBindings)) ? scene._areaBindings[idx] : null;
+                                if (!binding || binding.anim === undefined || binding.index === undefined) continue;
+                                const entry = { col: t.col, row: t.row, anim: binding.anim, index: Number(binding.index) };
+                                if (Array.isArray(binding.multiFrames) && binding.multiFrames.length > 0) entry.multiFrames = binding.multiFrames.slice();
+                                const transform = (Number.isFinite(idx) && Array.isArray(scene._areaTransforms)) ? scene._areaTransforms[idx] : null;
+                                if (transform && ((transform.rot||0)!==0 || transform.flipH)) entry.transform = { rot: transform.rot||0, flipH: !!transform.flipH };
+                                arr.push(entry);
+                            }
+                            return arr;
+                        })()
+                    };
                 } catch (err) { console.warn('tilesheet export build failed', err); }
             } else {
                 // Original spritesheet export: optionally merge layered groups for the current animation
@@ -527,6 +616,27 @@ export default class FrameSelect {
                                 meta.frameGroups[anim] = Array.isArray(groups) ? groups.map(g => ({ id: g.id, indices: Array.isArray(g.indices)? g.indices.slice() : [], collapsed: !!g.collapsed, layered: !!g.layered })) : [];
                             }
                         } catch(e) { /* ignore */ }
+                    }
+                    // tile layout metadata when exporting tilesheet
+                    const tiles = exportCanvas && exportCanvas._tilesheetMeta ? exportCanvas._tilesheetMeta : null;
+                    if (tiles) {
+                        meta.tileLayout = {
+                            tilemode: true,
+                            slicePx: tiles.slice,
+                            minCol: tiles.minCol,
+                            minRow: tiles.minRow,
+                            cols: tiles.cols,
+                            rows: tiles.rows,
+                            activeTiles: Array.isArray(tiles.activeTiles) ? tiles.activeTiles.map(t => ({ col: t.col, row: t.row })) : [],
+                            bindings: Array.isArray(tiles.bindings) ? tiles.bindings.map(b => ({
+                                col: b.col,
+                                row: b.row,
+                                anim: b.anim,
+                                index: b.index,
+                                multiFrames: Array.isArray(b.multiFrames) ? b.multiFrames.slice() : undefined,
+                                transform: b.transform ? { rot: b.transform.rot||0, flipH: !!b.transform.flipH } : undefined
+                            })) : []
+                        };
                     }
                 } catch (e) { /* ignore */ }
                 return meta;

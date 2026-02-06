@@ -349,12 +349,24 @@ export class SpriteScene extends Scene {
         this.selectionRegion = null;
         // clipboard stores { w, h, data(Uint8ClampedArray), originOffset: {ox,oy} }
         this.clipboard = null;
+        // When true, pen pastes clipboard content each frame (custom brush)
+        this._clipboardBrushActive = false;
+        // Latch to avoid re-triggering clipboard brush activation every frame while keys are held
+        this._clipboardBrushFired = false;
+        // Phase accumulator for clipboard brush preview blinking
+        this._clipboardBrushBlinkPhase = 0;
         // transient flag set when a paste just occurred to avoid key-order races
         this._justPasted = false;
         this.tilemode = false;
         // tile grid configuration (columns x rows) when tilemode is enabled.
         this.tileCols = 3;
         this.tileRows = 3;
+        // Infinite tile-mode support: track which tile coordinates are active.
+        // Coordinates are centered on (0,0) at the middle tile; keys are "col,row".
+        this._tileActive = new Set();
+        this._tileCoordToIndex = new Map();
+        this._tileIndexToCoord = [];
+        this._seedTileActives();
 
         // cache of draw areas rendered this tick so input mapping can hit the correct one
         this._drawAreas = [];
@@ -518,6 +530,7 @@ export class SpriteScene extends Scene {
                             const r = Math.max(1, toInt(rows, this.tileRows || 3));
                             this.tileCols = c;
                             this.tileRows = r;
+                            this._seedTileActives(c, r);
                             window.Debug && window.Debug.log && window.Debug.log('Tile array size set to', c + 'x' + r);
                         } catch (err) {
                             window.Debug && window.Debug.error && window.Debug.error('tileArray signal failed: ' + err);
@@ -1223,13 +1236,34 @@ export class SpriteScene extends Scene {
                             this.tilemode = !!layout.tilemode;
                             if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
                             if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
+                            if (!this._tileActive) this._tileActive = new Set();
+                            if (Array.isArray(layout.activeTiles)) {
+                                for (const t of layout.activeTiles) {
+                                    if (!t) continue;
+                                    const c = Number(t.col);
+                                    const r = Number(t.row);
+                                    if (Number.isFinite(c) && Number.isFinite(r)) this._activateTile(c, r);
+                                }
+                            } else {
+                                this._seedTileActives(cols, rows);
+                            }
                             if (Array.isArray(layout.bindings)) {
                                 for (const b of layout.bindings) {
                                     if (!b) continue;
-                                    const i = Number(b.areaIndex);
-                                    if (!Number.isFinite(i) || i < 0) continue;
+                                    let idx = null;
+                                    if (Number.isFinite(b.col) && Number.isFinite(b.row)) {
+                                        idx = this._getAreaIndexForCoord(Number(b.col), Number(b.row));
+                                        this._activateTile(Number(b.col), Number(b.row));
+                                    } else {
+                                        const i = Number(b.areaIndex);
+                                        if (!Number.isFinite(i) || i < 0) continue;
+                                        const legacy = this._coordFromLegacyIndex(i, this.tileCols, this.tileRows);
+                                        idx = this._getAreaIndexForCoord(legacy.col, legacy.row);
+                                        this._activateTile(legacy.col, legacy.row);
+                                    }
+                                    if (!Number.isFinite(idx)) continue;
                                     const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
-                                    this._areaBindings[i] = { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf : null };
+                                    this._areaBindings[idx] = { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf : null };
                                 }
                             }
                             if (Array.isArray(layout.transforms)) {
@@ -1477,6 +1511,7 @@ export class SpriteScene extends Scene {
 
             // determine which rendered area (if any) contains this world point
             let area = null;
+            let areaCoord = null;
             this._activeDrawAreaIndex = null;
             if (Array.isArray(this._drawAreas) && this._drawAreas.length > 0) {
                 for (let i = 0; i < this._drawAreas.length; i++) {
@@ -1484,18 +1519,46 @@ export class SpriteScene extends Scene {
                     if (!a) continue;
                     if (mx >= a.dstPos.x && my >= a.dstPos.y && mx <= a.dstPos.x + a.dstW && my <= a.dstPos.y + a.dstH) {
                         area = a;
-                        this._activeDrawAreaIndex = i;
+                        this._activeDrawAreaIndex = (typeof a.areaIndex === 'number') ? a.areaIndex : i;
                         break;
                     }
                 }
             }
 
-            // fallback to single centered area
+            // fallback to infinite tile coordinate if needed
             if (!area) {
-                area = this.computeDrawArea();
-                this._activeDrawAreaIndex = null;
+                const baseArea = this.computeDrawArea();
+                if (!baseArea) return null;
+                const basePos = baseArea.topLeft;
+                const tileSize = baseArea.size;
+                if (this.tilemode) {
+                    const coord = this._worldToTileCoord(mx, my, basePos, tileSize);
+                    areaCoord = coord;
+                    const pos2 = this._tileCoordToPos(coord.col, coord.row, basePos, tileSize);
+                    area = this.computeAreaInfo(pos2, tileSize);
+                    this._activeDrawAreaIndex = this._getAreaIndexForCoord(coord.col, coord.row);
+                    if (area) area.areaIndex = this._activeDrawAreaIndex;
+                } else {
+                    area = baseArea;
+                }
             }
             if (!area) return null;
+
+            // Ensure render-only flag exists when getPos builds areas itself.
+            if (area.renderOnly === undefined) {
+                try { area.renderOnly = this._isSimTooSmall(area); } catch (e) { area.renderOnly = false; }
+            }
+
+            // If this area is render-only (too small), treat it as non-interactive for edits
+            // but still surface tile coordinates and area index so activation/binding toggles can work.
+            if (area.renderOnly) {
+                this._activeDrawAreaIndex = null;
+                const col = (areaCoord && areaCoord.col !== undefined) ? areaCoord.col : (area.tileCol !== undefined ? area.tileCol : null);
+                const row = (areaCoord && areaCoord.row !== undefined) ? areaCoord.row : (area.tileRow !== undefined ? area.tileRow : null);
+                const tileActive = (!this.tilemode) || (col !== null && row !== null && this._isTileActive(col, row));
+                const idx = (typeof area.areaIndex === 'number') ? area.areaIndex : (typeof this._getAreaIndexForCoord === 'function' && col !== null && row !== null ? this._getAreaIndexForCoord(col, row) : null);
+                return { inside: false, renderOnly: true, areaIndex: idx, tileCol: col, tileRow: row, tileActive };
+            }
 
             if (mx < area.dstPos.x || my < area.dstPos.y || mx > area.dstPos.x + area.dstW || my > area.dstPos.y + area.dstH) return { inside: false };
             let relX = (mx - area.dstPos.x) / area.dstW;
@@ -1515,9 +1578,15 @@ export class SpriteScene extends Scene {
                     }
                 }
             }
+            // Attach tile coord metadata and honor inactive tiles by marking inside=false
+            if (!areaCoord && typeof this._activeDrawAreaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                areaCoord = this._tileIndexToCoord[this._activeDrawAreaIndex] || null;
+            }
+            const tileActive = (!this.tilemode) || (areaCoord && this._isTileActive(areaCoord.col, areaCoord.row));
             const px = Math.min(this.currentSprite.slicePx - 1, Math.max(0, Math.floor(relX * this.currentSprite.slicePx)));
             const py = Math.min(this.currentSprite.slicePx - 1, Math.max(0, Math.floor(relY * this.currentSprite.slicePx)));
-            return { inside: true, x: px, y: py, relX, relY, areaIndex: this._activeDrawAreaIndex };
+            const inside = tileActive && !(px === undefined || py === undefined) && (mx >= area.dstPos.x && my >= area.dstPos.y && mx <= area.dstPos.x + area.dstW && my <= area.dstPos.y + area.dstH);
+            return { inside, x: px, y: py, relX, relY, areaIndex: this._activeDrawAreaIndex, tileCol: areaCoord ? areaCoord.col : null, tileRow: areaCoord ? areaCoord.row : null, tileActive };
         } catch (e) {
             return null;
         }
@@ -1532,8 +1601,14 @@ export class SpriteScene extends Scene {
             else { x = ix; y = iy; }
             // Prefer the last-active area (where the mouse was); fall back to centered area
             let area = null;
-            if (typeof this._activeDrawAreaIndex === 'number' && Array.isArray(this._drawAreas) && this._drawAreas[this._activeDrawAreaIndex]) {
-                area = this._drawAreas[this._activeDrawAreaIndex];
+            if (typeof this._activeDrawAreaIndex === 'number' && Array.isArray(this._drawAreas)) {
+                const direct = this._drawAreas[this._activeDrawAreaIndex];
+                if (direct) area = direct;
+                if (!area) {
+                    for (const a of this._drawAreas) {
+                        if (a && typeof a.areaIndex === 'number' && a.areaIndex === this._activeDrawAreaIndex) { area = a; break; }
+                    }
+                }
             }
             if (!area) area = this.computeDrawArea();
             if (!area) return null;
@@ -1567,17 +1642,43 @@ export class SpriteScene extends Scene {
     sceneTick(tickDelta){
         this.mouse.update(tickDelta)
         this.keys.update(tickDelta)
+        this._clipboardBrushBlinkPhase = (this._clipboardBrushBlinkPhase || 0) + tickDelta;
         this.mouse.setMask(0)
         this.FrameSelect.update()
         this.mouse.setPower(0)
         this._ensureMirrorWrapper()
-        // handle numeric keys to change brush size (1..4)
+        // handle numeric keys to change brush size (1..5). If multiple number keys are pressed simultaneously,
+        // sum them for larger brushes (e.g., 2+3 => size 5, 1+2+3+4+5 => size 15). Max capped at 15.
+        // Holding Shift while pressing number keys captures the current selection into the clipboard and
+        // enables "clipboard brush" mode (pen pastes the selection each frame). Pressing numbers without
+        // Shift disables clipboard brush and sets a numeric brush size.
         try {
             if (this.keys && this.keys.released) {
-                if (this.keys.released('1')) this.brushSize = 1;
-                if (this.keys.released('2')) this.brushSize = 2;
-                if (this.keys.released('3')) this.brushSize = 3;
-                if (this.keys.released('4')) this.brushSize = 4;
+                // Treat shifted number symbols as their numeric counterparts so Shift+1 ("!") still counts.
+                const numKeyMap = { '1':1, '!':1, '2':2, '@':2, '3':3, '#':3, '4':4, '$':4, '5':5, '%':5 };
+                const numKeys = Object.keys(numKeyMap);
+                const numPressedThisFrame = numKeys.some(k => this.keys.pressed(k));
+                if (this.keys.held('Shift') && numPressedThisFrame && !this._clipboardBrushFired) {
+                    // Activate clipboard brush from current selection (only if a selection exists)
+                    if (this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) {
+                        try { this.doCopy(true); } catch (e) { /* ignore copy failures */ }
+                        this._clipboardBrushActive = !!this.clipboard;
+                        this._clipboardBrushFired = true;
+                    } else {
+                        this._clipboardBrushActive = false;
+                    }
+                } else if (numPressedThisFrame && !this.keys.held('Shift')) {
+                    let total = 0;
+                    for (const k of numKeys) {
+                        if (this.keys.pressed(k) || this.keys.held(k)) total += numKeyMap[k] || 0;
+                    }
+                    this.brushSize = Math.max(1, Math.min(15, total || 1));
+                    this._clipboardBrushActive = false;
+                }
+
+                // Reset latch when Shift is not held to allow future activations
+                if (!this.keys.held('Shift')) this._clipboardBrushFired = false;
+
                 // choose which channel to adjust with h/k: 6->H, 7->S, 8->V, 9->A
                 if (this.keys.released('6')) this.adjustChannel = 'h';
                 if (this.keys.released('7')) this.adjustChannel = 's';
@@ -1590,8 +1691,6 @@ export class SpriteScene extends Scene {
                     this.pixelPerfect = !this.pixelPerfect;
                     try { console.log('Pixel-perfect mode:', this.pixelPerfect); } catch (e) {}
                 }
-                // Quick select: press '5' to emit the debug 'select' signal using the current pen color.
-                // Hold Shift while pressing '5' to use a lowered buffer (0.5).
                 if (this.keys.comboPressed(['s','Alt'])) {
                     console.log('emmiting')
                     window.Debug.emit('drawSelected');
@@ -1663,6 +1762,7 @@ export class SpriteScene extends Scene {
                             this.tileRows = Math.max(1, rows);
                             this.tileCols = Math.max(1, cols);
                             this.tilemode = true;
+                            this._seedTileActives(this.tileCols, this.tileRows);
                         }
                     }
                 } catch (e) { /* ignore prompt / parse errors */ }
@@ -1738,7 +1838,7 @@ export class SpriteScene extends Scene {
                 try {
                     if (this.keys && typeof this.keys.released === 'function' && this.keys.released('y')) {
                         const pos = this.getPos(this.mouse && this.mouse.pos);
-                        if (pos && pos.inside && typeof pos.areaIndex === 'number') {
+                        if (pos && (pos.inside || pos.renderOnly) && typeof pos.areaIndex === 'number') {
                             // determine which frame to bind: prefer primary selection, but capture any layered stack for preview reuse
                             let frameIdx = this.selectedFrame;
                             let anim = this.selectedAnimation;
@@ -1778,6 +1878,17 @@ export class SpriteScene extends Scene {
                         }
                     }
                 } catch (e) { console.warn('area bind key failed', e); }
+
+                // Toggle tile activation under cursor when in tilemode (infinite grid). Space adds/removes tiles.
+                try {
+                    if (this.tilemode && this.keys && typeof this.keys.released === 'function' && (this.keys.released(' ') || this.keys.released('Space') || this.keys.released('Spacebar'))) {
+                        const pos = this.getPos(this.mouse && this.mouse.pos);
+                        if (pos && pos.tileCol !== null && pos.tileRow !== null) {
+                            if (pos.tileActive) this._deactivateTile(pos.tileCol, pos.tileRow);
+                            else this._activateTile(pos.tileCol, pos.tileRow);
+                        }
+                    }
+                } catch (e) { console.warn('tile activation toggle failed', e); }
 
                     // Rotate / Flip preview and commit handlers for area under mouse
                     try {
@@ -1855,22 +1966,32 @@ export class SpriteScene extends Scene {
             const pos = this.getPos(this.mouse.pos);
             if (!pos || !pos.inside) return;
             const sheet = this.currentSprite;
-            // if mouse is over a bound area, use that binding for target anim/frame
-            const areaBinding = (pos && typeof pos.areaIndex === 'number' && Array.isArray(this._areaBindings)) ? this._areaBindings[pos.areaIndex] : null;
-            // determine draw target: if area has a binding use it, otherwise use the global selected
-            // (unassigned areas visually mirror the selected frame and edits should affect the selected frame)
-            // Note: we no longer block drawing into unbound areas; they target `selectedAnimation/selectedFrame`.
-            const targetAnim = (areaBinding && areaBinding.anim) ? areaBinding.anim : this.selectedAnimation;
-            const targetFrame = (areaBinding && typeof areaBinding.index === 'number') ? areaBinding.index : this.selectedFrame;
+            // If clipboard brush mode is active, paste (left) or erase (right) with clipboard shape instead of square brush
+            if (this._clipboardBrushActive && this.clipboard) {
+                if (this.mouse.held('left')) {
+                    this.doPaste(this.mouse.pos);
+                    return;
+                }
+                if (this.mouse.held('right')) {
+                    this.doClipboardErase(this.mouse.pos);
+                    return;
+                }
+            }
             const color = this.penColor || '#000000';
-            const side = Math.max(1, Math.min(4, this.brushSize || 1));
+            const side = Math.max(1, Math.min(15, this.brushSize || 1));
             const half = Math.floor((side - 1) / 2);
             const areaIndexForPos = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
             const mirrorH = !!this.penMirrorH;
             const mirrorV = !!this.penMirrorV;
-            const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(targetAnim, targetFrame) : null;
-            const frameW = frameCanvas ? frameCanvas.width : null;
-            const frameH = frameCanvas ? frameCanvas.height : null;
+            const slice = sheet.slicePx || 1;
+            let baseCol = 0, baseRow = 0;
+            if (this.tilemode && typeof areaIndexForPos === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                const cr = this._tileIndexToCoord[areaIndexForPos];
+                if (cr) { baseCol = cr.col|0; baseRow = cr.row|0; }
+            }
+            const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(this.selectedAnimation, this.selectedFrame) : null;
+            const frameW = frameCanvas ? frameCanvas.width : slice;
+            const frameH = frameCanvas ? frameCanvas.height : slice;
             const mirrorActive = (mirrorH || mirrorV) && frameW !== null && frameH !== null;
 
             const prevBypass = this._bypassMirrorWrap;
@@ -1878,34 +1999,38 @@ export class SpriteScene extends Scene {
 
             try {
 
-            const applyPixel = (px, py, col, usePixelPerfect) => {
-                if (frameW !== null && frameH !== null) {
-                    if (px < 0 || py < 0 || px >= frameW || py >= frameH) return;
-                }
-                if (this.isPixelMasked(px, py, areaIndexForPos)) return;
-                if (usePixelPerfect) {
-                    this._applyPixelPerfectPixel(sheet, targetAnim, targetFrame, px, py, col, areaIndexForPos);
-                } else {
-                    try { sheet.setPixel(targetAnim, targetFrame, px, py, col, 'replace'); }
-                    catch (e) {
-                        try { sheet.modifyFrame(targetAnim, targetFrame, { x: px, y: py, color: col, blendType: 'replace' }); } catch (er) { /* ignore */ }
+            const worldPixelsFromBrush = (sx, sy) => {
+                const pixels = [];
+                const pushWorld = (lx, ly) => {
+                    // In tilemode, allow brush footprints to spill across tiles; in single-frame mode, drop out-of-bounds.
+                    if (!this.tilemode && frameW !== null && frameH !== null) {
+                        if (lx < 0 || ly < 0 || lx >= frameW || ly >= frameH) return;
+                    }
+                    if (this.isPixelMasked(lx, ly, areaIndexForPos)) return;
+                    const wx = baseCol * slice + lx;
+                    const wy = baseRow * slice + ly;
+                    pixels.push({ x: wx, y: wy });
+                };
+                const addMirrored = (lx, ly) => {
+                    const coords = [];
+                    coords.push({ x: lx, y: ly });
+                    if (mirrorH && frameW !== null) coords.push({ x: frameW - 1 - lx, y: ly });
+                    if (mirrorV && frameH !== null) coords.push({ x: lx, y: frameH - 1 - ly });
+                    if (mirrorH && mirrorV && frameW !== null && frameH !== null) coords.push({ x: frameW - 1 - lx, y: frameH - 1 - ly });
+                    const seen = new Set();
+                    for (const c of coords) {
+                        const key = c.x + ',' + c.y;
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        pushWorld(c.x, c.y);
+                    }
+                };
+                for (let yy = 0; yy < side; yy++) {
+                    for (let xx = 0; xx < side; xx++) {
+                        addMirrored(sx + xx, sy + yy);
                     }
                 }
-            };
-
-            const applyMirrored = (px, py, col, usePixelPerfect) => {
-                const coords = [];
-                coords.push({ x: px, y: py });
-                if (mirrorH && frameW !== null) coords.push({ x: frameW - 1 - px, y: py });
-                if (mirrorV && frameH !== null) coords.push({ x: px, y: frameH - 1 - py });
-                if (mirrorH && mirrorV && frameW !== null && frameH !== null) coords.push({ x: frameW - 1 - px, y: frameH - 1 - py });
-                const seen = new Set();
-                for (const c of coords) {
-                    const key = c.x + ',' + c.y;
-                    if (seen.has(key)) continue;
-                    seen.add(key);
-                    applyPixel(c.x, c.y, col, usePixelPerfect);
-                }
+                return pixels;
             };
 
             // Reset pixel-perfect stroke bookkeeping when no buttons are held.
@@ -1918,60 +2043,15 @@ export class SpriteScene extends Scene {
             if (this.mouse.held('left')) { // draw an NxN square centered on cursor (top-left bias for even sizes)
                 const sx = pos.x - half;
                 const sy = pos.y - half;
-                const usePixelPerfect = !!this.pixelPerfect && side === 1 && (!this.selectionPoints || this.selectionPoints.length === 0);
-                // If explicit selection points exist, respect them as a mask and write per-pixel skipping masked pixels.
-                if (this.selectionPoints && this.selectionPoints.length > 0) {
-                    for (let yy = 0; yy < side; yy++) {
-                        for (let xx = 0; xx < side; xx++) {
-                            const px = sx + xx;
-                            const py = sy + yy;
-                            applyMirrored(px, py, color, usePixelPerfect);
-                        }
-                    }
-                } else if (usePixelPerfect) {
-                    // Pixel-perfect single-pixel drawing with corner cutting.
-                    applyMirrored(sx, sy, color, true);
-                } else if (!mirrorActive && typeof sheet.fillRect === 'function') {
-                    sheet.fillRect(targetAnim, targetFrame, sx, sy, side, side, color, 'replace');
-                } else {
-                    for (let yy = 0; yy < side; yy++) {
-                        for (let xx = 0; xx < side; xx++) {
-                            applyMirrored(sx + xx, sy + yy, color, false);
-                        }
-                    }
-                }
-                // update packed sheet for preview
-                if (typeof sheet._rebuildSheetCanvas === 'function') {
-                    try { sheet._rebuildSheetCanvas(); } catch (e) {}
-                }
+                const worldPixels = worldPixelsFromBrush(sx, sy);
+                this._paintWorldPixels(worldPixels, color);
             }
             if (this.mouse.held('right')) { // erase NxN square
                 const eraseColor = '#00000000';
                 const sx = pos.x - half;
                 const sy = pos.y - half;
-                const usePixelPerfect = !!this.pixelPerfect && side === 1 && (!this.selectionPoints || this.selectionPoints.length === 0);
-                if (this.selectionPoints && this.selectionPoints.length > 0) {
-                    for (let yy = 0; yy < side; yy++) {
-                        for (let xx = 0; xx < side; xx++) {
-                            const px = sx + xx;
-                            const py = sy + yy;
-                            applyMirrored(px, py, eraseColor, usePixelPerfect);
-                        }
-                    }
-                } else if (usePixelPerfect) {
-                    applyMirrored(sx, sy, eraseColor, true);
-                } else if (!mirrorActive && typeof sheet.fillRect === 'function') {
-                    sheet.fillRect(targetAnim, targetFrame, sx, sy, side, side, eraseColor, 'replace');
-                } else {
-                    for (let yy = 0; yy < side; yy++) {
-                        for (let xx = 0; xx < side; xx++) {
-                            applyMirrored(sx + xx, sy + yy, eraseColor, false);
-                        }
-                    }
-                }
-                if (typeof sheet._rebuildSheetCanvas === 'function') {
-                    try { sheet._rebuildSheetCanvas(); } catch (e) {}
-                }
+                const worldPixels = worldPixelsFromBrush(sx, sy);
+                this._paintWorldPixels(worldPixels, eraseColor);
             }
 
             } finally {
@@ -2401,7 +2481,7 @@ export class SpriteScene extends Scene {
                 const pos = this.getPos(this.mouse.pos);
                 if (pos && pos.inside) {
                     if (this.mouse.held('left')) {
-                        const side = Math.max(1, Math.min(4, this.brushSize || 1));
+                        const side = Math.max(1, Math.min(15, this.brushSize || 1));
                         const half = Math.floor((side - 1) / 2);
                         const areaIndex = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
                         for (let yy = 0; yy < side; yy++) {
@@ -2418,7 +2498,7 @@ export class SpriteScene extends Scene {
                             }
                         }
                     } else if (this.mouse.held('right')) {
-                        const side = Math.max(1, Math.min(4, this.brushSize || 1));
+                        const side = Math.max(1, Math.min(15, this.brushSize || 1));
                         const half = Math.floor((side - 1) / 2);
                         const areaIndex = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
                         // remove any existing selection point within the brush square at this pixel (and area)
@@ -2430,6 +2510,14 @@ export class SpriteScene extends Scene {
                         });
                     }
                 }
+            }
+
+            // With 2+ selection points, 'l' draws a polygon (Alt to fill) in world space.
+            // Holding Shift selects the polygon instead of drawing.
+            const polyKey = (this.keys.pressed('l') || this.keys.pressed('L'));
+            if (this.selectionPoints.length >= 2 && polyKey) {
+                if (this.keys.held('Shift')) this._selectPolygonFromSelection();
+                else this._commitPolygonFromSelection();
             }
 
             // set tool keys when we have a primary anchor point.
@@ -2454,13 +2542,20 @@ export class SpriteScene extends Scene {
                 // same click event.
                 if (!this.keys.held('Shift') && this.mouse.pressed('left') && this.currentTool) {
                     const pos = this.getPos(this.mouse.pos);
-                    if (pos && pos.inside) {
+                    const anchor = this.selectionPoints[0];
+                    const anchorArea = (anchor && typeof anchor.areaIndex === 'number') ? anchor.areaIndex : null;
+                    let target = null;
+                    if (pos && pos.inside && (!this.tilemode || anchorArea === null || pos.areaIndex === anchorArea)) {
+                        target = { x: pos.x, y: pos.y, areaIndex: pos.areaIndex };
+                    } else if (anchor) {
+                        target = this._unclampedPixelForArea(anchorArea, this.mouse.pos);
+                    }
+                    if (target) {
                         const start = this.selectionPoints[0];
-                        const end = { x: pos.x, y: pos.y };
+                        const end = { x: target.x, y: target.y };
                         this.commitSelection(start, end);
                         try { if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.1); } catch (e) {}
-                        // clear selection after commit
-                        this.selectionPoints = [];
+                        // keep selection points so user can continue editing; just exit the active tool
                         this.currentTool = null;
                     }
                 }
@@ -3320,6 +3415,162 @@ export class SpriteScene extends Scene {
         return pixels;
     }
 
+    _selectionPointToWorld(pt) {
+        try {
+            if (!pt) return null;
+            const sheet = this.currentSprite;
+            const slice = (sheet && sheet.slicePx) ? sheet.slicePx : 1;
+            let col = 0, row = 0;
+            if (this.tilemode && typeof pt.areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                const cr = this._tileIndexToCoord[pt.areaIndex];
+                if (cr) { col = cr.col|0; row = cr.row|0; }
+            }
+            const wx = col * slice + pt.x;
+            const wy = row * slice + pt.y;
+            return { x: wx, y: wy, col, row };
+        } catch (e) { return null; }
+    }
+
+    _unclampedPixelForArea(areaIndex = null, screenPos = null) {
+        try {
+            if (!this.currentSprite) return null;
+            const mp = screenPos || (this.mouse && this.mouse.pos);
+            if (!mp) return null;
+            const slice = this.currentSprite.slicePx || 1;
+            let col = 0, row = 0;
+            if (this.tilemode && typeof areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                const cr = this._tileIndexToCoord[areaIndex];
+                if (cr) { col = cr.col|0; row = cr.row|0; }
+            }
+            const worldX = mp.x / this.zoom.x - this.offset.x;
+            const worldY = mp.y / this.zoom.y - this.offset.y;
+            const localX = Math.round(worldX - col * slice);
+            const localY = Math.round(worldY - row * slice);
+            return { x: localX, y: localY, areaIndex };
+        } catch (e) { return null; }
+    }
+
+    _worldPixelToTile(wx, wy, sliceSize = 1) {
+        try {
+            if (!Number.isFinite(wx) || !Number.isFinite(wy)) return null;
+            const slice = Math.max(1, Math.floor(sliceSize || 1));
+            const col = Math.floor(wx / slice);
+            const row = Math.floor(wy / slice);
+            const mod = (v, m) => {
+                const r = v % m;
+                return r < 0 ? r + m : r;
+            };
+            const localX = mod(Math.round(wx), slice);
+            const localY = mod(Math.round(wy), slice);
+            const areaIndex = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(col, row) : null;
+            return { col, row, localX, localY, areaIndex };
+        } catch (e) { return null; }
+    }
+
+    _paintWorldPixels(worldPixels, color) {
+        try {
+            const sheet = this.currentSprite;
+            if (!sheet || !worldPixels || worldPixels.length === 0) return;
+            const slice = (sheet.slicePx) ? sheet.slicePx : 1;
+            const seen = new Set();
+            for (const wp of worldPixels) {
+                if (!wp) continue;
+                const key = `${wp.x|0},${wp.y|0}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+
+                // In non-tile mode, drop pixels that fall outside the single frame instead of clamping.
+                if (!this.tilemode) {
+                    if (wp.x < 0 || wp.y < 0 || wp.x >= slice || wp.y >= slice) continue;
+                }
+
+                const target = this._worldPixelToTile(wp.x, wp.y, slice);
+                if (!target) continue;
+                if (this.tilemode && !this._isTileActive(target.col, target.row)) continue;
+                const areaIndex = this.tilemode ? target.areaIndex : null;
+                let anim = this.selectedAnimation;
+                let frameIdx = this.selectedFrame;
+                if (typeof areaIndex === 'number') {
+                    const binding = this.getAreaBinding(areaIndex);
+                    if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                        anim = binding.anim;
+                        frameIdx = Number(binding.index);
+                    }
+                }
+
+                if (this.maskShapesWithSelection && this.isPixelMasked(target.localX, target.localY, areaIndex)) continue;
+
+                if (typeof sheet.setPixel === 'function') {
+                    try { sheet.setPixel(anim, frameIdx, target.localX, target.localY, color, 'replace'); } catch (e) { /* ignore per-pixel errors */ }
+                } else if (typeof sheet.modifyFrame === 'function') {
+                    try { sheet.modifyFrame(anim, frameIdx, { x: target.localX, y: target.localY, color, blendType: 'replace' }); } catch (e) { /* ignore per-pixel errors */ }
+                }
+            }
+
+            if (typeof sheet._rebuildSheetCanvas === 'function') {
+                try { sheet._rebuildSheetCanvas(); } catch (e) { /* ignore */ }
+            }
+        } catch (e) {
+            console.warn('_paintWorldPixels failed', e);
+        }
+    }
+
+    _computePolygonPixelsWorld(worldVerts, filled) {
+        if (!Array.isArray(worldVerts) || worldVerts.length < 3) return [];
+        const verts = worldVerts.filter(Boolean);
+        if (verts.length < 3) return [];
+        const pixels = [];
+        const seen = new Set();
+        const addPixel = (x, y) => {
+            const key = `${x|0},${y|0}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                pixels.push({ x: x|0, y: y|0 });
+            }
+        };
+
+        // Always include outline via edge lines
+        for (let i = 0; i < verts.length; i++) {
+            const a = verts[i];
+            const b = verts[(i + 1) % verts.length];
+            if (!a || !b) continue;
+            const line = this.computeLinePixels({ x: Math.round(a.x), y: Math.round(a.y) }, { x: Math.round(b.x), y: Math.round(b.y) }) || [];
+            for (const p of line) addPixel(p.x, p.y);
+        }
+
+        if (!filled) return pixels;
+
+        // Scanline fill using edge intersections at pixel centers (y + 0.5)
+        let minY = Infinity, maxY = -Infinity;
+        for (const v of verts) { if (!v) continue; if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y; }
+        const yStart = Math.floor(minY);
+        const yEnd = Math.ceil(maxY);
+
+        for (let y = yStart; y <= yEnd; y++) {
+            const yc = y + 0.5;
+            const xs = [];
+            for (let i = 0; i < verts.length; i++) {
+                const a = verts[i];
+                const b = verts[(i + 1) % verts.length];
+                if (!a || !b) continue;
+                if ((a.y <= yc && b.y > yc) || (b.y <= yc && a.y > yc)) {
+                    const t = (yc - a.y) / (b.y - a.y);
+                    const x = a.x + t * (b.x - a.x);
+                    xs.push(x);
+                }
+            }
+            xs.sort((a, b) => a - b);
+            for (let i = 0; i + 1 < xs.length; i += 2) {
+                const x0 = xs[i];
+                const x1 = xs[i + 1];
+                const startX = Math.ceil(Math.min(x0, x1) - 0.5);
+                const endX = Math.floor(Math.max(x0, x1) - 0.5);
+                for (let x = startX; x <= endX; x++) addPixel(x, y);
+            }
+        }
+        return pixels;
+    }
+
     // Commit the selection pixels into the current sprite/frame using sheet API.
     commitSelection(start, end) {
         try {
@@ -3340,45 +3591,100 @@ export class SpriteScene extends Scene {
             if (!pixels || pixels.length === 0) return;
 
             const sheet = this.currentSprite;
-            // Prefer the area where the selection originated (start point), then selectionRegion's areaIndex,
-            // then the current mouse-over area. Fall back to selectedAnimation/selectedFrame.
-            let anim = this.selectedAnimation;
-            let frameIdx = this.selectedFrame;
-            let sourceAreaIndex = null;
-            if (start && typeof start.areaIndex === 'number') sourceAreaIndex = start.areaIndex;
-            else if (this.selectionRegion && typeof this.selectionRegion.areaIndex === 'number') sourceAreaIndex = this.selectionRegion.areaIndex;
-            else {
-                const posInfo = this.getPos(this.mouse && this.mouse.pos) || {};
-                if (posInfo && typeof posInfo.areaIndex === 'number') sourceAreaIndex = posInfo.areaIndex;
-            }
-            if (typeof sourceAreaIndex === 'number') {
-                const binding = this.getAreaBinding(sourceAreaIndex);
-                if (binding && binding.anim !== undefined && binding.index !== undefined) {
-                    anim = binding.anim;
-                    frameIdx = Number(binding.index);
-                }
-            }
             const color = this.penColor || '#000000';
+            const slice = (sheet && sheet.slicePx) ? sheet.slicePx : 1;
 
+            // Base tile for the originating anchor so we can map pixels into world coords
+            let baseCol = 0, baseRow = 0;
+            if (this.tilemode && start && typeof start.areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                const cr = this._tileIndexToCoord[start.areaIndex];
+                if (cr) { baseCol = cr.col|0; baseRow = cr.row|0; }
+            }
+
+            const worldPixels = [];
             for (const p of pixels) {
-                // clamp
-                const x = Math.max(0, Math.min((sheet.slicePx || 1) - 1, p.x));
-                const y = Math.max(0, Math.min((sheet.slicePx || 1) - 1, p.y));
-                // respect selectionPoints as a mask for shapes only when enabled
-                if (this.maskShapesWithSelection && this.isPixelMasked(x, y, sourceAreaIndex)) continue;
-                if (typeof sheet.setPixel === 'function') {
-                    try { sheet.setPixel(anim, frameIdx, x, y, color, 'replace'); } catch (e) { /* ignore per-pixel errors */ }
-                } else if (typeof sheet.modifyFrame === 'function') {
-                    try { sheet.modifyFrame(anim, frameIdx, { x, y, color, blendType: 'replace' }); } catch (e) { }
-                }
+                if (!p) continue;
+                const wx = baseCol * slice + p.x;
+                const wy = baseRow * slice + p.y;
+                worldPixels.push({ x: wx, y: wy });
             }
 
-            // rebuild packed sheet if available so drawing code picks up changes
-            if (typeof sheet._rebuildSheetCanvas === 'function') {
-                try { sheet._rebuildSheetCanvas(); } catch (e) { }
-            }
+            this._paintWorldPixels(worldPixels, color);
         } catch (e) {
             console.warn('commitSelection failed', e);
+        }
+    }
+
+    _commitPolygonFromSelection() {
+        try {
+            if (!this.currentSprite) return;
+            if (!this.selectionPoints || this.selectionPoints.length < 2) return;
+            const filled = !!(this.keys && this.keys.held && this.keys.held('Alt'));
+            const color = this.penColor || '#000000';
+            const verts = this.selectionPoints.map(p => this._selectionPointToWorld(p)).filter(v => v && Number.isFinite(v.x) && Number.isFinite(v.y));
+            if (verts.length < 2) return;
+
+            let worldPixels = [];
+            if (verts.length === 2) {
+                const a = verts[0];
+                const b = verts[1];
+                worldPixels = this.computeLinePixels({ x: Math.round(a.x), y: Math.round(a.y) }, { x: Math.round(b.x), y: Math.round(b.y) }) || [];
+            } else {
+                worldPixels = this._computePolygonPixelsWorld(verts, filled);
+            }
+            this._paintWorldPixels(worldPixels, color);
+            // keep selection points so user can continue editing; exit polygon tool
+            this.selectionRegion = null;
+            this.currentTool = null;
+        } catch (e) {
+            console.warn('_commitPolygonFromSelection failed', e);
+        }
+    }
+
+    _selectPolygonFromSelection() {
+        try {
+            if (!this.currentSprite) return;
+            if (!this.selectionPoints || this.selectionPoints.length < 2) return;
+            const filled = !!(this.keys && this.keys.held && this.keys.held('Alt'));
+            const verts = this.selectionPoints.map(p => this._selectionPointToWorld(p)).filter(v => v && Number.isFinite(v.x) && Number.isFinite(v.y));
+            if (verts.length < 2) return;
+
+            let worldPixels = [];
+            if (verts.length === 2) {
+                const a = verts[0];
+                const b = verts[1];
+                worldPixels = this.computeLinePixels({ x: Math.round(a.x), y: Math.round(a.y) }, { x: Math.round(b.x), y: Math.round(b.y) }) || [];
+            } else {
+                worldPixels = this._computePolygonPixelsWorld(verts, filled);
+            }
+
+            const sheet = this.currentSprite;
+            const slice = (sheet && sheet.slicePx) ? sheet.slicePx : 1;
+            const seen = new Set();
+            const nextSel = [];
+            for (const wp of worldPixels) {
+                if (!wp) continue;
+                const key = `${wp.x|0},${wp.y|0}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+
+                if (!this.tilemode) {
+                    if (wp.x < 0 || wp.y < 0 || wp.x >= slice || wp.y >= slice) continue;
+                }
+
+                const target = this._worldPixelToTile(wp.x, wp.y, slice);
+                if (!target) continue;
+                if (this.tilemode && !this._isTileActive(target.col, target.row)) continue;
+                const areaIndex = this.tilemode ? target.areaIndex : null;
+
+                nextSel.push({ x: target.localX, y: target.localY, areaIndex });
+            }
+
+            this.selectionPoints = nextSel;
+            this.selectionRegion = null;
+            this.currentTool = null;
+        } catch (e) {
+            console.warn('_selectPolygonFromSelection failed', e);
         }
     }
 
@@ -3546,11 +3852,20 @@ export class SpriteScene extends Scene {
                     layout.tileRows = Math.max(1, (this.tileRows|0) || 3);
                     layout.bindings = [];
                     layout.transforms = [];
+                    layout.activeTiles = [];
+                    if (this._tileActive && this._tileActive.size > 0) {
+                        for (const key of this._tileActive.values()) {
+                            const c = this._parseTileKey(key);
+                            if (c) layout.activeTiles.push({ col: c.col, row: c.row });
+                        }
+                    }
                     if (Array.isArray(this._areaBindings)) {
                         for (let i = 0; i < this._areaBindings.length; i++) {
                             const b = this._areaBindings[i];
                             if (!b || b.anim === undefined || b.index === undefined) continue;
+                            const coord = (this._tileIndexToCoord && this._tileIndexToCoord[i]) ? this._tileIndexToCoord[i] : null;
                             const entry = { areaIndex: i, anim: b.anim, index: Number(b.index) };
+                            if (coord) { entry.col = coord.col; entry.row = coord.row; }
                             if (Array.isArray(b.multiFrames) && b.multiFrames.length > 0) entry.multiFrames = b.multiFrames.map(v => Number(v));
                             layout.bindings.push(entry);
                         }
@@ -3578,7 +3893,7 @@ export class SpriteScene extends Scene {
         }
 
     // Copy the pixels inside this.selectionRegion into this.clipboard.
-    doCopy() {
+    doCopy(localOnly = false) {
         try {
             const sheet = this.currentSprite;
             // Determine source area/frame. Prefer the area where the selection was created
@@ -3634,26 +3949,28 @@ export class SpriteScene extends Scene {
                 const originOffset = { ox: originX - minX, oy: originY - minY };
                 this.clipboard = { type: 'points', w, h, pixels, originOffset };
                 // Attempt to also place a transferable representation on the system clipboard
-                try {
-                    if (typeof copyToClipboard === 'function') {
-                        // Create a compact image data URL representing the selected points
-                        const c = document.createElement('canvas');
-                        c.width = w; c.height = h;
-                        const cx = c.getContext('2d');
-                        const imgd = cx.createImageData(w, h);
-                        for (const p of pixels) {
-                            const idx = (p.y * w + p.x) * 4;
-                            imgd.data[idx] = p.r || 0;
-                            imgd.data[idx + 1] = p.g || 0;
-                            imgd.data[idx + 2] = p.b || 0;
-                            imgd.data[idx + 3] = p.a || 0;
+                if (!localOnly) {
+                    try {
+                        if (typeof copyToClipboard === 'function') {
+                            // Create a compact image data URL representing the selected points
+                            const c = document.createElement('canvas');
+                            c.width = w; c.height = h;
+                            const cx = c.getContext('2d');
+                            const imgd = cx.createImageData(w, h);
+                            for (const p of pixels) {
+                                const idx = (p.y * w + p.x) * 4;
+                                imgd.data[idx] = p.r || 0;
+                                imgd.data[idx + 1] = p.g || 0;
+                                imgd.data[idx + 2] = p.b || 0;
+                                imgd.data[idx + 3] = p.a || 0;
+                            }
+                            cx.putImageData(imgd, 0, 0);
+                            const dataUrl = c.toDataURL('image/png');
+                            // Copy a JSON wrapper including origin so paste can recover it
+                            try { copyToClipboard(JSON.stringify({ type: 'image', w, h, originOffset, data: dataUrl })); } catch (e) { copyToClipboard(dataUrl); }
                         }
-                        cx.putImageData(imgd, 0, 0);
-                        const dataUrl = c.toDataURL('image/png');
-                        // Copy a JSON wrapper including origin so paste can recover it
-                        try { copyToClipboard(JSON.stringify({ type: 'image', w, h, originOffset, data: dataUrl })); } catch (e) { copyToClipboard(dataUrl); }
-                    }
-                } catch (e) { /* ignore clipboard copy failures */ }
+                    } catch (e) { /* ignore clipboard copy failures */ }
+                }
                 return;
             }
 
@@ -3677,21 +3994,23 @@ export class SpriteScene extends Scene {
             const originOffset = { ox: originX - minX, oy: originY - minY };
             this.clipboard = { type: 'image', w, h, data: img.data, originOffset };
             // Attempt to also place a transferable representation on the system clipboard (data URL wrapped in JSON)
-            try {
-                if (typeof copyToClipboard === 'function') {
-                    const c = document.createElement('canvas');
-                    c.width = w; c.height = h;
-                    const cx = c.getContext('2d');
-                    const imageData = cx.createImageData(w, h);
-                    // copy numeric data into ImageData
-                    try { imageData.data.set(img.data); } catch (e) {
-                        for (let i = 0; i < Math.min(imageData.data.length, img.data.length); i++) imageData.data[i] = img.data[i];
+            if (!localOnly) {
+                try {
+                    if (typeof copyToClipboard === 'function') {
+                        const c = document.createElement('canvas');
+                        c.width = w; c.height = h;
+                        const cx = c.getContext('2d');
+                        const imageData = cx.createImageData(w, h);
+                        // copy numeric data into ImageData
+                        try { imageData.data.set(img.data); } catch (e) {
+                            for (let i = 0; i < Math.min(imageData.data.length, img.data.length); i++) imageData.data[i] = img.data[i];
+                        }
+                        cx.putImageData(imageData, 0, 0);
+                        const dataUrl = c.toDataURL('image/png');
+                        try { copyToClipboard(JSON.stringify({ type: 'image', w, h, originOffset, data: dataUrl })); } catch (e) { copyToClipboard(dataUrl); }
                     }
-                    cx.putImageData(imageData, 0, 0);
-                    const dataUrl = c.toDataURL('image/png');
-                    try { copyToClipboard(JSON.stringify({ type: 'image', w, h, originOffset, data: dataUrl })); } catch (e) { copyToClipboard(dataUrl); }
-                }
-            } catch (e) { /* ignore clipboard copy failures */ }
+                } catch (e) { /* ignore clipboard copy failures */ }
+            }
         } catch (e) {
             console.warn('doCopy failed', e);
         }
@@ -3773,38 +4092,62 @@ export class SpriteScene extends Scene {
         try {
             if (!this.clipboard || !this.currentSprite) return;
             const sheet = this.currentSprite;
-            // determine destination animation/frame based on mouse-over area (where paste occurs)
-            const posInfo = this.getPos(mousePos);
+            const slice = sheet.slicePx || 1;
+            const pos = this.getPos(mousePos);
+            if (!pos || !pos.inside) return;
+
+            // Resolve destination anim/frame and tile origin (col,row) when in tilemode
             let anim = this.selectedAnimation;
             let frameIdx = this.selectedFrame;
-            if (posInfo && typeof posInfo.areaIndex === 'number') {
-                const binding = this.getAreaBinding(posInfo.areaIndex);
+            let col = 0, row = 0;
+            let areaIndex = (pos && typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
+            if (this.tilemode && typeof areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                const cr = this._tileIndexToCoord[areaIndex];
+                if (cr) { col = cr.col|0; row = cr.row|0; }
+            }
+            if (typeof areaIndex === 'number') {
+                const binding = this.getAreaBinding(areaIndex);
                 if (binding && binding.anim !== undefined && binding.index !== undefined) {
                     anim = binding.anim;
                     frameIdx = Number(binding.index);
                 }
             }
-            // determine mouse pixel position in frame coords
-            const pos = posInfo || this.getPos(mousePos);
-            if (!pos || !pos.inside) return;
-            // handle point-list clipboard
+
+            const ox = (this.clipboard.originOffset && typeof this.clipboard.originOffset.ox === 'number') ? this.clipboard.originOffset.ox : 0;
+            const oy = (this.clipboard.originOffset && typeof this.clipboard.originOffset.oy === 'number') ? this.clipboard.originOffset.oy : 0;
+            const targetLocalX = pos.x - ox;
+            const targetLocalY = pos.y - oy;
+            const targetWorldX = col * slice + targetLocalX;
+            const targetWorldY = row * slice + targetLocalY;
+
+            const writeRGBAWorld = (wx, wy, r, g, b, a) => {
+                if (a === 0) return;
+                const t = this._worldPixelToTile(wx, wy, slice);
+                if (!t) return;
+                if (this.tilemode && !this._isTileActive(t.col, t.row)) return;
+                let aIdx = this.tilemode ? t.areaIndex : null;
+                let an = anim, fi = frameIdx;
+                if (typeof aIdx === 'number') {
+                    const bnd = this.getAreaBinding(aIdx);
+                    if (bnd && bnd.anim !== undefined && bnd.index !== undefined) {
+                        an = bnd.anim;
+                        fi = Number(bnd.index);
+                    }
+                }
+                if (typeof sheet.setPixel === 'function') {
+                    try { sheet.setPixel(an, fi, t.localX, t.localY, this.rgbaToHex(r, g, b, a), 'replace'); } catch (e) { }
+                } else if (typeof sheet.modifyFrame === 'function') {
+                    try { sheet.modifyFrame(an, fi, { x: t.localX, y: t.localY, color: this.rgbaToHex(r, g, b, a), blendType: 'replace' }); } catch (e) { }
+                }
+            };
+
             if (this.clipboard.type === 'points') {
                 const pixels = this.clipboard.pixels || [];
-                const ox = (this.clipboard.originOffset && typeof this.clipboard.originOffset.ox === 'number') ? this.clipboard.originOffset.ox : 0;
-                const oy = (this.clipboard.originOffset && typeof this.clipboard.originOffset.oy === 'number') ? this.clipboard.originOffset.oy : 0;
-                const targetX = pos.x - ox;
-                const targetY = pos.y - oy;
                 for (const p of pixels) {
-                    const destX = targetX + p.x;
-                    const destY = targetY + p.y;
-                    if (destX < 0 || destY < 0 || destX >= (sheet.slicePx || 0) || destY >= (sheet.slicePx || 0)) continue;
                     if (p.a === 0) continue;
-                    const hex = this.rgbaToHex(p.r, p.g, p.b, p.a);
-                    if (typeof sheet.setPixel === 'function') {
-                        try { sheet.setPixel(anim, frameIdx, destX, destY, hex, 'replace'); } catch (e) { }
-                    } else if (typeof sheet.modifyFrame === 'function') {
-                        try { sheet.modifyFrame(anim, frameIdx, { x: destX, y: destY, color: hex, blendType: 'replace' }); } catch (e) { }
-                    }
+                    const wx = targetWorldX + p.x;
+                    const wy = targetWorldY + p.y;
+                    writeRGBAWorld(wx, wy, p.r, p.g, p.b, p.a);
                 }
                 if (typeof sheet._rebuildSheetCanvas === 'function') {
                     try { sheet._rebuildSheetCanvas(); } catch (e) { }
@@ -3812,13 +4155,10 @@ export class SpriteScene extends Scene {
                 return;
             }
 
-            // image clipboard paste (existing behavior)
-            const targetX = pos.x - (this.clipboard.originOffset ? this.clipboard.originOffset.ox : 0);
-            const targetY = pos.y - (this.clipboard.originOffset ? this.clipboard.originOffset.oy : 0);
+            // image clipboard paste (world-aware)
             const w = this.clipboard.w;
             const h = this.clipboard.h;
             const data = this.clipboard.data; // Uint8ClampedArray
-
             for (let yy = 0; yy < h; yy++) {
                 for (let xx = 0; xx < w; xx++) {
                     const srcIdx = (yy * w + xx) * 4;
@@ -3826,17 +4166,10 @@ export class SpriteScene extends Scene {
                     const g = data[srcIdx + 1];
                     const b = data[srcIdx + 2];
                     const a = data[srcIdx + 3];
-                    // skip fully transparent pixels to avoid overwriting
                     if (a === 0) continue;
-                    const destX = targetX + xx;
-                    const destY = targetY + yy;
-                    if (destX < 0 || destY < 0 || destX >= (sheet.slicePx || 0) || destY >= (sheet.slicePx || 0)) continue;
-                    const hex = this.rgbaToHex(r, g, b, a);
-                    if (typeof sheet.setPixel === 'function') {
-                        try { sheet.setPixel(anim, frameIdx, destX, destY, hex, 'replace'); } catch (e) { }
-                    } else if (typeof sheet.modifyFrame === 'function') {
-                        try { sheet.modifyFrame(anim, frameIdx, { x: destX, y: destY, color: hex, blendType: 'replace' }); } catch (e) { }
-                    }
+                    const wx = targetWorldX + xx;
+                    const wy = targetWorldY + yy;
+                    writeRGBAWorld(wx, wy, r, g, b, a);
                 }
             }
             if (typeof sheet._rebuildSheetCanvas === 'function') {
@@ -3844,6 +4177,94 @@ export class SpriteScene extends Scene {
             }
         } catch (e) {
             console.warn('doPaste failed', e);
+        }
+    }
+
+    // Erase using the clipboard footprint (transparent pixels are ignored; opaque pixels erase to transparent)
+    doClipboardErase(mousePos) {
+        try {
+            if (!this.clipboard || !this.currentSprite) return;
+            const sheet = this.currentSprite;
+            const slice = sheet.slicePx || 1;
+            const pos = this.getPos(mousePos);
+            if (!pos || !pos.inside) return;
+
+            let anim = this.selectedAnimation;
+            let frameIdx = this.selectedFrame;
+            let col = 0, row = 0;
+            let areaIndex = (pos && typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
+            if (this.tilemode && typeof areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                const cr = this._tileIndexToCoord[areaIndex];
+                if (cr) { col = cr.col|0; row = cr.row|0; }
+            }
+            if (typeof areaIndex === 'number') {
+                const binding = this.getAreaBinding(areaIndex);
+                if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                    anim = binding.anim;
+                    frameIdx = Number(binding.index);
+                }
+            }
+
+            const ox = (this.clipboard.originOffset && typeof this.clipboard.originOffset.ox === 'number') ? this.clipboard.originOffset.ox : 0;
+            const oy = (this.clipboard.originOffset && typeof this.clipboard.originOffset.oy === 'number') ? this.clipboard.originOffset.oy : 0;
+            const targetLocalX = pos.x - ox;
+            const targetLocalY = pos.y - oy;
+            const targetWorldX = col * slice + targetLocalX;
+            const targetWorldY = row * slice + targetLocalY;
+            const eraseColor = '#00000000';
+
+            const eraseWorld = (wx, wy) => {
+                const t = this._worldPixelToTile(wx, wy, slice);
+                if (!t) return;
+                if (this.tilemode && !this._isTileActive(t.col, t.row)) return;
+                let aIdx = this.tilemode ? t.areaIndex : null;
+                let an = anim, fi = frameIdx;
+                if (typeof aIdx === 'number') {
+                    const bnd = this.getAreaBinding(aIdx);
+                    if (bnd && bnd.anim !== undefined && bnd.index !== undefined) {
+                        an = bnd.anim;
+                        fi = Number(bnd.index);
+                    }
+                }
+                if (typeof sheet.setPixel === 'function') {
+                    try { sheet.setPixel(an, fi, t.localX, t.localY, eraseColor, 'replace'); } catch (e) { }
+                } else if (typeof sheet.modifyFrame === 'function') {
+                    try { sheet.modifyFrame(an, fi, { x: t.localX, y: t.localY, color: eraseColor, blendType: 'replace' }); } catch (e) { }
+                }
+            };
+
+            if (this.clipboard.type === 'points') {
+                const pixels = this.clipboard.pixels || [];
+                for (const p of pixels) {
+                    if (p.a === 0) continue; // ignore transparent source pixels
+                    const wx = targetWorldX + p.x;
+                    const wy = targetWorldY + p.y;
+                    eraseWorld(wx, wy);
+                }
+                if (typeof sheet._rebuildSheetCanvas === 'function') {
+                    try { sheet._rebuildSheetCanvas(); } catch (e) { }
+                }
+                return;
+            }
+
+            const w = this.clipboard.w;
+            const h = this.clipboard.h;
+            const data = this.clipboard.data;
+            for (let yy = 0; yy < h; yy++) {
+                for (let xx = 0; xx < w; xx++) {
+                    const srcIdx = (yy * w + xx) * 4;
+                    const a = data[srcIdx + 3];
+                    if (a === 0) continue; // ignore transparent source
+                    const wx = targetWorldX + xx;
+                    const wy = targetWorldY + yy;
+                    eraseWorld(wx, wy);
+                }
+            }
+            if (typeof sheet._rebuildSheetCanvas === 'function') {
+                try { sheet._rebuildSheetCanvas(); } catch (e) { }
+            }
+        } catch (e) {
+            console.warn('doClipboardErase failed', e);
         }
     }
 
@@ -4212,11 +4633,15 @@ export class SpriteScene extends Scene {
                 tileRows: this.tileRows,
             };
             if (Array.isArray(this._areaBindings)) {
-                snap.bindings = this._areaBindings.map(b => {
+                snap.bindings = this._areaBindings.map((b, i) => {
                     if (!b) return null;
                     const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
-                    return { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf.slice() : null };
+                    const coord = (this._tileIndexToCoord && this._tileIndexToCoord[i]) ? this._tileIndexToCoord[i] : null;
+                    return { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf.slice() : null, col: coord ? coord.col : null, row: coord ? coord.row : null };
                 });
+            }
+            if (this._tileActive && this._tileActive.size > 0) {
+                snap.activeTiles = Array.from(this._tileActive.values()).map(k => this._parseTileKey(k)).filter(Boolean);
             }
             if (Array.isArray(this._areaTransforms)) snap.transforms = this._areaTransforms.slice();
             const animNames = Array.from(sheet._frames.keys());
@@ -4287,11 +4712,29 @@ export class SpriteScene extends Scene {
             }
             if (Number.isFinite(snapshot.tileCols)) this.tileCols = snapshot.tileCols;
             if (Number.isFinite(snapshot.tileRows)) this.tileRows = snapshot.tileRows;
+            if (!this._tileActive) this._tileActive = new Set();
+            if (Array.isArray(snapshot.activeTiles)) {
+                for (const t of snapshot.activeTiles) {
+                    if (!t) continue;
+                    const c = Number(t.col);
+                    const r = Number(t.row);
+                    if (Number.isFinite(c) && Number.isFinite(r)) this._activateTile(c, r);
+                }
+            } else {
+                this._seedTileActives(this.tileCols, this.tileRows);
+            }
             if (Array.isArray(snapshot.bindings)) {
-                this._areaBindings = snapshot.bindings.map(b => {
+                this._areaBindings = snapshot.bindings.map((b, i) => {
                     if (!b) return null;
+                    let idx = i;
+                    if (Number.isFinite(b.col) && Number.isFinite(b.row)) {
+                        idx = this._getAreaIndexForCoord(Number(b.col), Number(b.row));
+                        this._activateTile(Number(b.col), Number(b.row));
+                    }
                     const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
-                    return { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf.slice() : null };
+                    const entry = { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf.slice() : null };
+                    this._areaBindings[idx] = entry;
+                    return entry;
                 });
             }
             if (Array.isArray(snapshot.transforms)) this._areaTransforms = snapshot.transforms;
@@ -4716,6 +5159,126 @@ export class SpriteScene extends Scene {
         return { topLeft, size, padding, dstW, dstH, dstPos };
     }
 
+    // --- Infinite tile helpers ---
+    _tileKey(col, row) {
+        return `${col|0},${row|0}`;
+    }
+
+    _parseTileKey(key) {
+        if (typeof key !== 'string') return null;
+        const parts = key.split(',');
+        if (parts.length !== 2) return null;
+        const c = Number(parts[0]);
+        const r = Number(parts[1]);
+        if (!Number.isFinite(c) || !Number.isFinite(r)) return null;
+        return { col: c|0, row: r|0 };
+    }
+
+    _getAreaIndexForCoord(col, row) {
+        const key = this._tileKey(col, row);
+        if (this._tileCoordToIndex.has(key)) return this._tileCoordToIndex.get(key);
+        const idx = this._tileIndexToCoord.length;
+        this._tileCoordToIndex.set(key, idx);
+        this._tileIndexToCoord.push({ col, row });
+        return idx;
+    }
+
+    _isTileActive(col, row) {
+        return this._tileActive && this._tileActive.has(this._tileKey(col, row));
+    }
+
+    _activateTile(col, row) {
+        try {
+            if (!this._tileActive) this._tileActive = new Set();
+            this._tileActive.add(this._tileKey(col, row));
+            this._getAreaIndexForCoord(col, row);
+        } catch (e) { /* ignore */ }
+    }
+
+    _deactivateTile(col, row) {
+        try {
+            const key = this._tileKey(col, row);
+            if (this._tileActive) this._tileActive.delete(key);
+            const idx = this._tileCoordToIndex ? this._tileCoordToIndex.get(key) : null;
+            if (Number.isFinite(idx)) {
+                if (Array.isArray(this._areaBindings)) this._areaBindings[idx] = null;
+                if (Array.isArray(this._areaTransforms)) this._areaTransforms[idx] = null;
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    _seedTileActives(cols = null, rows = null) {
+        try {
+            const c = Math.max(1, Number(cols !== null ? cols : this.tileCols) || 1);
+            const r = Math.max(1, Number(rows !== null ? rows : this.tileRows) || 1);
+            const midC = Math.floor(c / 2);
+            const midR = Math.floor(r / 2);
+            for (let row = 0; row < r; row++) {
+                for (let col = 0; col < c; col++) {
+                    const tc = col - midC;
+                    const tr = row - midR;
+                    this._activateTile(tc, tr);
+                }
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    _tileCoordToPos(col, row, basePos, size) {
+        return basePos.clone().add(new Vector(col * size.x, row * size.y));
+    }
+
+    _worldToTileCoord(mx, my, basePos, size) {
+        const col = Math.floor((mx - basePos.x) / size.x);
+        const row = Math.floor((my - basePos.y) / size.y);
+        return { col, row };
+    }
+
+    _coordFromLegacyIndex(idx, cols, rows) {
+        const c = Math.max(1, cols|0);
+        const r = Math.max(1, rows|0);
+        const midC = Math.floor(c / 2);
+        const midR = Math.floor(r / 2);
+        const row = Math.floor(idx / c);
+        const col = idx % c;
+        return { col: col - midC, row: row - midR };
+    }
+
+    _shouldCullArea(area) {
+        // Use fixed 1920x1080 screen for culling; skip render only when fully off-screen.
+        const SCREEN_W = 1920;
+        const SCREEN_H = 1080;
+        if (!area || !area.dstPos || area.dstW === undefined || area.dstH === undefined) return false;
+        const zx = this.zoom && this.zoom.x ? this.zoom.x : 1;
+        const zy = this.zoom && this.zoom.y ? this.zoom.y : 1;
+        const ox = this.offset && this.offset.x ? this.offset.x : 0;
+        const oy = this.offset && this.offset.y ? this.offset.y : 0;
+
+        // screen-space rectangle after current transform: screen = (world + offset) * zoom
+        const scrX = (area.dstPos.x + ox) * zx;
+        const scrY = (area.dstPos.y + oy) * zy;
+        const scrW = area.dstW * zx;
+        const scrH = area.dstH * zy;
+
+        // Off-screen cull only
+        if (scrX > SCREEN_W || scrX + scrW < 0) return true;
+        if (scrY > SCREEN_H || scrY + scrH < 0) return true;
+        return false;
+    }
+
+    _isSimTooSmall(area) {
+        // Simulation distance: if on-screen size is tiny, treat as render-only (no UI/edits).
+        const SCREEN_W = 1920;
+        const SCREEN_H = 1080;
+        if (!area || area.dstW === undefined || area.dstH === undefined) return false;
+        const zx = this.zoom && this.zoom.x ? this.zoom.x : 1;
+        const zy = this.zoom && this.zoom.y ? this.zoom.y : 1;
+        const scrW = area.dstW * zx;
+        const scrH = area.dstH * zy;
+        const minW = SCREEN_W / 7;
+        const minH = SCREEN_H / 7;
+        return (scrW < minW) || (scrH < minH);
+    }
+
     // Compute area info for an arbitrary pos/size (same return shape as computeDrawArea)
     computeAreaInfo(pos, size) {
         const drawCtx = this.Draw && this.Draw.ctx;
@@ -4959,36 +5522,62 @@ export class SpriteScene extends Scene {
 
             // Build all displayed tile positions.
             // When tilemode is off, show a single central area.
-            // When tilemode is on, show a tileCols x tileRows grid centered on this area.
-            const positions = [];
+            // When tilemode is on, draw all active tiles (infinite grid), plus the hovered tile even if inactive.
+            const areas = [];
+            const basePos = center.clone(); // tile (0,0) top-left
+
             if (!this.tilemode) {
-                positions.push(center.clone());
-            } else {
-                const cols = Math.max(1, (this.tileCols|0) || 1);
-                const rows = Math.max(1, (this.tileRows|0) || 1);
-                const midCol = Math.floor(cols / 2);
-                const midRow = Math.floor(rows / 2);
-                for (let row = 0; row < rows; row++) {
-                    for (let col = 0; col < cols; col++) {
-                        const offsetX = (col - midCol) * size.x;
-                        const offsetY = (row - midRow) * size.y;
-                        const p = center.clone().add(new Vector(offsetX, offsetY));
-                        positions.push(p);
-                    }
+                const info = this.computeAreaInfo(basePos, size);
+                if (info) {
+                    info.areaIndex = 0;
+                    info.tileCol = 0;
+                    info.tileRow = 0;
+                    info.active = true;
+                    info.renderOnly = this._isSimTooSmall(info);
+                    if (!this._shouldCullArea(info)) areas.push(info);
                 }
+            } else {
+                if (!this._tileActive || this._tileActive.size === 0) this._seedTileActives();
+                const seen = new Set();
+                const addTileArea = (col, row, active=true) => {
+                    const key = this._tileKey(col, row);
+                    if (seen.has(key)) return;
+                    seen.add(key);
+                    const pos = this._tileCoordToPos(col, row, basePos, size);
+                    const info = this.computeAreaInfo(pos, size);
+                    if (!info || this._shouldCullArea(info)) return;
+                    info.renderOnly = this._isSimTooSmall(info);
+                    const idx = this._getAreaIndexForCoord(col, row);
+                    info.areaIndex = idx;
+                    info.tileCol = col;
+                    info.tileRow = row;
+                    info.active = !!active;
+                    areas.push(info);
+                };
+
+                // draw all active tiles
+                for (const key of this._tileActive.values()) {
+                    const c = this._parseTileKey(key);
+                    if (c) addTileArea(c.col, c.row, true);
+                }
+
+                // include hovered tile even if inactive
+                try {
+                    const mp = this.mouse && this.mouse.pos ? this.mouse.pos : new Vector(0,0);
+                    let mx = mp.x || 0;
+                    let my = mp.y || 0;
+                    mx = mx / this.zoom.x - this.offset.x;
+                    my = my / this.zoom.y - this.offset.y;
+                    const hover = this._worldToTileCoord(mx, my, basePos, size);
+                    if (hover) addTileArea(hover.col, hover.row, this._isTileActive(hover.col, hover.row));
+                } catch (e) { /* ignore hover add errors */ }
             }
 
-            // compute and cache area infos for input mapping
-            const areas = [];
-            for (const p of positions) {
-                const info = this.computeAreaInfo(p, size);
-                if (info) areas.push(info);
-            }
             this._drawAreas = areas;
 
             // render each area and pass area index so display can show bindings
-            for (let i = 0; i < positions.length; i++) {
-                this.displayDrawArea(positions[i], size, this.currentSprite, this.selectedAnimation, this.selectedFrame, i);
+            for (const area of areas) {
+                this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area);
             }
         }
 
@@ -5040,10 +5629,11 @@ export class SpriteScene extends Scene {
      * and draw the specified frame from `sheet` (SpriteSheet instance).
      * `animation` is the animation name and `frame` the frame index.
      */
-    displayDrawArea(pos, size, sheet, animation = 'idle', frame = 0, areaIndex = null) {
+    displayDrawArea(pos, size, sheet, animation = 'idle', frame = 0, areaIndex = null, areaInfo = null) {
         try {
             if (!this.Draw || !pos || !size) return;
             this.Draw.useCtx('base');
+            const renderOnly = !!(areaInfo && areaInfo.renderOnly);
             // draw a subtle checkerboard background for transparency
             const tile = 16;
             const cols = Math.ceil(size.x / tile);
@@ -5058,24 +5648,35 @@ export class SpriteScene extends Scene {
             }
 
             // draw border
-            this.Draw.rect(pos, size, '#FFFFFF88', false, true, 2, '#FFFFFF88');
+            if (!renderOnly) this.Draw.rect(pos, size, '#FFFFFF88', false, true, 2, '#FFFFFF88');
 
             // show active mirror axes for the pen tool
-            try {
-                const midX = pos.x + size.x / 2;
-                const midY = pos.y + size.y / 2;
-                if (this.penMirrorH) {
-                    this.Draw.line(new Vector(midX, pos.y), new Vector(midX, pos.y + size.y), '#FFFFFF88', 2);
-                }
-                if (this.penMirrorV) {
-                    this.Draw.line(new Vector(pos.x, midY), new Vector(pos.x + size.x, midY), '#FFFFFF88', 2);
-                }
-            } catch (e) { /* ignore mirror guideline errors */ }
+            if (!renderOnly) {
+                try {
+                    const midX = pos.x + size.x / 2;
+                    const midY = pos.y + size.y / 2;
+                    if (this.penMirrorH) {
+                        this.Draw.line(new Vector(midX, pos.y), new Vector(midX, pos.y + size.y), '#FFFFFF88', 2);
+                    }
+                    if (this.penMirrorV) {
+                        this.Draw.line(new Vector(pos.x, midY), new Vector(pos.x + size.x, midY), '#FFFFFF88', 2);
+                    }
+                } catch (e) { /* ignore mirror guideline errors */ }
+            }
 
             // draw the frame image centered inside the box with some padding
             if (sheet) {
                 // determine effective animation/frame for this area (respect bindings)
                 const binding = (typeof areaIndex === 'number' && Array.isArray(this._areaBindings)) ? this._areaBindings[areaIndex] : null;
+                const coordForArea = (typeof areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) ? this._tileIndexToCoord[areaIndex] : null;
+                const tileIsActive = (!this.tilemode) || (coordForArea && this._isTileActive(coordForArea.col, coordForArea.row));
+                if (this.tilemode && !tileIsActive) {
+                    // Draw placeholder for inactive tile slot; no mirroring/binding until activated.
+                    this.Draw.rect(pos, size, '#222222DD', true);
+                    this.Draw.rect(pos, size, '#000000aa', false, true, 1, '#000000AA');
+                    try { this.Draw.text('Press space to add tile', new Vector(pos.x + 8, pos.y + 12), '#AAAAAA', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' }); } catch (e) {}
+                    return;
+                }
                 let effAnim = null;
                 let effFrame = null;
                 let isMirrored = false;
@@ -5102,7 +5703,7 @@ export class SpriteScene extends Scene {
                         // (neighboring frames) with reduced alpha so users see motion context.
                         try {
                             const drawCtx = this.Draw && this.Draw.ctx;
-                            const onionEnabled = (!this.tilemode) && ((typeof this.onionSkin === 'boolean') ? this.onionSkin : false);
+                            const onionEnabled = (!renderOnly) && (!this.tilemode) && ((typeof this.onionSkin === 'boolean') ? this.onionSkin : false);
                             // If a binding captured a frame stack, use it; otherwise fall back to current multi-select (preview-only; edit still targets the primary frame)
                             let compositeIdxs = null;
                             if (binding && Array.isArray(binding.multiFrames) && binding.multiFrames.length > 0) {
@@ -5113,7 +5714,7 @@ export class SpriteScene extends Scene {
                             const framesArr = (sheet && sheet._frames && effAnim) ? (sheet._frames.get(effAnim) || []) : [];
                             const baseAlpha = (typeof this.onionAlpha === 'number') ? this.onionAlpha : 1;
 
-                            if (effAnim !== null && drawCtx && Array.isArray(compositeIdxs) && compositeIdxs.length >= 2) {
+                            if (!renderOnly && effAnim !== null && drawCtx && Array.isArray(compositeIdxs) && compositeIdxs.length >= 2) {
                                 try {
                                     // Build arrays of indices from the multi-selected set
                                     const idxs = compositeIdxs.filter(i => typeof i === 'number' && i >= 0 && i < framesArr.length).sort((a,b)=>a-b);
@@ -5214,21 +5815,24 @@ export class SpriteScene extends Scene {
                     this.Draw.image(sheet.sheet, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
                 }
 
-                // After drawing the frame, show binding label (or mirrored note) so text appears above the art.
+                // After drawing the frame, show binding label (or mirrored note) unless render-only.
                 try {
                     if (typeof areaIndex === 'number' && Array.isArray(this._areaBindings) && this._areaBindings[areaIndex]) {
                         const b = this._areaBindings[areaIndex];
                         const label = (b && b.anim) ? `${b.anim}:${b.index}` : String(b && b.index);
                         this.Draw.text(label, new Vector(pos.x + 6, pos.y + 14), '#FFFFFF', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
                     } else if (this.tilemode) {
-                        this.Draw.text('(mirrored)', new Vector(pos.x + 6, pos.y + 14), '#AAAAAA', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
+                        //this.Draw.text('(selected)', new Vector(pos.x + 6, pos.y + 14), '#AAAAAA', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
                     }
                 } catch (e) { }
+                if (!renderOnly) {
+                }
 
-                // Draw a pixel cursor / selection preview. In tilemode this is
-                // restricted to tiles that mirror the same effective frame as
-                // the tile currently under the mouse cursor.
-                this.displayCursor(dstPos,dstW,dstH,binding,effAnim,effFrame,areaIndex)
+                // Draw a pixel cursor / selection preview unless render-only.
+                if (!renderOnly) {
+                    // In tilemode this is restricted to tiles that mirror the same effective frame
+                    this.displayCursor(dstPos,dstW,dstH,binding,effAnim,effFrame,areaIndex)
+                }
             }
         } catch (e) {
             console.warn('displayDrawArea failed', e);
@@ -5366,10 +5970,85 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            const posInfo = posInfoGlobal;
-            if (posInfo && posInfo.inside) {
-                const mousePixelPos = { x: posInfo.x, y: posInfo.y };
+            // Draw a blinking, low-alpha preview when clipboard brush mode is active (non-preview mode)
+            if (this._clipboardBrushActive && this.clipboard && !this.clipboardPreview) {
+                try {
+                    const cb = this.clipboard;
+                    const posInfo = posInfoGlobal;
+                    if (posInfo && posInfo.inside && typeof areaIndex === 'number' && posInfo.areaIndex === areaIndex) {
+                        const ox = (cb.originOffset && typeof cb.originOffset.ox === 'number') ? cb.originOffset.ox : 0;
+                        const oy = (cb.originOffset && typeof cb.originOffset.oy === 'number') ? cb.originOffset.oy : 0;
+                        const w = cb.w;
+                        const h = cb.h;
+                        const topLeftX = posInfo.x - ox;
+                        const topLeftY = posInfo.y - oy;
+                        const blink = 0.2 * (0.5 + 0.5 * Math.sin((this._clipboardBrushBlinkPhase || 0) * 6));
+                        const ghostAlpha = Math.max(0.05, Math.min(0.6, 0.25 + blink));
 
+                        if (cb.type === 'points') {
+                            const pixels = cb.pixels || [];
+                            for (const p of pixels) {
+                                if (!p) continue;
+                                if (p.a === 0) continue;
+                                const drawX = dstPos.x + (topLeftX + p.x) * cellW;
+                                const drawY = dstPos.y + (topLeftY + p.y) * cellH;
+                                this.Draw.rect(new Vector(drawX, drawY), new Vector(cellW, cellH), `rgba(${p.r||0},${p.g||0},${p.b||0},${ghostAlpha})`, true);
+                            }
+                        } else {
+                            const tmp = document.createElement('canvas');
+                            tmp.width = w;
+                            tmp.height = h;
+                            const tctx = tmp.getContext('2d');
+                            try {
+                                const imgData = new ImageData(new Uint8ClampedArray(cb.data), w, h);
+                                tctx.putImageData(imgData, 0, 0);
+                                const dstX = dstPos.x + topLeftX * cellW;
+                                const dstY = dstPos.y + topLeftY * cellH;
+                                const dstWpx = w * cellW;
+                                const dstHpx = h * cellH;
+                                this.Draw.image(tmp, new Vector(dstX, dstY), new Vector(dstWpx, dstHpx), null, 0, ghostAlpha, false);
+                            } catch (e) {
+                                for (let yy = 0; yy < h; yy++) {
+                                    for (let xx = 0; xx < w; xx++) {
+                                        const i = (yy * w + xx) * 4;
+                                        const a = cb.data[i+3];
+                                        if (a === 0) continue;
+                                        const r = cb.data[i];
+                                        const g = cb.data[i+1];
+                                        const b = cb.data[i+2];
+                                        const hex = this.rgbaToHex(r,g,b, Math.round(a * ghostAlpha));
+                                        const drawX = dstPos.x + (topLeftX + xx) * cellW;
+                                        const drawY = dstPos.y + (topLeftY + yy) * cellH;
+                                        this.Draw.rect(new Vector(drawX, drawY), new Vector(cellW, cellH), hex, true);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // ignore brush preview errors
+                }
+            }
+
+            const posInfo = posInfoGlobal;
+            const anchor = (this.selectionPoints && this.selectionPoints.length > 0) ? this.selectionPoints[0] : null;
+            const anchorArea = (anchor && typeof anchor.areaIndex === 'number') ? anchor.areaIndex : null;
+
+            // Only show shape previews on the anchor's tile when known to avoid duplication across tiles.
+            if (anchorArea !== null && typeof areaIndex === 'number' && areaIndex !== anchorArea) {
+                return;
+            }
+
+            // Determine mouse pixel even when off-frame for circle/line previews.
+            let mousePixelPos = null;
+            if (posInfo && posInfo.inside && (anchorArea === null || posInfo.areaIndex === anchorArea)) {
+                mousePixelPos = { x: posInfo.x, y: posInfo.y };
+            } else if (anchor) {
+                const fallback = this._unclampedPixelForArea(anchorArea !== null ? anchorArea : areaIndex, this.mouse && this.mouse.pos);
+                if (fallback) mousePixelPos = { x: fallback.x, y: fallback.y };
+            }
+
+            if (mousePixelPos) {
                 if (this.currentTool === 'line' && this.selectionPoints.length === 1) {
                     this.drawLine(this.selectionPoints[0], mousePixelPos, '#FFFFFF88');
                 } else if (this.currentTool === 'box' && this.selectionPoints.length === 1) {
@@ -5392,10 +6071,10 @@ export class SpriteScene extends Scene {
 
                 // draw brush-sized cursor (NxN where N is this.brushSize)
                 try {
-                    const side = Math.max(1, Math.min(4, this.brushSize || 1));
+                    const side = Math.max(1, Math.min(15, this.brushSize || 1));
                     const half = Math.floor((side - 1) / 2);
-                    const sx = posInfo.x - half;
-                    const sy = posInfo.y - half;
+                    const sx = mousePixelPos.x - half;
+                    const sy = mousePixelPos.y - half;
                     const drawX = dstPos.x + sx * cellW;
                     const drawY = dstPos.y + sy * cellH;
                     const drawW = side * cellW;
@@ -5403,8 +6082,8 @@ export class SpriteScene extends Scene {
                     this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), '#FFFFFF22', true);
                     this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), '#FFFFFFEE', false, true, 2, '#FFFFFFEE');
                 } catch (e) {
-                    const cellX = dstPos.x + posInfo.x * cellW;
-                    const cellY = dstPos.y + posInfo.y * cellH;
+                    const cellX = dstPos.x + mousePixelPos.x * cellW;
+                    const cellY = dstPos.y + mousePixelPos.y * cellH;
                     this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFF22', true);
                     this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFFEE', false, true, 2, '#FFFFFFEE');
                 }
