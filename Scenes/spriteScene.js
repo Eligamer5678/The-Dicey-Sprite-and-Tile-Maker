@@ -1719,6 +1719,29 @@ export class SpriteScene extends Scene {
                         if (typeof sig === 'function') sig(hex, buffer);
                     }
                 }
+
+                // Backtick (`) prompts for a square resize (single value applies to both dimensions)
+                if (this.keys.released('`')) {
+                    try {
+                        const current = Math.max(1, this.currentSprite && this.currentSprite.slicePx ? this.currentSprite.slicePx : 16);
+                        const input = window.prompt('Resize canvas (square only, px)', String(current));
+                        if (input !== null) {
+                            const parsed = Math.floor(Number(String(input).trim()));
+                            if (Number.isFinite(parsed) && parsed > 0) {
+                                let resizeContent = true;
+                                try {
+                                    const resp = window.prompt('Resize content? (y/n, default y)', 'y');
+                                    if (resp !== null) {
+                                        const normalized = String(resp).trim().toLowerCase();
+                                        if (normalized.startsWith('n')) resizeContent = false;
+                                        else if (normalized.startsWith('y')) resizeContent = true;
+                                    }
+                                } catch (e) { /* ignore secondary prompt errors */ }
+                                this.resize(parsed, resizeContent);
+                            }
+                        }
+                    } catch (e) { /* ignore prompt errors */ }
+                }
             }
         } catch (e) { /* ignore */ }
 

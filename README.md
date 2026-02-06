@@ -36,6 +36,7 @@
 - shift+f to select region
 - a to toggle pixel perfect drawing when the pen size is 1 (i.e. cornercutting)
 - ctrl + z = Undo
+- ` to resize canvas (instead of 16x16)
 
 - Press the upper left corner to access the console
 
