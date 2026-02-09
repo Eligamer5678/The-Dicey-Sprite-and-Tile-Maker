@@ -7,6 +7,10 @@ export default class Keys { // Key input
 
         window.addEventListener("keydown", e => {
             // prevent browser interfering with shortcuts
+            if ((e.key === 'u' || e.key === 'U') && e.altKey && e.shiftKey) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
             if (e.key === " " || (e.altKey)) {
                 e.preventDefault();
             }
@@ -24,6 +28,10 @@ export default class Keys { // Key input
         });
         
         window.addEventListener("keyup", e => {
+            if ((e.key === 'u' || e.key === 'U') && e.altKey && e.shiftKey) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
             if ((e.altKey)) {
                 e.preventDefault();
             }

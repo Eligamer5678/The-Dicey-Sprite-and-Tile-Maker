@@ -337,6 +337,12 @@ export class SpriteScene extends Scene {
         this.selectionPoints = [];
         this.currentTool = null;
 
+        // Onion skin + layering visibility
+        this.onionSkin = false;
+        this.onionAlpha = 0.3;
+        this.layerAlpha = 1;
+        this.onionRange = { before: 1, after: 1 };
+
         // Pixel-perfect drawing mode (toggle with 'a'). When enabled, the pen
         // tool tracks the last few pixels in the current stroke and avoids
         // drawing "L"-shaped corners by restoring the bend pixel.
@@ -1684,6 +1690,55 @@ export class SpriteScene extends Scene {
                 if (this.keys.released('7')) this.adjustChannel = 's';
                 if (this.keys.released('8')) this.adjustChannel = 'v';
                 if (this.keys.released('9')) this.adjustChannel = 'a';
+
+                // Toggle onion skinning with 'u'. Shift+U prompts for alpha; Shift+Alt+U prompts for range; if multi-selecting, alpha prompt adjusts layer alpha instead.
+                if (this.keys.released('u') || this.keys.released('U')) {
+                    const shiftHeld = this.keys.held('Shift');
+                    const altHeld = this.keys.held('Alt');
+                    if (altHeld && shiftHeld) {
+                        try {
+                            const current = this.onionRange;
+                            const before = (current && typeof current.before === 'number') ? current.before : (typeof current === 'number' ? current : 1);
+                            const after = (current && typeof current.after === 'number') ? current.after : (typeof current === 'number' ? current : 1);
+                            const input = window.prompt('Onion range (format "before,after", e.g. "5,2" or "-5,2")', `${before},${after}`);
+                            if (input !== null) {
+                                const parts = String(input).split(',').map(s => s.trim()).filter(s => s.length > 0);
+                                let newBefore = before;
+                                let newAfter = after;
+                                if (parts.length === 1) {
+                                    const v = Number(parts[0]);
+                                    if (Number.isFinite(v)) { newBefore = Math.max(0, Math.abs(Math.floor(v))); newAfter = newBefore; }
+                                } else if (parts.length >= 2) {
+                                    const p0 = Number(parts[0]);
+                                    const p1 = Number(parts[1]);
+                                    if (Number.isFinite(p0)) newBefore = Math.max(0, Math.abs(Math.floor(p0)));
+                                    if (Number.isFinite(p1)) newAfter = Math.max(0, Math.abs(Math.floor(p1)));
+                                }
+                                this.onionRange = { before: newBefore, after: newAfter };
+                                try { console.log('Onion range set to', this.onionRange); } catch (e) {}
+                            }
+                        } catch (e) { /* ignore prompt failures */ }
+                        return;
+                    }
+                    if (!shiftHeld) {
+                        this.onionSkin = !(typeof this.onionSkin === 'boolean' ? this.onionSkin : false);
+                        try { console.log('Onion skin:', this.onionSkin); } catch (e) {}
+                    } else {
+                        try {
+                            const multiActive = this.FrameSelect && this.FrameSelect._multiSelected && this.FrameSelect._multiSelected.size > 0;
+                            const current = multiActive ? (this.layerAlpha ?? 1) : (this.onionAlpha ?? 1);
+                            const input = window.prompt(multiActive ? 'Layer alpha (0-1)' : 'Onion alpha (0-1)', String(current));
+                            if (input !== null) {
+                                const parsed = Number(input);
+                                if (Number.isFinite(parsed)) {
+                                    const clamped = Math.max(0, Math.min(1, parsed));
+                                    if (multiActive) this.layerAlpha = clamped;
+                                    else this.onionAlpha = clamped;
+                                }
+                            }
+                        } catch (e) { /* ignore prompt failures */ }
+                    }
+                }
 
                 // Toggle pixel-perfect drawing mode with 'a'. When enabled,
                 // the pen tool performs corner-cutting to avoid "L" shapes.
@@ -5718,6 +5773,7 @@ export class SpriteScene extends Scene {
                 const dstH = Math.max(1, size.y - padding * 2);
                 const dstPos = new Vector(pos.x + (size.x - dstW) / 2, pos.y + (size.y - dstH) / 2);
                 // Prefer Draw.sheet which understands SpriteSheet metadata (rows/frames).
+                let layeredCanvas = null;
                 if (effAnim !== null && sheet && typeof this.Draw.sheet === 'function') {
                     try {
                         // Draw.sheet expects a sheet-like object with `.sheet` (Image/Canvas)
@@ -5726,64 +5782,56 @@ export class SpriteScene extends Scene {
                         // (neighboring frames) with reduced alpha so users see motion context.
                         try {
                             const drawCtx = this.Draw && this.Draw.ctx;
-                            const onionEnabled = (!renderOnly) && (!this.tilemode) && ((typeof this.onionSkin === 'boolean') ? this.onionSkin : false);
-                            // If a binding captured a frame stack, use it; otherwise fall back to current multi-select (preview-only; edit still targets the primary frame)
-                            let compositeIdxs = null;
-                            if (binding && Array.isArray(binding.multiFrames) && binding.multiFrames.length > 0) {
-                                compositeIdxs = binding.multiFrames.filter(i => Number.isFinite(i)).map(i => Number(i));
-                            } else if (this.FrameSelect && this.FrameSelect._multiSelected) {
-                                compositeIdxs = Array.from(this.FrameSelect._multiSelected).filter(i => typeof i === 'number');
-                            }
+                            const onionEnabled = (!this.tilemode) && ((typeof this.onionSkin === 'boolean') ? this.onionSkin : false);
+                            // If FrameSelect has multi-selected frames, composite those instead. Allow in tilemode too.
+                            const multiSet = (this.FrameSelect && this.FrameSelect._multiSelected) ? this.FrameSelect._multiSelected : null;
                             const framesArr = (sheet && sheet._frames && effAnim) ? (sheet._frames.get(effAnim) || []) : [];
                             const baseAlpha = (typeof this.onionAlpha === 'number') ? this.onionAlpha : 1;
+                            const layerAlpha = (typeof this.layerAlpha === 'number') ? Math.max(0, Math.min(1, this.layerAlpha)) : 1;
+                            let compositeIdxs = null;
 
-                            if (!renderOnly && effAnim !== null && drawCtx && Array.isArray(compositeIdxs) && compositeIdxs.length >= 2) {
+                            if (binding && Array.isArray(binding.multiFrames) && binding.multiFrames.length > 0) {
+                                compositeIdxs = binding.multiFrames.filter(i => Number.isFinite(i)).map(i => Number(i));
+                            } else if (multiSet && multiSet.size > 0) {
+                                compositeIdxs = Array.from(multiSet).filter(i => typeof i === 'number' && i >= 0 && i < framesArr.length).map(Number);
+                            }
+
+                            if (effAnim !== null && drawCtx && compositeIdxs && compositeIdxs.length >= 2) {
                                 try {
-                                    // Build arrays of indices from the multi-selected set
-                                    const idxs = compositeIdxs.filter(i => typeof i === 'number' && i >= 0 && i < framesArr.length).sort((a,b)=>a-b);
-                                    if (idxs.length >= 2) {
-                                        const beforeIdxs = idxs.filter(i => i < effFrame);
-                                        const afterIdxs = idxs.filter(i => i > effFrame);
-
-                                        // Helper to composite a set of frames into a temporary canvas
-                                        const compositeSet = (indices) => {
-                                            if (!indices || indices.length === 0) return null;
-                                            const tmp = document.createElement('canvas');
-                                            tmp.width = dstW; tmp.height = dstH;
-                                            const tctx = tmp.getContext('2d');
-                                            try { tctx.imageSmoothingEnabled = false; } catch (e) {}
-                                            // draw each frame in order onto tmp (ascending indices)
-                                            for (const ii of indices) {
-                                                try {
-                                                    const fCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(effAnim, ii) : null;
-                                                    if (!fCanvas) continue;
-                                                    tctx.drawImage(fCanvas, 0, 0, fCanvas.width, fCanvas.height, 0, 0, dstW, dstH);
-                                                } catch (e) { /* ignore per-frame */ }
-                                            }
-                                            return tmp;
-                                        };
-
-                                        const beforeCanvas = compositeSet(beforeIdxs);
-                                        const afterCanvas = compositeSet(afterIdxs);
-
-                                        // Draw the composited before/after canvases with alpha
-                                        if (beforeCanvas) {
-                                            drawCtx.save();
-                                            drawCtx.globalAlpha = baseAlpha;
-                                            this.Draw.image(beforeCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
-                                            drawCtx.restore();
+                                    if (!compositeIdxs.includes(effFrame)) compositeIdxs.push(effFrame);
+                                    compositeIdxs = compositeIdxs.filter(i => i >= 0 && i < framesArr.length).sort((a,b)=>a-b);
+                                    if (compositeIdxs.length >= 2) {
+                                        // Composite every selected frame with shared alpha so none dominates.
+                                        const tmp = document.createElement('canvas');
+                                        tmp.width = dstW; tmp.height = dstH;
+                                        const tctx = tmp.getContext('2d');
+                                        try { tctx.imageSmoothingEnabled = false; } catch (e) {}
+                                        // Multi-select layering uses layerAlpha (independent of onion skin).
+                                        const alphaPerLayer = layerAlpha;
+                                        for (const ii of compositeIdxs) {
+                                            try {
+                                                const fCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(effAnim, ii) : null;
+                                                if (!fCanvas) continue;
+                                                tctx.save();
+                                                tctx.globalAlpha = alphaPerLayer;
+                                                tctx.drawImage(fCanvas, 0, 0, fCanvas.width, fCanvas.height, 0, 0, dstW, dstH);
+                                                tctx.restore();
+                                            } catch (e) { /* ignore per-frame */ }
                                         }
-                                        if (afterCanvas) {
-                                            drawCtx.save();
-                                            drawCtx.globalAlpha = baseAlpha;
-                                            this.Draw.image(afterCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
-                                            drawCtx.restore();
-                                        }
+                                        layeredCanvas = tmp;
                                     }
                                 } catch (e) { /* ignore multi-select compositing errors */ }
                             } else if (effAnim !== null && drawCtx && onionEnabled) {
-                                const onionRange = (typeof this.onionRange === 'number') ? this.onionRange : 1;
-                                for (let off = -onionRange; off <= onionRange; off++) {
+                                const r = this.onionRange;
+                                let before = 1, after = 1;
+                                if (typeof r === 'number') {
+                                    before = after = Math.max(0, Math.abs(Math.floor(r)));
+                                } else if (r && typeof r === 'object') {
+                                    before = Math.max(0, Math.abs(Math.floor(r.before !== undefined ? r.before : 1)));
+                                    after = Math.max(0, Math.abs(Math.floor(r.after !== undefined ? r.after : 1)));
+                                }
+                                const maxRange = Math.max(1, before, after);
+                                for (let off = -before; off <= after; off++) {
                                     if (off === 0) continue;
                                     try {
                                         const idx = effFrame + off;
@@ -5792,7 +5840,7 @@ export class SpriteScene extends Scene {
                                         drawCtx.save();
                                         // Fade more for frames further away
                                         const distance = Math.abs(off);
-                                        const alpha = Math.max(0, baseAlpha * (1 - (distance - 1) / Math.max(1, onionRange)));
+                                        const alpha = Math.max(0, baseAlpha * (1 - (distance - 1) / maxRange));
                                         drawCtx.globalAlpha = alpha;
                                         // Use Draw.image so transforms / scaling are respected
                                         this.Draw.image(fCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
@@ -5805,7 +5853,8 @@ export class SpriteScene extends Scene {
                         // If a preview transform exists for this area, draw a transformed temporary canvas
                         const transform = (typeof areaIndex === 'number' && Array.isArray(this._areaTransforms)) ? this._areaTransforms[areaIndex] : null;
                         const hasTransform = !!(transform && ((transform.rot || 0) !== 0 || transform.flipH));
-                        if (hasTransform && frameCanvas) {
+                        const drawable = layeredCanvas || frameCanvas;
+                        if (hasTransform && drawable) {
                             try {
                                 const tmp = document.createElement('canvas'); tmp.width = dstW; tmp.height = dstH;
                                 const tctx = tmp.getContext('2d'); try { tctx.imageSmoothingEnabled = false; } catch (e) {}
@@ -5814,14 +5863,17 @@ export class SpriteScene extends Scene {
                                 tctx.translate(dstW / 2, dstH / 2);
                                 if (transform.flipH) tctx.scale(-1, 1);
                                 tctx.rotate((transform.rot || 0) * Math.PI / 180);
-                                // draw frameCanvas scaled to dstW/dstH centered
-                                tctx.drawImage(frameCanvas, -dstW / 2, -dstH / 2, dstW, dstH);
+                                // draw scaled to dstW/dstH centered
+                                tctx.drawImage(drawable, -dstW / 2, -dstH / 2, dstW, dstH);
                                 tctx.restore();
                                 this.Draw.image(tmp, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
                             } catch (e) {
                                 // fallback to sheet if transform draw fails
-                                this.Draw.sheet(sheet, dstPos, new Vector(dstW, dstH), effAnim, effFrame, null, 1, false);
+                                if (!layeredCanvas) this.Draw.sheet(sheet, dstPos, new Vector(dstW, dstH), effAnim, effFrame, null, 1, false);
+                                else this.Draw.image(layeredCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
                             }
+                        } else if (layeredCanvas) {
+                            this.Draw.image(layeredCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
                         } else {
                             this.Draw.sheet(sheet, dstPos, new Vector(dstW, dstH), effAnim, effFrame, null, 1, false);
                         }

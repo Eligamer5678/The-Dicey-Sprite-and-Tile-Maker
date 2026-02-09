@@ -28,6 +28,8 @@
 - alt+s to draw selected
 - h & k to modify color (if nothing selected, modifies draw color)
 - 6-9 keys to select property to modify, 6=hue,7=saturation,8=value,9=alpha
+- u to toggle onion skin; Shift+U to set onion alpha (or layer alpha when multi-selected)
+- Shift+Alt+U to set onion range (before,after frames)
 - j to grab the average color
 - up/down keys to move the frame
 - '/' to duplicate frame
