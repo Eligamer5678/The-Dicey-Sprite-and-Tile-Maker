@@ -319,10 +319,12 @@ export class SpriteScene extends Scene {
         this.brushSize = 1;
         this.penMirrorH = false;
         this.penMirrorV = false;
+        const defaultAdjust = 0.05;
         // which channel to adjust with h/k: 'h'|'s'|'v'|'a'
         this.adjustChannel = 'v';
-        // linear adjustment amount (0-1 for S/V/A, wrapped for H)
-        this.adjustAmount = 0.05;
+        // per-channel linear adjustment amount (0-1 for S/V/A, wrapped for H)
+        this.adjustPercents = { h: defaultAdjust, s: defaultAdjust, v: defaultAdjust, a: defaultAdjust };
+        this.adjustAmount = defaultAdjust;
         // zoom limits and smoothing params
         this.minZoom = 0.25;
         this.maxZoom = 16;
@@ -1275,9 +1277,17 @@ export class SpriteScene extends Scene {
                             if (Array.isArray(layout.transforms)) {
                                 for (const t of layout.transforms) {
                                     if (!t) continue;
-                                    const i = Number(t.areaIndex);
-                                    if (!Number.isFinite(i) || i < 0) continue;
-                                    this._areaTransforms[i] = { rot: (t.rot || 0), flipH: !!t.flipH };
+                                    let idx = null;
+                                    if (Number.isFinite(t.col) && Number.isFinite(t.row)) {
+                                        idx = this._getAreaIndexForCoord(Number(t.col), Number(t.row));
+                                        this._activateTile(Number(t.col), Number(t.row));
+                                    } else {
+                                        const i = Number(t.areaIndex);
+                                        if (!Number.isFinite(i) || i < 0) continue;
+                                        idx = i;
+                                    }
+                                    if (!Number.isFinite(idx)) continue;
+                                    this._areaTransforms[idx] = { rot: (t.rot || 0), flipH: !!t.flipH };
                                 }
                             }
                         }
@@ -1686,10 +1696,26 @@ export class SpriteScene extends Scene {
                 if (!this.keys.held('Shift')) this._clipboardBrushFired = false;
 
                 // choose which channel to adjust with h/k: 6->H, 7->S, 8->V, 9->A
-                if (this.keys.released('6')) this.adjustChannel = 'h';
-                if (this.keys.released('7')) this.adjustChannel = 's';
-                if (this.keys.released('8')) this.adjustChannel = 'v';
-                if (this.keys.released('9')) this.adjustChannel = 'a';
+                const setAdjustChannel = (ch) => {
+                    this.adjustChannel = ch;
+                    this.adjustAmount = this._getAdjustPercent(ch);
+                };
+                if (this.keys.released('6')) setAdjustChannel('h');
+                if (this.keys.released('7')) setAdjustChannel('s');
+                if (this.keys.released('8')) setAdjustChannel('v');
+                if (this.keys.released('9')) setAdjustChannel('a');
+
+                // +/- adjust the per-channel adjustment percent (Shift = 0.1% steps, else 1%)
+                const activeChannel = this.adjustChannel || 'v';
+                const incPressed = this.keys.released('+') || this.keys.released('=');
+                const decPressed = this.keys.released('-') || this.keys.released('_');
+                if (incPressed || decPressed) {
+                    const step = this.keys.held('Shift') ? 0.001 : 0.01;
+                    const current = this._getAdjustPercent(activeChannel);
+                    const next = incPressed ? current + step : current - step;
+                    this._setAdjustPercent(activeChannel, next);
+                    this.adjustAmount = this._getAdjustPercent(activeChannel);
+                }
 
                 // Toggle onion skinning with 'u'. Shift+U prompts for alpha; Shift+Alt+U prompts for range; if multi-selecting, alpha prompt adjusts layer alpha instead.
                 if (this.keys.released('u') || this.keys.released('U')) {
@@ -1960,10 +1986,44 @@ export class SpriteScene extends Scene {
                 // Toggle tile activation under cursor when in tilemode (infinite grid). Space adds/removes tiles.
                 try {
                     if (this.tilemode && this.keys && typeof this.keys.released === 'function' && (this.keys.released(' ') || this.keys.released('Space') || this.keys.released('Spacebar'))) {
+                        const slashHeld = (this.keys.held && (this.keys.held('/') || this.keys.held('?')));
+                        const shiftHeld = this.keys.held && this.keys.held('Shift');
+                        const mirrorChord = slashHeld || shiftHeld;
                         const pos = this.getPos(this.mouse && this.mouse.pos);
                         if (pos && pos.tileCol !== null && pos.tileRow !== null) {
-                            if (pos.tileActive) this._deactivateTile(pos.tileCol, pos.tileRow);
-                            else this._activateTile(pos.tileCol, pos.tileRow);
+                            const areaIdx = (typeof pos.areaIndex === 'number') ? pos.areaIndex : this._getAreaIndexForCoord(pos.tileCol, pos.tileRow);
+                            if (mirrorChord) {
+                                // Space + hold '/' -> ensure tile active, add mirrored frame, bind tile to it.
+                                this._activateTile(pos.tileCol, pos.tileRow);
+                                const sheet = this.currentSprite;
+                                const anim = this.selectedAnimation;
+                                const srcFrame = this.selectedFrame;
+                                if (sheet && anim !== undefined && anim !== null && Number.isFinite(srcFrame)) {
+                                    const insertAt = Math.max(0, Math.floor(srcFrame) + 1);
+                                    try { if (typeof sheet.insertFrame === 'function') sheet.insertFrame(anim, insertAt); } catch (e) { /* ignore insert errors */ }
+                                    try {
+                                        const src = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, srcFrame) : null;
+                                        const dst = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, insertAt) : null;
+                                        if (src && dst && src.width && src.height && dst.getContext) {
+                                            const dctx = dst.getContext('2d');
+                                            try { dctx.clearRect(0, 0, dst.width, dst.height); } catch (e) {}
+                                            try { dctx.imageSmoothingEnabled = false; } catch (e) {}
+                                            dctx.save();
+                                            dctx.translate(dst.width, 0);
+                                            dctx.scale(-1, 1);
+                                            dctx.drawImage(src, 0, 0);
+                                            dctx.restore();
+                                        }
+                                        if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                                        if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
+                                        this._areaBindings[areaIdx] = { anim, index: insertAt };
+                                        this.selectedFrame = insertAt;
+                                    } catch (e) { /* ignore mirror copy errors */ }
+                                }
+                            } else {
+                                if (pos.tileActive) this._deactivateTile(pos.tileCol, pos.tileRow);
+                                else this._activateTile(pos.tileCol, pos.tileRow);
+                            }
                         }
                     }
                 } catch (e) { console.warn('tile activation toggle failed', e); }
@@ -2421,6 +2481,26 @@ export class SpriteScene extends Scene {
         return pattern1 || pattern2;
     }
 
+    _getAdjustPercent(channel) {
+        const table = this.adjustPercents || {};
+        const fallback = (typeof this.adjustAmount === 'number') ? this.adjustAmount : 0.05;
+        const key = channel || this.adjustChannel || 'v';
+        const val = table[key];
+        return (typeof val === 'number' && Number.isFinite(val)) ? val : fallback;
+    }
+
+    _setAdjustPercent(channel, value) {
+        const key = channel || this.adjustChannel || 'v';
+        const num = Number(value);
+        if (!Number.isFinite(num)) return;
+        const clamped = Math.max(0, Math.min(1, num));
+        if (!this.adjustPercents) this.adjustPercents = {};
+        this.adjustPercents[key] = clamped;
+        if (key === (this.adjustChannel || 'v')) {
+            this.adjustAmount = clamped;
+        }
+    }
+
     selectionTool() {
         try {
             if (!this.mouse) return;
@@ -2562,14 +2642,31 @@ export class SpriteScene extends Scene {
                         const side = Math.max(1, Math.min(15, this.brushSize || 1));
                         const half = Math.floor((side - 1) / 2);
                         const areaIndex = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
+                        const slice = (this.currentSprite && this.currentSprite.slicePx) ? this.currentSprite.slicePx : 1;
+                        // map a local pixel (relative to the hovered tile) to its owning tile in tilemode
+                        const mapToTile = (lx, ly) => {
+                            if (!this.tilemode) return { x: lx, y: ly, areaIndex };
+                            let baseCol = 0, baseRow = 0;
+                            if (typeof areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                                const cr = this._tileIndexToCoord[areaIndex];
+                                if (cr) { baseCol = cr.col|0; baseRow = cr.row|0; }
+                            }
+                            const wx = baseCol * slice + lx;
+                            const wy = baseRow * slice + ly;
+                            const mapped = (typeof this._worldPixelToTile === 'function') ? this._worldPixelToTile(wx, wy, slice) : null;
+                            if (!mapped) return { x: lx, y: ly, areaIndex };
+                            return { x: mapped.localX, y: mapped.localY, areaIndex: mapped.areaIndex };
+                        };
                         for (let yy = 0; yy < side; yy++) {
                             for (let xx = 0; xx < side; xx++) {
                                 const px = pos.x - half + xx;
                                 const py = pos.y - half + yy;
-                                const exists = this.selectionPoints.some(p => p.x === px && p.y === py && p.areaIndex === areaIndex);
+                                const mapped = mapToTile(px, py);
+                                const tgtArea = (typeof mapped.areaIndex === 'number') ? mapped.areaIndex : areaIndex;
+                                const exists = this.selectionPoints.some(p => p.x === mapped.x && p.y === mapped.y && p.areaIndex === tgtArea);
                                 if (!exists) {
                                     // record the area index where this point was added so copy/cut can use the originating frame
-                                    this.selectionPoints.push({ x: px, y: py, areaIndex });
+                                    this.selectionPoints.push({ x: mapped.x, y: mapped.y, areaIndex: tgtArea });
                                     // adding a new anchor invalidates any previous region selection
                                     this.selectionRegion = null;
                                 }
@@ -2579,11 +2676,44 @@ export class SpriteScene extends Scene {
                         const side = Math.max(1, Math.min(15, this.brushSize || 1));
                         const half = Math.floor((side - 1) / 2);
                         const areaIndex = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
+                        const slice = (this.currentSprite && this.currentSprite.slicePx) ? this.currentSprite.slicePx : 1;
+                        const mapToTile = (lx, ly) => {
+                            if (!this.tilemode) return { x: lx, y: ly, areaIndex };
+                            let baseCol = 0, baseRow = 0;
+                            if (typeof areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                                const cr = this._tileIndexToCoord[areaIndex];
+                                if (cr) { baseCol = cr.col|0; baseRow = cr.row|0; }
+                            }
+                            const wx = baseCol * slice + lx;
+                            const wy = baseRow * slice + ly;
+                            const mapped = (typeof this._worldPixelToTile === 'function') ? this._worldPixelToTile(wx, wy, slice) : null;
+                            if (!mapped) return { x: lx, y: ly, areaIndex };
+                            return { x: mapped.localX, y: mapped.localY, areaIndex: mapped.areaIndex };
+                        };
                         // remove any existing selection point within the brush square at this pixel (and area)
                         this.selectionPoints = this.selectionPoints.filter(p => {
-                            if (p.areaIndex !== areaIndex) return true;
-                            const dx = p.x - pos.x;
-                            const dy = p.y - pos.y;
+                            // convert each selection point into world coords of its own area for fair comparison
+                            let pArea = (typeof p.areaIndex === 'number') ? p.areaIndex : areaIndex;
+                            let pX = p.x;
+                            let pY = p.y;
+                            if (this.tilemode && typeof pArea === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                                const cr = this._tileIndexToCoord[pArea];
+                                if (cr) {
+                                    const wx = cr.col * slice + p.x;
+                                    const wy = cr.row * slice + p.y;
+                                    const mapped = (typeof this._worldPixelToTile === 'function') ? this._worldPixelToTile(wx, wy, slice) : null;
+                                    if (mapped) {
+                                        pArea = mapped.areaIndex;
+                                        pX = mapped.localX;
+                                        pY = mapped.localY;
+                                    }
+                                }
+                            }
+                            const mappedPos = mapToTile(pos.x, pos.y);
+                            const targetArea = (typeof mappedPos.areaIndex === 'number') ? mappedPos.areaIndex : areaIndex;
+                            if (pArea !== targetArea) return true;
+                            const dx = pX - mappedPos.x;
+                            const dy = pY - mappedPos.y;
                             return !(dx >= -half && dx < side - half && dy >= -half && dy < side - half);
                         });
                     }
@@ -2916,7 +3046,7 @@ export class SpriteScene extends Scene {
                         const fillR = Math.round(fRgb.a || 0);
                         const fillG = Math.round(fRgb.b || 0);
                         const fillB = Math.round(fRgb.c || 0);
-                        const fillA = Math.round((fRgb.d || 1) * 255);
+                        const fillA = Math.round((fRgb.d ?? 1) * 255);
                         // If target color equals fill color, nothing to do
                         if (srcR === fillR && srcG === fillG && srcB === fillB && srcA === fillA) return;
 
@@ -3038,7 +3168,11 @@ export class SpriteScene extends Scene {
             // deltas (this.adjustAmount) instead of multiplicative scaling.
             try {
                 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-                const applyAdjust = (delta) => {
+                const getAdjust = (channel) => {
+                    if (typeof this._getAdjustPercent === 'function') return this._getAdjustPercent(channel);
+                    return (typeof this.adjustAmount === 'number') ? this.adjustAmount : 0.05;
+                };
+                const applyAdjust = (direction) => {
                     const sheet = this.currentSprite;
                     const anim = this.selectedAnimation;
                     const frameIdx = this.selectedFrame;
@@ -3046,7 +3180,7 @@ export class SpriteScene extends Scene {
                     const channel = this.adjustChannel || 'v';
                     // Reduce hue adjustments to a smaller fraction so keys change hue more finely
                     const channelMultiplier = (channel === 'h') ? 0.2 : 1.0;
-                    const appliedDelta = delta * channelMultiplier;
+                    const appliedDelta = direction * getAdjust(channel) * channelMultiplier;
 
                     // point selection
                     if (this.selectionPoints && this.selectionPoints.length > 0) {
@@ -3074,7 +3208,7 @@ export class SpriteScene extends Scene {
                                         break;
                                 }
                                 const rgb = hsv.toRgb();
-                                const newHex = this.rgbaToHex(Math.round(rgb.a), Math.round(rgb.b), Math.round(rgb.c), Math.round((rgb.d || 1) * 255));
+                                const newHex = this.rgbaToHex(Math.round(rgb.a), Math.round(rgb.b), Math.round(rgb.c), Math.round((rgb.d ?? 1) * 255));
                                 if (typeof sheet.setPixel === 'function') sheet.setPixel(anim, frameIdx, p.x, p.y, newHex, 'replace');
                             } catch (e) { /* ignore per-pixel errors */ }
                         }
@@ -3118,7 +3252,7 @@ export class SpriteScene extends Scene {
                                         data[idx] = Math.round(rgb.a);
                                         data[idx+1] = Math.round(rgb.b);
                                         data[idx+2] = Math.round(rgb.c);
-                                        data[idx+3] = Math.round((rgb.d || 1) * 255);
+                                        data[idx+3] = Math.round((rgb.d ?? 1) * 255);
                                     } catch (e) { /* ignore per-pixel errors */ }
                                 }
                             }
@@ -3144,7 +3278,7 @@ export class SpriteScene extends Scene {
                                     hsv.d = clamp(hsv.d + appliedDelta, 0, 1); break;
                             }
                             const rgb = hsv.toRgb();
-                            const newHex8 = this.rgbaToHex(Math.round(rgb.a), Math.round(rgb.b), Math.round(rgb.c), Math.round((rgb.d || 1) * 255));
+                            const newHex8 = this.rgbaToHex(Math.round(rgb.a), Math.round(rgb.b), Math.round(rgb.c), Math.round((rgb.d ?? 1) * 255));
                             this.penColor = newHex8;
                             // sync HTML color input (drop alpha component)
                             if (this._colorInput) {
@@ -3156,17 +3290,18 @@ export class SpriteScene extends Scene {
                 };
                 if (this.keys && typeof this.keys.released === 'function') {
                     if (this.keys.released('h')) {
-                        applyAdjust(this.adjustAmount); // additive lighten on selected channel
+                        applyAdjust(1); // additive lighten on selected channel
                     }
                     if (this.keys.released('k')) {
-                        applyAdjust(-this.adjustAmount); // additive darken on selected channel
+                        applyAdjust(-1); // additive darken on selected channel
                     }
                 }
             } catch (e) { console.warn('lighten/darken (h/k) failed', e); }
 
             // Add subtle noise/randomness to the current frame on 'n' release
             try {
-                if (this.keys && typeof this.keys.released === 'function' && this.keys.held('n')) {
+                const noisePressed = this.keys && typeof this.keys.released === 'function' && (this.keys.released('n') || this.keys.released('N'));
+                if (noisePressed) {
                     const sheet = this.currentSprite;
                     // Prefer selection-origin area/frame when applying noise
                     let sourceAreaIndex = null;
@@ -3196,48 +3331,79 @@ export class SpriteScene extends Scene {
                         const ctx = frameCanvas.getContext('2d');
                         const img = ctx.getImageData(0, 0, w, h);
                         const data = img.data;
-                        // Value/hue noise parameters
-                        const valueStrength = 1; // larger uniform value change (applied equally to R/G/B)
-                        const hueStrength = 0.00001; // small hue shift (in 0..1 space)
+                        const noiseChanges = [];
+                        const channel = this.adjustChannel || 'v';
+                        const baseAdjust = (typeof this._getAdjustPercent === 'function') ? this._getAdjustPercent(channel) : ((typeof this.adjustAmount === 'number') ? this.adjustAmount : 0.05);
+                        const channelMultiplier = (channel === 'h') ? 0.2 : 1.0;
+                        const hsvDelta = baseAdjust * channelMultiplier;
+                        const ratioRange = Math.max(0, Math.round(baseAdjust * 100));
+                        const spliceMode = !!(this.keys && this.keys.held && this.keys.held('Shift'));
+                        const clamp01 = (v) => Math.max(0, Math.min(1, v));
+                        const clamp255 = (v) => Math.max(0, Math.min(255, v));
+                        const randFloat = (range) => (Math.random() * 2 - 1) * range;
+                        const randIntRange = (range) => Math.floor(Math.random() * (range * 2 + 1)) - range;
 
-                        // Helper to apply noise to a pixel index:
-                        // 1) add a single random delta to all RGB channels (value change)
-                        // 2) apply a smaller random hue rotation
+                        // Helper to apply noise to a pixel index using the current adjust channel/amount.
                         const applyNoiseAtIdx = (idx) => {
                             const r = data[idx];
                             const g = data[idx + 1];
                             const b = data[idx + 2];
                             const a = data[idx + 3];
 
-                            // uniform value change
-                            const deltaV = Math.floor(Math.random() * (valueStrength * 2 + 1)) - valueStrength;
-                            let nr = r + deltaV;
-                            let ng = g + deltaV;
-                            let nb = b + deltaV;
-                            // clamp preliminarily
-                            nr = Math.max(0, Math.min(255, nr));
-                            ng = Math.max(0, Math.min(255, ng));
-                            nb = Math.max(0, Math.min(255, nb));
+                            const hex = this.rgbaToHex(r, g, b, a);
+                            const col = Color.convertColor(hex);
+                            const hsv = col.toHsv(); // {a:h, b:s, c:v, d:alpha}
 
-                            try {
-                                // small hue rotation
-                                const hex = this.rgbaToHex(nr, ng, nb, a);
-                                const col = Color.convertColor(hex);
-                                const hsv = col.toHsv(); // {a:h, b:s, c:v, d:alpha}
-                                const deltaH = (Math.random() * 2 - 1) * hueStrength;
-                                hsv.a = (hsv.a + deltaH) % 1; if (hsv.a < 0) hsv.a += 1;
+                            let nr = r, ng = g, nb = b, na = a;
+
+                            if (spliceMode && channel === 'v') {
+                                const deltaV = randIntRange(ratioRange);
+                                nr = clamp255(r + deltaV);
+                                ng = clamp255(g + deltaV);
+                                nb = clamp255(b + deltaV);
+                            } else {
+                                switch (channel) {
+                                    case 'h': {
+                                        hsv.a = (hsv.a + randFloat(hsvDelta)) % 1; if (hsv.a < 0) hsv.a += 1;
+                                        break;
+                                    }
+                                    case 's': {
+                                        const deltaS = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
+                                        hsv.b = clamp01(hsv.b + deltaS);
+                                        break;
+                                    }
+                                    case 'a': {
+                                        const deltaA = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
+                                        hsv.d = clamp01(hsv.d + deltaA);
+                                        break;
+                                    }
+                                    case 'v':
+                                    default: {
+                                        const deltaV = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
+                                        hsv.c = clamp01(hsv.c + deltaV);
+                                        break;
+                                    }
+                                }
+
                                 const rgb = hsv.toRgb(); // returns Color with rgb in a,b,c
-                                data[idx] = Math.round(rgb.a);
-                                data[idx + 1] = Math.round(rgb.b);
-                                data[idx + 2] = Math.round(rgb.c);
-                                // keep original alpha
-                                data[idx + 3] = a;
-                            } catch (e) {
-                                // fallback: write the uniform-changed RGB if color math fails
-                                data[idx] = nr;
-                                data[idx + 1] = ng;
-                                data[idx + 2] = nb;
-                                data[idx + 3] = a;
+                                nr = Math.round(rgb.a);
+                                ng = Math.round(rgb.b);
+                                nb = Math.round(rgb.c);
+                                if (channel === 'a') {
+                                    const alphaComponent = rgb.d ?? hsv.d ?? 1;
+                                    na = Math.round(clamp255(alphaComponent * 255));
+                                }
+                            }
+
+                            data[idx] = nr;
+                            data[idx + 1] = ng;
+                            data[idx + 2] = nb;
+                            data[idx + 3] = na;
+
+                            if (nr !== r || ng !== g || nb !== b || na !== a) {
+                                const px = (idx / 4) % w;
+                                const py = Math.floor((idx / 4) / w);
+                                noiseChanges.push({ x: px, y: py, next: this.rgbaToHex(nr, ng, nb, na) });
                             }
                         };
 
@@ -3269,6 +3435,10 @@ export class SpriteScene extends Scene {
                             for (let p = 0; p < w * h; p++) {
                                 if (Math.random() < prob) applyNoiseAtIdx(p * 4);
                             }
+                        }
+
+                        if (noiseChanges.length && typeof this._recordUndoPixels === 'function') {
+                            try { this._recordUndoPixels(anim, frameIdx, noiseChanges); } catch (e) { /* ignore undo capture errors */ }
                         }
 
                         ctx.putImageData(img, 0, 0);
@@ -3936,6 +4106,8 @@ export class SpriteScene extends Scene {
                             const c = this._parseTileKey(key);
                             if (c) layout.activeTiles.push({ col: c.col, row: c.row });
                         }
+                        // sort for deterministic ordering across saves so area indices line up
+                        layout.activeTiles.sort((a, b) => (a.row - b.row) || (a.col - b.col));
                     }
                     if (Array.isArray(this._areaBindings)) {
                         for (let i = 0; i < this._areaBindings.length; i++) {
@@ -3955,9 +4127,20 @@ export class SpriteScene extends Scene {
                             const rot = (t.rot || 0);
                             const flipH = !!t.flipH;
                             if (rot !== 0 || flipH) {
-                                layout.transforms.push({ areaIndex: i, rot, flipH });
+                                const coord = (this._tileIndexToCoord && this._tileIndexToCoord[i]) ? this._tileIndexToCoord[i] : null;
+                                const tx = { areaIndex: i, rot, flipH };
+                                if (coord) { tx.col = coord.col; tx.row = coord.row; }
+                                layout.transforms.push(tx);
                             }
                         }
+                        // stable ordering
+                        layout.transforms.sort((a, b) => {
+                            const ar = Number.isFinite(a.row) ? a.row : 0;
+                            const br = Number.isFinite(b.row) ? b.row : 0;
+                            const ac = Number.isFinite(a.col) ? a.col : 0;
+                            const bc = Number.isFinite(b.col) ? b.col : 0;
+                            return (ar - br) || (ac - bc) || (a.areaIndex - b.areaIndex);
+                        });
                     }
                     meta.tileLayout = layout;
                 } catch (e) { /* ignore tile layout save errors */ }
@@ -5653,9 +5836,14 @@ export class SpriteScene extends Scene {
 
             this._drawAreas = areas;
 
-            // render each area and pass area index so display can show bindings
+            // First pass: base layer (frame, checkerboard, labels)
             for (const area of areas) {
-                this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area);
+                this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'base');
+            }
+
+            // Second pass: overlays (cursor, selections, previews) to avoid being occluded by later tiles
+            for (const area of areas) {
+                this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'overlay');
             }
         }
 
@@ -5693,9 +5881,10 @@ export class SpriteScene extends Scene {
             if (uctx && uctx.canvas) {
                 const uiW = uctx.canvas.width / (this.Draw ? this.Draw.Scale.x : 1);
                 const uiH = uctx.canvas.height / (this.Draw ? this.Draw.Scale.y : 1);
-                const ch = (this.adjustChannel || 'v').toUpperCase();
-                const effMult = (this.adjustChannel === 'h') ? 0.2 : 1.0;
-                const pct = Math.round((this.adjustAmount || 0.05) * 100 * effMult);
+                const key = this.adjustChannel || 'v';
+                const ch = key.toUpperCase();
+                const effMult = (key === 'h') ? 0.2 : 1.0;
+                const pct = Math.round(((typeof this._getAdjustPercent === 'function' ? this._getAdjustPercent(key) : (this.adjustAmount || 0.05))) * 100 * effMult);
                 const label = `Adjust: ${ch}  ${pct}%`;
                 this.UIDraw.text(label, new Vector(uiW - 12, uiH - 8), '#FFFFFFFF', 1, 14, { align: 'right', baseline: 'bottom', font: 'monospace' });
             }
@@ -5707,39 +5896,43 @@ export class SpriteScene extends Scene {
      * and draw the specified frame from `sheet` (SpriteSheet instance).
      * `animation` is the animation name and `frame` the frame index.
      */
-    displayDrawArea(pos, size, sheet, animation = 'idle', frame = 0, areaIndex = null, areaInfo = null) {
+    displayDrawArea(pos, size, sheet, animation = 'idle', frame = 0, areaIndex = null, areaInfo = null, drawMode = 'both') {
         try {
             if (!this.Draw || !pos || !size) return;
             this.Draw.useCtx('base');
             const renderOnly = !!(areaInfo && areaInfo.renderOnly);
+            const modeBase = drawMode === 'both' || drawMode === 'base';
+            const modeOverlay = drawMode === 'both' || drawMode === 'overlay';
             // draw a subtle checkerboard background for transparency
-            const tile = 16;
-            const cols = Math.ceil(size.x / tile);
-            const rows = Math.ceil(size.y / tile);
-            for (let y = 0; y < rows; y++) {
-                for (let x = 0; x < cols; x++) {
-                    const px = pos.x + x * tile;
-                    const py = pos.y + y * tile;
-                    const isLight = ((x + y) % 2) === 0;
-                    this.Draw.rect(new Vector(px, py), new Vector(tile, tile), isLight ? '#3a3a3aff' : '#2e2e2eff', true);
+            if (modeBase) {
+                const tile = 16;
+                const cols = Math.ceil(size.x / tile);
+                const rows = Math.ceil(size.y / tile);
+                for (let y = 0; y < rows; y++) {
+                    for (let x = 0; x < cols; x++) {
+                        const px = pos.x + x * tile;
+                        const py = pos.y + y * tile;
+                        const isLight = ((x + y) % 2) === 0;
+                        this.Draw.rect(new Vector(px, py), new Vector(tile, tile), isLight ? '#3a3a3aff' : '#2e2e2eff', true);
+                    }
                 }
-            }
 
-            // draw border
-            if (!renderOnly) this.Draw.rect(pos, size, '#FFFFFF88', false, true, 2, '#FFFFFF88');
+                // draw border
+                if (!renderOnly) this.Draw.rect(pos, size, '#FFFFFF88', false, true, 2, '#FFFFFF88');
 
-            // show active mirror axes for the pen tool
-            if (!renderOnly) {
-                try {
-                    const midX = pos.x + size.x / 2;
-                    const midY = pos.y + size.y / 2;
-                    if (this.penMirrorH) {
-                        this.Draw.line(new Vector(midX, pos.y), new Vector(midX, pos.y + size.y), '#FFFFFF88', 2);
-                    }
-                    if (this.penMirrorV) {
-                        this.Draw.line(new Vector(pos.x, midY), new Vector(pos.x + size.x, midY), '#FFFFFF88', 2);
-                    }
-                } catch (e) { /* ignore mirror guideline errors */ }
+                // show active mirror axes for the pen tool
+                if (!renderOnly) {
+                    try {
+                        const midX = pos.x + size.x / 2;
+                        const midY = pos.y + size.y / 2;
+                        if (this.penMirrorH) {
+                            this.Draw.line(new Vector(midX, pos.y), new Vector(midX, pos.y + size.y), '#FFFFFF88', 2);
+                        }
+                        if (this.penMirrorV) {
+                            this.Draw.line(new Vector(pos.x, midY), new Vector(pos.x + size.x, midY), '#FFFFFF88', 2);
+                        }
+                    } catch (e) { /* ignore mirror guideline errors */ }
+                }
             }
 
             // draw the frame image centered inside the box with some padding
@@ -5749,10 +5942,12 @@ export class SpriteScene extends Scene {
                 const coordForArea = (typeof areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) ? this._tileIndexToCoord[areaIndex] : null;
                 const tileIsActive = (!this.tilemode) || (coordForArea && this._isTileActive(coordForArea.col, coordForArea.row));
                 if (this.tilemode && !tileIsActive) {
-                    // Draw placeholder for inactive tile slot; no mirroring/binding until activated.
-                    this.Draw.rect(pos, size, '#222222DD', true);
-                    this.Draw.rect(pos, size, '#000000aa', false, true, 1, '#000000AA');
-                    try { this.Draw.text('Press space to add tile', new Vector(pos.x + 8, pos.y + 12), '#AAAAAA', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' }); } catch (e) {}
+                    if (modeBase) {
+                        // Draw placeholder for inactive tile slot; no mirroring/binding until activated.
+                        this.Draw.rect(pos, size, '#222222DD', true);
+                        this.Draw.rect(pos, size, '#000000aa', false, true, 1, '#000000AA');
+                        try { this.Draw.text('Press space to add tile', new Vector(pos.x + 8, pos.y + 12), '#AAAAAA', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' }); } catch (e) {}
+                    }
                     return;
                 }
                 let effAnim = null;
@@ -5774,7 +5969,7 @@ export class SpriteScene extends Scene {
                 const dstPos = new Vector(pos.x + (size.x - dstW) / 2, pos.y + (size.y - dstH) / 2);
                 // Prefer Draw.sheet which understands SpriteSheet metadata (rows/frames).
                 let layeredCanvas = null;
-                if (effAnim !== null && sheet && typeof this.Draw.sheet === 'function') {
+                if (modeBase && effAnim !== null && sheet && typeof this.Draw.sheet === 'function') {
                     try {
                         // Draw.sheet expects a sheet-like object with `.sheet` (Image/Canvas)
                         // and `.slicePx` and an animations map. Our SpriteSheet provides those.
@@ -5882,29 +6077,29 @@ export class SpriteScene extends Scene {
                         if (frameCanvas) this.Draw.image(frameCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
                         else if (sheet && sheet.sheet) this.Draw.image(sheet.sheet, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
                     }
-                } else if (frameCanvas) {
+                } else if (modeBase && frameCanvas) {
                     // fallback: draw per-frame canvas
                     this.Draw.image(frameCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
-                } else if (!this.tilemode && sheet && sheet.sheet) {
+                } else if (modeBase && !this.tilemode && sheet && sheet.sheet) {
                     // fallback when not in tilemode: draw the packed sheet (will show full sheet)
                     this.Draw.image(sheet.sheet, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
                 }
 
                 // After drawing the frame, show binding label (or mirrored note) unless render-only.
-                try {
-                    if (typeof areaIndex === 'number' && Array.isArray(this._areaBindings) && this._areaBindings[areaIndex]) {
-                        const b = this._areaBindings[areaIndex];
-                        const label = (b && b.anim) ? `${b.anim}:${b.index}` : String(b && b.index);
-                        this.Draw.text(label, new Vector(pos.x + 6, pos.y + 14), '#FFFFFF', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
-                    } else if (this.tilemode) {
-                        //this.Draw.text('(selected)', new Vector(pos.x + 6, pos.y + 14), '#AAAAAA', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
-                    }
-                } catch (e) { }
-                if (!renderOnly) {
+                if (modeBase) {
+                    try {
+                        if (typeof areaIndex === 'number' && Array.isArray(this._areaBindings) && this._areaBindings[areaIndex]) {
+                            const b = this._areaBindings[areaIndex];
+                            const label = (b && b.anim) ? `${b.anim}:${b.index}` : String(b && b.index);
+                            this.Draw.text(label, new Vector(pos.x + 6, pos.y + 14), '#FFFFFF', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
+                        } else if (this.tilemode) {
+                            //this.Draw.text('(selected)', new Vector(pos.x + 6, pos.y + 14), '#AAAAAA', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
+                        }
+                    } catch (e) { }
                 }
 
                 // Draw a pixel cursor / selection preview unless render-only.
-                if (!renderOnly) {
+                if (modeOverlay && !renderOnly) {
                     // In tilemode this is restricted to tiles that mirror the same effective frame
                     this.displayCursor(dstPos,dstW,dstH,binding,effAnim,effFrame,areaIndex)
                 }
@@ -5924,7 +6119,14 @@ export class SpriteScene extends Scene {
             const hoveredInside = !!(posInfoGlobal && posInfoGlobal.inside);
             const hoveredAreaIndex = hoveredInside ? posInfoGlobal.areaIndex : null;
 
-            if (this.tilemode && typeof hoveredAreaIndex === 'number') {
+            // If there is an active selection tied to this area, always draw it here
+            // even if the cursor is hovering a different tile.
+            const selectionAnchoredHere = !!(this.tilemode && typeof areaIndex === 'number' && (
+                (this.selectionPoints && this.selectionPoints.some(p => typeof p?.areaIndex === 'number' && p.areaIndex === areaIndex)) ||
+                (this.selectionRegion && typeof this.selectionRegion.areaIndex === 'number' && this.selectionRegion.areaIndex === areaIndex)
+            ));
+
+            if (this.tilemode && typeof hoveredAreaIndex === 'number' && !selectionAnchoredHere) {
                 try {
                     const hoveredBinding = this.getAreaBinding(hoveredAreaIndex) || null;
                     const hoveredAnim = (hoveredBinding && hoveredBinding.anim) ? hoveredBinding.anim : this.selectedAnimation;
@@ -5949,6 +6151,8 @@ export class SpriteScene extends Scene {
             // Draw selection points
             if (this.selectionPoints && this.selectionPoints.length > 0) {
                 for (const point of this.selectionPoints) {
+                    const pointArea = (typeof point.areaIndex === 'number') ? point.areaIndex : null;
+                    if (this.tilemode && pointArea !== null && typeof areaIndex === 'number' && pointArea !== areaIndex) continue;
                     const cellX = dstPos.x + point.x * cellW;
                     const cellY = dstPos.y + point.y * cellH;
                     this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW/3, cellH/3), '#00FFFF55', true); // Aqua fill
@@ -5960,17 +6164,21 @@ export class SpriteScene extends Scene {
             if (this.selectionRegion) {
                 try {
                     const sr = this.selectionRegion;
-                    const minX = Math.min(sr.start.x, sr.end.x);
-                    const minY = Math.min(sr.start.y, sr.end.y);
-                    const maxX = Math.max(sr.start.x, sr.end.x);
-                    const maxY = Math.max(sr.start.y, sr.end.y);
-                    const rectX = dstPos.x + minX * cellW;
-                    const rectY = dstPos.y + minY * cellH;
-                    const rectW = (maxX - minX + 1) * cellW;
-                    const rectH = (maxY - minY + 1) * cellH;
-                    // translucent fill + outline for selection region
-                    this.Draw.rect(new Vector(rectX, rectY), new Vector(rectW, rectH), '#00FF0055', true);
-                    this.Draw.rect(new Vector(rectX, rectY), new Vector(rectW, rectH), '#00FF00AA', false, true, 2, '#00FF00AA');
+                    const regionArea = (typeof sr.areaIndex === 'number') ? sr.areaIndex : null;
+                    const shouldRenderRegionHere = !(this.tilemode && regionArea !== null && typeof areaIndex === 'number' && regionArea !== areaIndex);
+                    if (shouldRenderRegionHere) {
+                        const minX = Math.min(sr.start.x, sr.end.x);
+                        const minY = Math.min(sr.start.y, sr.end.y);
+                        const maxX = Math.max(sr.start.x, sr.end.x);
+                        const maxY = Math.max(sr.start.y, sr.end.y);
+                        const rectX = dstPos.x + minX * cellW;
+                        const rectY = dstPos.y + minY * cellH;
+                        const rectW = (maxX - minX + 1) * cellW;
+                        const rectH = (maxY - minY + 1) * cellH;
+                        // translucent fill + outline for selection region
+                        this.Draw.rect(new Vector(rectX, rectY), new Vector(rectW, rectH), '#00FF0055', true);
+                        this.Draw.rect(new Vector(rectX, rectY), new Vector(rectW, rectH), '#00FF00AA', false, true, 2, '#00FF00AA');
+                    }
                 } catch (e) {
                     // ignore region-draw errors
                 }

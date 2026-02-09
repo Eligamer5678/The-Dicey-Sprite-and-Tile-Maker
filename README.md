@@ -1,8 +1,14 @@
 *Note: This web app is designed for chromebooks & laptop touchpads*
 #### Game URL: https://eligamer5678.github.io/The-Dicey-Sprite-and-Tile-Maker/
+
+### Welcome to the Dicey pixel art maker!
+- This is a web based powerful pixel art tool, designed to speed up asset creation for games, or just have a bit of fun with. 
+- There is a lot of hidden functionality via the keyboard - take it slow, you don't need to memorize everything in a day; You ussually only use 20% of a progrmas features to get 95% of the same effect.
+- To start of with, left click = draw, right click = erase, shift to select. Click export to export your sprite.
+- For tilemaps, hit 't' on your keybaord to enter tilemode, click y to mirror frames to the map, and space to add tiles. When your art is complete, click export, and type 2 in the prompt so it exports as a tilesheet. 
+
+
 # Controls
-
-
 #### Spritesheet maker
 - Click the '+' to add a frame.
 - Color picker in the bottom left.
@@ -63,7 +69,7 @@
 - Press shift+t to choose grid size.
 - r to rotate, shift-r to actually rotate the frame data
 - alt+f to flip, alt+shift+f to actully flip the frame data
-- Press 'y' to mirror the selected frame. Toggles between locked-on-frame & selected
+- Press 'y' to mirror the selected frame(s). Toggles between locked-on-frame & selected
 - Press space to toggle tile placement
 
 - **Online colab**
@@ -72,10 +78,16 @@
 - You can type name(Username) to make your cursor show your username.
 - msg() to message players.
 
-- **Latest update**
-- Updated tile mode: You can now add grid cells with space
+- **Latest update** - as of 2/9/26
+- Updated tile mode: You can now add grid cells with space, mirror multi-selected frames
 - Brush size can now go MUCH higher. 
 - Custom brush tool: Press a number between 1 & 5 & hold shift at the same time to make selection become the brush shape
+- Fixed tile mode laying bug
+- Updated line tool to now also be a general polygon tool
+- All tools now go across tiles - enjoy your "3d torus" drawing plane.
+- Added a keybind for onionskinning
+- Improved Noise to use the adjustment percentage and channel
+- Added keybinds to adjust adjustment percentage
 
 
 ### Tilemap maker
