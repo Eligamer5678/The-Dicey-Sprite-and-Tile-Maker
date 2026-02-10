@@ -325,6 +325,8 @@ export class SpriteScene extends Scene {
         // per-channel linear adjustment amount (0-1 for S/V/A, wrapped for H)
         this.adjustPercents = { h: defaultAdjust, s: defaultAdjust, v: defaultAdjust, a: defaultAdjust };
         this.adjustAmount = defaultAdjust;
+        // palette swap variant step depth (number of +/- steps per channel)
+        this.paletteStepMax = 3;
         // zoom limits and smoothing params
         this.minZoom = 0.25;
         this.maxZoom = 16;
@@ -338,6 +340,14 @@ export class SpriteScene extends Scene {
         
         this.selectionPoints = [];
         this.currentTool = null;
+        this._selectionKeyframeStart = null;
+        this._selectionKeyframeTrack = null;
+        this._selectionKeyframePrompt = null;
+        this._selectionKeyframeLastFrame = null;
+        this._selectionKeyframeLastAnim = null;
+        this._selectionKeyframeLastAppliedFrame = null;
+        this._frameKeyframeStart = null;
+        this._frameKeyframePrompt = null;
 
         // Onion skin + layering visibility
         this.onionSkin = false;
@@ -587,7 +597,7 @@ export class SpriteScene extends Scene {
                     const w = frameCanvas.width;
                     const h = frameCanvas.height;
                     let img;
-                    try { img = ctx.getImageData(0, 0, w, h); } catch (e) { window.Debug && window.Debug.error && window.Debug.error('SelectColor: getImageData failed'); return; }
+                    try { img = ctx.getImageData(0, 0, w, h); } catch (e) { return; }
                     const data = img.data;
 
                     const matches = [];
@@ -1663,6 +1673,27 @@ export class SpriteScene extends Scene {
         this.FrameSelect.update()
         this.mouse.setPower(0)
         this._ensureMirrorWrapper()
+        // When the frame/animation changes, apply any interpolated selection for the new frame.
+        try {
+            const frameChanged = this.selectedFrame !== this._selectionKeyframeLastFrame || this.selectedAnimation !== this._selectionKeyframeLastAnim;
+            if (frameChanged && this._selectionKeyframeTrack) {
+                if (this._selectionKeyframeTrack.anim === this.selectedAnimation) {
+                    const fr = Number(this.selectedFrame || 0);
+                    const snap = this._selectionKeyframeTrack.frames ? this._selectionKeyframeTrack.frames[fr] : null;
+                    if (snap) {
+                        this._applySelectionSnapshot(snap);
+                        this._selectionKeyframeLastAppliedFrame = fr;
+                    }
+                } else {
+                    this._selectionKeyframeTrack = null;
+                    this._selectionKeyframePrompt = null;
+                }
+            }
+            if (frameChanged) {
+                this._selectionKeyframeLastFrame = this.selectedFrame;
+                this._selectionKeyframeLastAnim = this.selectedAnimation;
+            }
+        } catch (e) { /* ignore selection keyframe apply errors */ }
         // handle numeric keys to change brush size (1..5). If multiple number keys are pressed simultaneously,
         // sum them for larger brushes (e.g., 2+3 => size 5, 1+2+3+4+5 => size 15). Max capped at 15.
         // Holding Shift while pressing number keys captures the current selection into the clipboard and
@@ -1788,6 +1819,24 @@ export class SpriteScene extends Scene {
                 if (this.keys.released('a') || this.keys.released('A')) {
                     this.pixelPerfect = !this.pixelPerfect;
                     try { console.log('Pixel-perfect mode:', this.pixelPerfect); } catch (e) {}
+                }
+
+                // Palette swap: press 'p' to map current pen color to a target color (plus stepped variants) across all frames.
+                // Shift+P prompts for step depth (number of +/- steps per channel).
+                if (this.keys.released('p') || this.keys.released('P')) {
+                    if (this.keys.held('Shift')) {
+                        try {
+                            const current = Number(this.paletteStepMax || 3);
+                            const input = window.prompt('Palette swap step range (1-6 recommended)', String(current));
+                            if (input !== null && input !== undefined) {
+                                const parsed = Math.max(0, Math.floor(Number(String(input).trim())));
+                                const clamped = Math.max(0, Math.min(6, parsed));
+                                this.paletteStepMax = clamped || 0;
+                            }
+                        } catch (e) { /* ignore prompt errors */ }
+                    } else {
+                        try { this._promptPaletteSwap(); } catch (e) { console.warn('palette swap failed', e); }
+                    }
                 }
                 if (this.keys.comboPressed(['s','Alt'])) {
                     console.log('emmiting')
@@ -2518,6 +2567,173 @@ export class SpriteScene extends Scene {
         }
     }
 
+    // Build palette swap variant arrays between the current pen color and a target color.
+    // Returns { sources: [{r,g,b,a}], targets: [{r,g,b,a}] } with base color plus
+    // +/-1/2/3 step variants for H, S, and V (no cross-channel combos), mapped 1:1 by index.
+    _buildPaletteSwapMap(sourceHex, targetHex) {
+        try {
+            const src = Color.convertColor(sourceHex || '#000000').toHsv();
+            const dst = Color.convertColor(targetHex || '#000000').toHsv();
+
+            const clamp01 = (v) => Math.max(0, Math.min(1, v));
+            const wrap01 = (v) => {
+                let r = v % 1;
+                if (r < 0) r += 1;
+                return r;
+            };
+
+            const buildSteps = (maxSteps) => {
+                const m = Math.max(0, Math.floor(Number(maxSteps) || 0));
+                const arr = [0];
+                for (let i = m; i >= 1; i--) arr.push(-i);
+                for (let i = 1; i <= m; i++) arr.push(i);
+                return arr;
+            };
+            const steps = buildSteps(this.paletteStepMax || 3);
+            const channelStep = (ch) => {
+                const base = this._getAdjustPercent(ch);
+                const mult = (ch === 'h') ? 0.2 : 1; // match lighten/darken hue scaling
+                const step = (Number.isFinite(base) ? base : 0) * mult;
+                return (step > 0) ? step : 0;
+            };
+            const hStep = channelStep('h');
+            const sStep = channelStep('s');
+            const vStep = channelStep('v');
+
+            const srcVariants = [];
+            const dstVariants = [];
+            const toRgba = (hsv) => {
+                const rgb = hsv.toRgb();
+                return {
+                    r: Math.round(rgb.a),
+                    g: Math.round(rgb.b),
+                    b: Math.round(rgb.c),
+                    a: Math.round((rgb.d === undefined ? 1 : rgb.d) * 255)
+                };
+            };
+            const pushPair = (hsvSrc, hsvDst) => {
+                srcVariants.push(toRgba(hsvSrc));
+                dstVariants.push(toRgba(hsvDst));
+            };
+
+            const applyDelta = (hsv, channel, delta) => {
+                const h = channel === 'h' ? wrap01(hsv.a + delta) : hsv.a;
+                const s = channel === 's' ? clamp01(hsv.b + delta) : hsv.b;
+                const v = channel === 'v' ? clamp01(hsv.c + delta) : hsv.c;
+                const a = hsv.d ?? 1;
+                return new Color(h, s, v, a, 'hsv');
+            };
+
+            // Base entry
+            pushPair(src, dst);
+
+            // Per-channel stepped variants (no cross-channel combinations)
+            const channelConfigs = [
+                { key: 'h', step: hStep },
+                { key: 's', step: sStep },
+                { key: 'v', step: vStep }
+            ];
+
+            for (const cfg of channelConfigs) {
+                const step = Number(cfg.step || 0);
+                if (!Number.isFinite(step) || step <= 0) continue;
+                for (const m of steps) {
+                    if (m === 0) continue; // base already added
+                    const delta = m * step;
+                    const sVar = applyDelta(src, cfg.key, delta);
+                    const dVar = applyDelta(dst, cfg.key, delta);
+                    pushPair(sVar, dVar);
+                }
+            }
+
+            return { sources: srcVariants, targets: dstVariants };
+        } catch (e) {
+            console.warn('build palette swap map failed', e);
+            return null;
+        }
+    }
+
+    // Apply a palette swap mapping (sources->targets arrays) to every frame in the current sprite.
+    _applyPaletteSwap(mapping) {
+        try {
+            const sheet = this.currentSprite;
+            if (!sheet || !mapping || !Array.isArray(mapping.sources) || !Array.isArray(mapping.targets)) return;
+            const count = Math.min(mapping.sources.length, mapping.targets.length);
+            if (count === 0) return;
+            const animNames = (sheet._frames && typeof sheet._frames.keys === 'function') ? Array.from(sheet._frames.keys()) : [];
+            let anyChanged = false;
+            let fallbackRebuild = false;
+
+            for (const anim of animNames) {
+                const framesArr = sheet._frames.get(anim) || [];
+                for (let idx = 0; idx < framesArr.length; idx++) {
+                    const frame = sheet.getFrame(anim, idx);
+                    if (!frame) continue;
+                    const w = frame.width|0;
+                    const h = frame.height|0;
+                    if (w <= 0 || h <= 0) continue;
+                    const ctx = frame.getContext('2d');
+                    const img = ctx.getImageData(0, 0, w, h);
+                    const data = img.data;
+                    let changed = false;
+
+                    for (let i = 0; i < data.length; i += 4) {
+                        const pr = data[i], pg = data[i+1], pb = data[i+2], pa = data[i+3];
+                        let matchIdx = -1;
+                        for (let m = 0; m < count; m++) {
+                            const s = mapping.sources[m];
+                            if (!s) continue;
+                            if (pr === s.r && pg === s.g && pb === s.b && pa === s.a) { matchIdx = m; break; }
+                        }
+                        if (matchIdx === -1) continue;
+                        const t = mapping.targets[matchIdx];
+                        if (!t) continue;
+                        data[i] = t.r;
+                        data[i+1] = t.g;
+                        data[i+2] = t.b;
+                        data[i+3] = t.a;
+                        changed = true;
+                    }
+
+                    if (changed) {
+                        anyChanged = true;
+                        ctx.putImageData(img, 0, 0);
+                        try {
+                            if (typeof sheet._updatePackedFrame === 'function') sheet._updatePackedFrame(anim, idx);
+                            else fallbackRebuild = true;
+                        } catch (e) { fallbackRebuild = true; }
+                    }
+                }
+            }
+
+            if (anyChanged) {
+                if (fallbackRebuild) {
+                    try { sheet._rebuildSheetCanvas(); } catch (e) { /* ignore */ }
+                }
+                try { console.log('Palette swap applied'); } catch (e) {}
+            }
+        } catch (e) {
+            console.warn('apply palette swap failed', e);
+        }
+    }
+
+    // Prompt the user for a target color and perform a palette swap from the
+    // current pen color to that target across all frames.
+    _promptPaletteSwap() {
+        try {
+            const srcHex = this.penColor || '#000000';
+            const input = window.prompt('Palette swap target color (hex #RRGGBB or #RRGGBBAA)', srcHex);
+            if (input === null || input === undefined) return;
+            const targetHex = String(input).trim();
+            if (!targetHex) return;
+            const mapping = this._buildPaletteSwapMap(srcHex, targetHex);
+            if (!mapping || !Array.isArray(mapping.sources) || mapping.sources.length === 0) return;
+            this._applyPaletteSwap(mapping);
+        } catch (e) {
+            console.warn('palette swap prompt failed', e);
+        }
+    }
+
     selectionTool() {
         try {
             if (!this.mouse) return;
@@ -2535,6 +2751,12 @@ export class SpriteScene extends Scene {
                 this.clipboardPreview = false;
                 this._clipboardPreviewDragging = null;
                 this.keys.resetPasscode();
+            }
+
+            // Keyframing: Shift+I for selection, I for frame (uses selection mask if present)
+            if ((this.keys.released('i') || this.keys.released('I')) && !this.keys.held('Alt')) {
+                if (this.keys.held('Shift')) this._handleSelectionKeyframeTap();
+                else this._handleFrameKeyframeTap();
             }
 
             // Ctrl + Left = eyedropper: pick color from the current frame under the mouse
@@ -3518,6 +3740,634 @@ export class SpriteScene extends Scene {
                 // clear transient paste flag so it only affects the current tick
                 try { this._justPasted = false; } catch (ee) {}
             }
+        }
+
+    _handleSelectionKeyframeTap() {
+        try {
+            const snap = this._captureSelectionSnapshot();
+            if (!snap) {
+                this._selectionKeyframeStart = null;
+                this._selectionKeyframePrompt = null;
+                return;
+            }
+            if (!this._selectionKeyframeStart || this._selectionKeyframeStart.anim !== snap.anim || this._selectionKeyframeStart.frame === snap.frame) {
+                this._selectionKeyframeTrack = null;
+                this._selectionKeyframeStart = snap;
+                this._selectionKeyframePrompt = 'Place second keyframe (tap i on a new selection)';
+                return;
+            }
+
+            const track = this._buildSelectionKeyframeTrack(this._selectionKeyframeStart, snap);
+            this._selectionKeyframeStart = null;
+            this._selectionKeyframePrompt = null;
+            if (track) {
+                this._selectionKeyframeTrack = track;
+                this._applySelectionSnapshot(snap);
+            }
+        } catch (e) {
+            console.warn('selection keyframe tap failed', e);
+        }
+    }
+
+    _captureSelectionSnapshot() {
+        try {
+            const anim = this.selectedAnimation;
+            const frame = Number(this.selectedFrame || 0);
+            if (this.selectionRegion) {
+                const sr = this.selectionRegion;
+                return {
+                    type: 'region',
+                    start: { x: sr.start.x, y: sr.start.y },
+                    end: { x: sr.end.x, y: sr.end.y },
+                    areaIndex: (typeof sr.areaIndex === 'number') ? sr.areaIndex : null,
+                    anim,
+                    frame
+                };
+            }
+            if (this.selectionPoints && this.selectionPoints.length > 0) {
+                const pts = this.selectionPoints.map(p => ({ x: p.x, y: p.y, areaIndex: (typeof p.areaIndex === 'number') ? p.areaIndex : null }));
+                return { type: 'points', points: pts, anim, frame };
+            }
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _snapshotToPoints(snapshot) {
+        if (!snapshot) return [];
+        if (snapshot.type === 'points' && Array.isArray(snapshot.points)) return snapshot.points.slice();
+        if (snapshot.type === 'region' && snapshot.start && snapshot.end) {
+            const minX = Math.min(snapshot.start.x, snapshot.end.x);
+            const minY = Math.min(snapshot.start.y, snapshot.end.y);
+            const maxX = Math.max(snapshot.start.x, snapshot.end.x);
+            const maxY = Math.max(snapshot.start.y, snapshot.end.y);
+            const pts = [];
+            for (let y = minY; y <= maxY; y++) {
+                for (let x = minX; x <= maxX; x++) {
+                    pts.push({ x, y, areaIndex: (typeof snapshot.areaIndex === 'number') ? snapshot.areaIndex : null });
+                }
+            }
+            return pts;
+        }
+        return [];
+    }
+
+    _applySelectionSnapshot(snapshot) {
+        if (!snapshot) return;
+        if (snapshot.type === 'region') {
+            this.selectionRegion = {
+                start: { x: snapshot.start.x, y: snapshot.start.y },
+                end: { x: snapshot.end.x, y: snapshot.end.y },
+                areaIndex: (typeof snapshot.areaIndex === 'number') ? snapshot.areaIndex : null
+            };
+            this.selectionPoints = [];
+        } else if (snapshot.type === 'points') {
+            this.selectionPoints = (snapshot.points || []).map(p => ({ x: p.x, y: p.y, areaIndex: (typeof p.areaIndex === 'number') ? p.areaIndex : null }));
+            this.selectionRegion = null;
+        }
+    }
+
+    _buildSelectionKeyframeTrack(startSnap, endSnap) {
+        try {
+            if (!startSnap || !endSnap) return null;
+            if (startSnap.anim !== endSnap.anim) return null;
+            const startFrame = Number(startSnap.frame || 0);
+            const endFrame = Number(endSnap.frame || 0);
+            if (startFrame === endFrame) return null;
+            const distance = Math.abs(endFrame - startFrame);
+            const dir = (endFrame >= startFrame) ? 1 : -1;
+            const frames = {};
+            const lerp = (a, b, t) => a + (b - a) * t;
+
+            if (startSnap.type === 'region' && endSnap.type === 'region') {
+                const areaMatch = (typeof startSnap.areaIndex === 'number') ? startSnap.areaIndex : ((typeof endSnap.areaIndex === 'number') ? endSnap.areaIndex : null);
+                const startBox = {
+                    minX: Math.min(startSnap.start.x, startSnap.end.x),
+                    minY: Math.min(startSnap.start.y, startSnap.end.y),
+                    maxX: Math.max(startSnap.start.x, startSnap.end.x),
+                    maxY: Math.max(startSnap.start.y, startSnap.end.y)
+                };
+                const endBox = {
+                    minX: Math.min(endSnap.start.x, endSnap.end.x),
+                    minY: Math.min(endSnap.start.y, endSnap.end.y),
+                    maxX: Math.max(endSnap.start.x, endSnap.end.x),
+                    maxY: Math.max(endSnap.start.y, endSnap.end.y)
+                };
+                for (let step = 0; step <= distance; step++) {
+                    const t = distance === 0 ? 1 : (step / distance);
+                    const minX = Math.round(lerp(startBox.minX, endBox.minX, t));
+                    const minY = Math.round(lerp(startBox.minY, endBox.minY, t));
+                    const maxX = Math.round(lerp(startBox.maxX, endBox.maxX, t));
+                    const maxY = Math.round(lerp(startBox.maxY, endBox.maxY, t));
+                    const frame = startFrame + dir * step;
+                    frames[frame] = {
+                        type: 'region',
+                        start: { x: Math.min(minX, maxX), y: Math.min(minY, maxY) },
+                        end: { x: Math.max(minX, maxX), y: Math.max(minY, maxY) },
+                        areaIndex: areaMatch
+                    };
+                }
+                return { anim: startSnap.anim, startFrame, endFrame, frames };
+            }
+
+            const startPoints = this._snapshotToPoints(startSnap);
+            const endPoints = this._snapshotToPoints(endSnap);
+            if (!startPoints.length || !endPoints.length) return null;
+            const sortPts = (arr) => arr.slice().sort((a, b) => (a.x - b.x) || (a.y - b.y));
+            const sPts = sortPts(startPoints);
+            const ePts = sortPts(endPoints);
+            const maxLen = Math.max(sPts.length, ePts.length);
+
+            for (let step = 0; step <= distance; step++) {
+                const t = distance === 0 ? 1 : (step / distance);
+                const frame = startFrame + dir * step;
+                const dedup = new Map();
+                for (let i = 0; i < maxLen; i++) {
+                    const s = sPts[i % sPts.length];
+                    const e = ePts[i % ePts.length];
+                    const x = Math.round(lerp(s.x, e.x, t));
+                    const y = Math.round(lerp(s.y, e.y, t));
+                    const area = (typeof e.areaIndex === 'number') ? e.areaIndex : ((typeof s.areaIndex === 'number') ? s.areaIndex : null);
+                    const key = `${area === null ? 'null' : area}:${x},${y}`;
+                    if (!dedup.has(key)) dedup.set(key, { x, y, areaIndex: area });
+                }
+                frames[frame] = { type: 'points', points: Array.from(dedup.values()) };
+            }
+            return { anim: startSnap.anim, startFrame, endFrame, frames };
+        } catch (e) {
+            console.warn('build selection keyframe track failed', e);
+            return null;
+        }
+    }
+
+    _handleFrameKeyframeTap() {
+        try {
+            const snap = this._captureFrameKeyframeSnapshot();
+            if (!snap) {
+                this._frameKeyframeStart = null;
+                this._frameKeyframePrompt = null;
+                return;
+            }
+            if (!this._frameKeyframeStart || this._frameKeyframeStart.anim !== snap.anim || this._frameKeyframeStart.frame === snap.frame) {
+                this._frameKeyframeStart = snap;
+                this._frameKeyframePrompt = 'Place second frame keyframe (tap i on target frame)';
+                return;
+            }
+
+            const track = this._buildFrameKeyframeTrack(this._frameKeyframeStart, snap);
+            this._frameKeyframeStart = null;
+            this._frameKeyframePrompt = null;
+            if (track) this._applyFrameKeyframeTrack(track);
+        } catch (e) {
+            console.warn('frame keyframe tap failed', e);
+        }
+    }
+
+    _captureFrameKeyframeSnapshot() {
+        try {
+            const anim = this.selectedAnimation;
+            const frame = Number(this.selectedFrame || 0);
+            const sheet = this.currentSprite;
+            if (!sheet) return null;
+            const canvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frame) : null;
+            if (!canvas) return null;
+            const ctx = canvas.getContext('2d');
+
+            // derive selection mask and bounding box (fallback to full frame)
+            let minX = 0, minY = 0, maxX = canvas.width - 1, maxY = canvas.height - 1;
+            let mask = null;
+            if (this.selectionPoints && this.selectionPoints.length > 0) {
+                minX = Infinity; minY = Infinity; maxX = -Infinity; maxY = -Infinity;
+                const pts = [];
+                for (const p of this.selectionPoints) {
+                    if (!p) continue;
+                    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+                    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+                    pts.push(p);
+                }
+                if (pts.length) {
+                    const w = maxX - minX + 1;
+                    const h = maxY - minY + 1;
+                    mask = new Uint8Array(w * h);
+                    for (const p of pts) {
+                        const ix = p.x - minX;
+                        const iy = p.y - minY;
+                        if (ix < 0 || iy < 0 || ix >= w || iy >= h) continue;
+                        mask[iy * w + ix] = 1;
+                    }
+                } else {
+                    minX = 0; minY = 0; maxX = canvas.width - 1; maxY = canvas.height - 1;
+                }
+            } else if (this.selectionRegion) {
+                minX = Math.max(0, Math.min(this.selectionRegion.start.x, this.selectionRegion.end.x));
+                minY = Math.max(0, Math.min(this.selectionRegion.start.y, this.selectionRegion.end.y));
+                maxX = Math.min(canvas.width - 1, Math.max(this.selectionRegion.start.x, this.selectionRegion.end.x));
+                maxY = Math.min(canvas.height - 1, Math.max(this.selectionRegion.start.y, this.selectionRegion.end.y));
+                const w = maxX - minX + 1;
+                const h = maxY - minY + 1;
+                mask = new Uint8Array(w * h);
+                mask.fill(1);
+            }
+
+            const boxW = maxX - minX + 1;
+            const boxH = maxY - minY + 1;
+            const img = ctx.getImageData(minX, minY, boxW, boxH);
+            return {
+                anim,
+                frame,
+                w: canvas.width,
+                h: canvas.height,
+                box: { minX, minY, maxX, maxY, w: boxW, h: boxH },
+                data: new Uint8ClampedArray(img.data),
+                mask,
+                hasSelection: !!mask
+            };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _applyFrameSnapshot(snapshot) {
+        try {
+            if (!snapshot) return;
+            const sheet = this.currentSprite;
+            if (!sheet) return;
+            const anim = snapshot.anim;
+            const frameIdx = snapshot.frame;
+            const box = snapshot.box || { minX: 0, minY: 0, w: snapshot.w, h: snapshot.h };
+            const w = box.w|0;
+            const h = box.h|0;
+            if (w <= 0 || h <= 0) return;
+            const data = snapshot.data;
+            if (!data || data.length < w * h * 4) return;
+            const changes = [];
+            let i = 0;
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    const r = data[i++];
+                    const g = data[i++];
+                    const b = data[i++];
+                    const a = data[i++];
+                    if (snapshot.hasSelection && a === 0) continue;
+                    changes.push({ x: box.minX + x, y: box.minY + y, color: this.rgbaToHex(r, g, b, a), blendType: 'replace' });
+                }
+            }
+            if (changes.length) sheet.modifyFrame(anim, frameIdx, changes);
+        } catch (e) {
+            console.warn('apply frame snapshot failed', e);
+        }
+    }
+
+    _buildFrameKeyframeTrack(startSnap, endSnap) {
+        try {
+            if (!startSnap || !endSnap) return null;
+            if (startSnap.anim !== endSnap.anim) return null;
+            if (startSnap.w !== endSnap.w || startSnap.h !== endSnap.h) return null;
+            const startFrame = Number(startSnap.frame || 0);
+            const endFrame = Number(endSnap.frame || 0);
+            const dist = Math.abs(endFrame - startFrame);
+            if (dist === 0) return null;
+            const dir = (endFrame >= startFrame) ? 1 : -1;
+            const frames = {};
+            const transform = this._detectSelectionTransform(startSnap, endSnap);
+
+            for (let step = 0; step <= dist; step++) {
+                const t = dist === 0 ? 1 : (step / dist);
+                const frame = startFrame + dir * step;
+                const snap = this._interpolateFrameSelectionPixels(startSnap, endSnap, t, frame, transform);
+                if (snap) frames[frame] = snap;
+            }
+            return { anim: startSnap.anim, startFrame, endFrame, frames, transform };
+        } catch (e) {
+            console.warn('build frame keyframe track failed', e);
+            return null;
+        }
+    }
+
+    _interpolateFrameSelectionPixels(startSnap, endSnap, t, frameValue, detectedTransform = null) {
+        try {
+            const canvasW = startSnap.w|0;
+            const canvasH = startSnap.h|0;
+            if (canvasW <= 0 || canvasH <= 0) return null;
+            const lerp = (a, b, tt) => a + (b - a) * tt;
+
+            const sb = startSnap.box || { minX: 0, minY: 0, maxX: canvasW - 1, maxY: canvasH - 1, w: canvasW, h: canvasH };
+            const eb = endSnap.box || { minX: 0, minY: 0, maxX: canvasW - 1, maxY: canvasH - 1, w: canvasW, h: canvasH };
+            const tb = {
+                minX: Math.round(lerp(sb.minX, eb.minX, t)),
+                minY: Math.round(lerp(sb.minY, eb.minY, t)),
+                maxX: Math.round(lerp(sb.maxX, eb.maxX, t)),
+                maxY: Math.round(lerp(sb.maxY, eb.maxY, t))
+            };
+            tb.w = tb.maxX - tb.minX + 1;
+            tb.h = tb.maxY - tb.minY + 1;
+            if (tb.w <= 0 || tb.h <= 0) return null;
+
+            const clamp01 = (v) => Math.max(0, Math.min(1, v));
+            const wrap01 = (v) => {
+                let r = v % 1;
+                if (r < 0) r += 1;
+                return r;
+            };
+            const channelStep = (channel) => {
+                const base = (typeof this._getAdjustPercent === 'function')
+                    ? this._getAdjustPercent(channel)
+                    : (typeof this.adjustAmount === 'number' ? this.adjustAmount : 0.05);
+                const multiplier = (channel === 'h') ? 0.2 : 1; // keep hue step aligned with lighten/darken behaviour
+                const step = base * multiplier;
+                return (Number.isFinite(step) && step > 0) ? step : 0;
+            };
+            const hStep = channelStep('h');
+            const sStep = channelStep('s');
+            const vStep = channelStep('v');
+            const aStep = channelStep('a');
+
+            const quantizeChannel = (start, end, tt, step, wrap = false) => {
+                if (!Number.isFinite(step) || step <= 0) return wrap ? wrap01(lerp(start, end, tt)) : lerp(start, end, tt);
+                if (tt <= 0) return wrap ? wrap01(start) : start;
+                if (tt >= 1) return wrap ? wrap01(end) : end;
+
+                let delta = end - start;
+                if (wrap) delta = ((delta + 0.5) % 1) - 0.5; // shortest hue path
+
+                const steps = delta / step;
+                if (!Number.isFinite(steps) || steps === 0) return wrap ? wrap01(start) : start;
+
+                const maxSteps = Math.abs(steps);
+                const quantSteps = Math.min(Math.abs(Math.round(steps * tt)), Math.ceil(maxSteps));
+                const signedSteps = Math.sign(steps) * quantSteps;
+                const val = start + signedSteps * step;
+                return wrap ? wrap01(val) : clamp01(val);
+            };
+
+            const rgbToHsv = (r, g, b, a = 255) => {
+                const rn = (r || 0) / 255;
+                const gn = (g || 0) / 255;
+                const bn = (b || 0) / 255;
+                const max = Math.max(rn, gn, bn);
+                const min = Math.min(rn, gn, bn);
+                const d = max - min;
+                let h = 0;
+                if (d !== 0) {
+                    switch (max) {
+                        case rn: h = ((gn - bn) / d) % 6; break;
+                        case gn: h = (bn - rn) / d + 2; break;
+                        default: h = (rn - gn) / d + 4; break;
+                    }
+                    h /= 6;
+                    if (h < 0) h += 1;
+                }
+                const s = max === 0 ? 0 : d / max;
+                const v = max;
+                return { h, s, v, a: (a || 0) / 255 };
+            };
+
+            const hsvToRgba = (h, s, v, a = 1) => {
+                const hh = wrap01(h) * 6;
+                const i = Math.floor(hh);
+                const f = hh - i;
+                const p = v * (1 - s);
+                const q = v * (1 - f * s);
+                const tVal = v * (1 - (1 - f) * s);
+                let r, g, b;
+                switch (i % 6) {
+                    case 0: r = v; g = tVal; b = p; break;
+                    case 1: r = q; g = v; b = p; break;
+                    case 2: r = p; g = v; b = tVal; break;
+                    case 3: r = p; g = q; b = v; break;
+                    case 4: r = tVal; g = p; b = v; break;
+                    default: r = v; g = p; b = q; break;
+                }
+                return {
+                    r: Math.round(clamp01(r) * 255),
+                    g: Math.round(clamp01(g) * 255),
+                    b: Math.round(clamp01(b) * 255),
+                    a: Math.round(clamp01(a) * 255)
+                };
+            };
+
+            // If masks describe an exact flip/rotation, steer interpolation with that transform.
+            const tr = detectedTransform;
+            const hasTransform = !!(tr && tr.kind);
+            const startCenter = { x: sb.minX + (sb.w - 1) / 2, y: sb.minY + (sb.h - 1) / 2 };
+            const endCenter = { x: eb.minX + (eb.w - 1) / 2, y: eb.minY + (eb.h - 1) / 2 };
+            const center = { x: lerp(startCenter.x, endCenter.x, t), y: lerp(startCenter.y, endCenter.y, t) };
+
+            // Y-axis "3D" spin for horizontal flips: collapse width at mid, reveal flipped art on second half.
+            const isYSpin = hasTransform && tr.flipX && !tr.flipY;
+            const spinAngle = isYSpin ? (Math.PI * t) : (hasTransform ? (tr.angleRad || 0) * t : 0);
+            const minSpinScale = 1 / Math.max(1, Math.max(sb.w, eb.w));
+            const spinScale = isYSpin ? Math.max(minSpinScale, Math.abs(Math.cos(spinAngle))) : 1;
+            // For non-spin transforms we still allow flip/rot usage.
+            const flipSignX = (!isYSpin && hasTransform && tr.flipX) ? (t >= 0.5 ? -1 : 1) : 1;
+            const flipSignY = (!isYSpin && hasTransform && tr.flipY) ? (t >= 0.5 ? -1 : 1) : 1;
+            const rot = (vx, vy, a, sx = 1, sy = 1) => {
+                const ca = Math.cos(a);
+                const sa = Math.sin(a);
+                return { x: (vx * ca - vy * sa) * sx, y: (vx * sa + vy * ca) * sy };
+            };
+
+            const sample = (snap, x, y) => {
+                const b = snap.box || { minX: 0, minY: 0, w: snap.w, h: snap.h };
+                const lx = Math.round(x - b.minX);
+                const ly = Math.round(y - b.minY);
+                if (lx < 0 || ly < 0 || lx >= b.w || ly >= b.h) return [0,0,0,0];
+                if (snap.mask) {
+                    const mi = ly * b.w + lx;
+                    if (snap.mask[mi] === 0) return [0,0,0,0];
+                }
+                const idx = (ly * b.w + lx) * 4;
+                const d = snap.data;
+                return [d[idx], d[idx+1], d[idx+2], d[idx+3]];
+            };
+
+            const changes = [];
+            for (let yy = 0; yy < tb.h; yy++) {
+                for (let xx = 0; xx < tb.w; xx++) {
+                    const tx = tb.minX + xx;
+                    const ty = tb.minY + yy;
+                    if (tx < 0 || ty < 0 || tx >= canvasW || ty >= canvasH) continue;
+
+                    // Centered vector for transform-aware mapping.
+                    const vx = tx - center.x;
+                    const vy = ty - center.y;
+
+                    let sc, ec;
+                    if (isYSpin) {
+                        // Compress around center.x using spinScale; show only the front face for each half with no alpha fade.
+                        const useEnd = t >= 0.5;
+                        const srcSnap = useEnd ? endSnap : startSnap;
+                        const srcCenter = useEnd ? endCenter : startCenter;
+                        const lx = vx * spinScale;
+                        const ly = vy;
+                        const sxWorld = srcCenter.x + lx;
+                        const syWorld = srcCenter.y + ly;
+                        const face = sample(srcSnap, sxWorld, syWorld);
+                        // Lock both samples to the active face so lerp keeps alpha constant.
+                        sc = face;
+                        ec = face;
+                    } else if (hasTransform) {
+                        const angle = (tr.angleRad || 0) * t;
+                        const sv = rot(vx, vy, -angle, flipSignX, flipSignY);
+                        const ev = rot(vx, vy, (tr.angleRad || 0) - angle, tr.flipX ? -flipSignX : flipSignX, tr.flipY ? -flipSignY : flipSignY);
+                        const sxWorld = startCenter.x + sv.x;
+                        const syWorld = startCenter.y + sv.y;
+                        const exWorld = endCenter.x + ev.x;
+                        const eyWorld = endCenter.y + ev.y;
+                        sc = sample(startSnap, sxWorld, syWorld);
+                        ec = sample(endSnap, exWorld, eyWorld);
+                    } else {
+                        const u = tb.w > 1 ? xx / (tb.w - 1) : 0.5;
+                        const v = tb.h > 1 ? yy / (tb.h - 1) : 0.5;
+                        const sx = sb.minX + u * (sb.w - 1);
+                        const sy = sb.minY + v * (sb.h - 1);
+                        const ex = eb.minX + u * (eb.w - 1);
+                        const ey = eb.minY + v * (eb.h - 1);
+                        sc = sample(startSnap, sx, sy);
+                        ec = sample(endSnap, ex, ey);
+                    }
+
+                    if (sc[3] === 0 && ec[3] === 0) continue;
+                    const sHsv = rgbToHsv(sc[0], sc[1], sc[2], sc[3]);
+                    const eHsv = rgbToHsv(ec[0], ec[1], ec[2], ec[3]);
+
+                    const h = quantizeChannel(sHsv.h, eHsv.h, t, hStep, true);
+                    const s = quantizeChannel(sHsv.s, eHsv.s, t, sStep, false);
+                    const v = quantizeChannel(sHsv.v, eHsv.v, t, vStep, false);
+                    const a = quantizeChannel(sHsv.a, eHsv.a, t, aStep, false);
+
+                    const rgba = hsvToRgba(h, s, v, a);
+                    changes.push({ x: tx, y: ty, color: this.rgbaToHex(rgba.r, rgba.g, rgba.b, rgba.a), blendType: 'replace' });
+                }
+            }
+
+            return { anim: startSnap.anim, frame: frameValue ?? startSnap.frame, box: tb, hasSelection: true, data: null, changes };
+        } catch (e) {
+            console.warn('interpolate frame selection pixels failed', e);
+            return null;
+        }
+    }
+
+    _detectSelectionTransform(startSnap, endSnap) {
+        try {
+            if (!startSnap || !endSnap) return null;
+            if (!startSnap.data || !endSnap.data) return null;
+            const sb = startSnap.box || { minX: 0, minY: 0, w: startSnap.w, h: startSnap.h };
+            const eb = endSnap.box || { minX: 0, minY: 0, w: endSnap.w, h: endSnap.h };
+            const sw = sb.w|0, sh = sb.h|0, ew = eb.w|0, eh = eb.h|0;
+            if (sw <= 0 || sh <= 0 || ew <= 0 || eh <= 0) return null;
+
+            const startMask = startSnap.mask || null;
+            const endMask = endSnap.mask || null;
+            const sData = startSnap.data;
+            const eData = endSnap.data;
+
+            const candidates = [
+                { kind: 'identity', angleRad: 0, flipX: false, flipY: false, swap: false },
+                { kind: 'flipX', angleRad: 0, flipX: true, flipY: false, swap: false },
+                { kind: 'flipY', angleRad: 0, flipX: false, flipY: true, swap: false },
+                { kind: 'flipXY', angleRad: Math.PI, flipX: true, flipY: true, swap: false },
+                { kind: 'rot90', angleRad: Math.PI / 2, flipX: false, flipY: false, swap: true },
+                { kind: 'rot180', angleRad: Math.PI, flipX: false, flipY: false, swap: false },
+                { kind: 'rot270', angleRad: Math.PI * 1.5, flipX: false, flipY: false, swap: true }
+            ];
+
+            const applyTransform = (x, y, kind) => {
+                switch (kind) {
+                    case 'flipX': return { x: sw - 1 - x, y };
+                    case 'flipY': return { x, y: sh - 1 - y };
+                    case 'flipXY': return { x: sw - 1 - x, y: sh - 1 - y };
+                    case 'rot90': return { x: sh - 1 - y, y: x };
+                    case 'rot180': return { x: sw - 1 - x, y: sh - 1 - y };
+                    case 'rot270': return { x: y, y: sw - 1 - x };
+                    default: return { x, y };
+                }
+            };
+
+            let best = null;
+            let identityScore = null;
+
+            for (const cand of candidates) {
+                const expectedW = cand.swap ? sh : sw;
+                const expectedH = cand.swap ? sw : sh;
+                if (expectedW !== ew || expectedH !== eh) continue;
+
+                let totalDiff = 0;
+                let count = 0;
+                let failed = false;
+
+                for (let y = 0; y < sh && !failed; y++) {
+                    for (let x = 0; x < sw; x++) {
+                        const si = y * sw + x;
+                        const sm = startMask ? startMask[si] : null;
+                        const sIdx = si * 4;
+                        const sa = sData[sIdx + 3];
+                        // only evaluate pixels that are in mask or visible
+                        if (sm === 0 || (!startMask && sa === 0)) continue;
+
+                        const tPos = applyTransform(x, y, cand.kind);
+                        const tx = tPos.x|0, ty = tPos.y|0;
+                        if (tx < 0 || ty < 0 || tx >= ew || ty >= eh) { failed = true; break; }
+                        const ti = ty * ew + tx;
+                        const tm = endMask ? endMask[ti] : null;
+                        const tIdx = ti * 4;
+                        const ta = eData[tIdx + 3];
+
+                        // Ignore mapping into empty end pixels unless a mask demands presence.
+                        if (endMask && tm === 0) { failed = true; break; }
+                        if (!endMask && ta === 0) continue;
+
+                        const dr = Math.abs(sData[sIdx] - eData[tIdx]);
+                        const dg = Math.abs(sData[sIdx+1] - eData[tIdx+1]);
+                        const db = Math.abs(sData[sIdx+2] - eData[tIdx+2]);
+                        const da = Math.abs(sa - ta);
+                        totalDiff += dr + dg + db + da;
+                        count++;
+                    }
+                }
+
+                if (failed || count === 0) continue;
+                const avgDiff = totalDiff / count;
+                if (cand.kind === 'identity') identityScore = avgDiff;
+                if (!best || avgDiff < best.avgDiff) {
+                    best = { ...cand, avgDiff };
+                }
+            }
+
+            if (!best) return null;
+            const margin = 0.7; // require at least 30% better than identity to switch
+            if (best.kind !== 'identity' && identityScore !== null && best.avgDiff <= identityScore * margin) {
+                return best;
+            }
+            if (best.kind === 'identity') return null;
+            return best;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _applyFrameKeyframeTrack(track) {
+        try {
+            if (!track || !track.frames) return;
+            const frames = track.frames;
+            const keys = Object.keys(frames).map(k => Number(k)).sort((a,b)=>a-b);
+            for (const fr of keys) {
+                const snap = frames[fr];
+                if (snap && snap.changes && snap.changes.length) {
+                    if (this.currentSprite) {
+                        this.currentSprite.modifyFrame(snap.anim, fr, snap.changes);
+                    }
+                } else if (snap && snap.data) {
+                    this._applyFrameSnapshot(snap);
+                }
+            }
+        } catch (e) {
+            console.warn('apply frame keyframe track failed', e);
+        } finally {
+            this._frameKeyframeStart = null;
+            this._frameKeyframePrompt = null;
+        }
     }
 
     // Generate list of pixel coordinates for a Bresenham line between start and end
@@ -5889,6 +6739,22 @@ export class SpriteScene extends Scene {
                         }
                     } catch (e) { continue; }
                 }
+            }
+        } catch (e) {}
+        // Prompt for selection keyframing
+        try {
+            const uctx = this.UIDraw && this.UIDraw.ctx;
+            if (uctx && uctx.canvas && this._selectionKeyframePrompt) {
+                const uiW = uctx.canvas.width / (this.Draw ? this.Draw.Scale.x : 1);
+                this.UIDraw.text(this._selectionKeyframePrompt, new Vector(uiW / 2, 8), '#FFE066FF', 0, 14, { align: 'center', baseline: 'top', font: 'monospace' });
+            }
+        } catch (e) {}
+        // Prompt for frame keyframing
+        try {
+            const uctx = this.UIDraw && this.UIDraw.ctx;
+            if (uctx && uctx.canvas && this._frameKeyframePrompt) {
+                const uiW = uctx.canvas.width / (this.Draw ? this.Draw.Scale.x : 1);
+                this.UIDraw.text(this._frameKeyframePrompt, new Vector(uiW / 2, 26), '#66CCFFFF', 0, 14, { align: 'center', baseline: 'top', font: 'monospace' });
             }
         } catch (e) {}
         // Draw a small bottom-right label showing the current adjust channel

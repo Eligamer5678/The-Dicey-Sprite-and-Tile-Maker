@@ -28,6 +28,9 @@
 - Clicking l will convert the group into a layered frame
 - Click g on a group to ungroup
 - 1-5 keys change brush size
+- i to keyframe selection (with pixel data)
+- shift+i to selected (no pixel data)
+- p to swap pallet
 - Pressing a comination like 3 +4 will use the sum as the brush size (pressing 3 & 4 = size 7)
 - Shift+1-5 = selection becomes brush
 - s to select by color (hold shift to adjust buffer amount)
@@ -79,19 +82,11 @@
 - msg() to message players.
 
 - **Latest update** - as of 2/9/26
-- Updated tile mode: You can now add grid cells with space, mirror multi-selected frames
-- Brush size can now go MUCH higher. 
-- Custom brush tool: Press a number between 1 & 5 & hold shift at the same time to make selection become the brush shape
-- Fixed tile mode laying bug
-- Updated line tool to now also be a general polygon tool
-- All tools now go across tiles - enjoy your "3d torus" drawing plane.
-- Added a keybind for onionskinning
-- Improved Noise to use the adjustment percentage and channel
-- Added keybinds to adjust adjustment percentage
+- Added selection keyframing
+- Added pallet swap (click p on the base color of a pallet)
 
 - **Features in development**
 - Improved UI
-- Pallet controls & global pallet swap
 - Selection keyframing, including non 90 degree rotation & flip values
 - Multiple tilemaps & tilemap controls
 - Synced tilemaps in online colab 
