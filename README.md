@@ -8,7 +8,7 @@
 - For tilemaps, hit 't' on your keybaord to enter tilemode, click y to mirror frames to the map, and space to add tiles. When your art is complete, click export, and type 2 in the prompt so it exports as a tilesheet. 
 
 
-# Controls
+# All controls 
 #### Spritesheet maker
 - Click the '+' to add a frame.
 - Color picker in the bottom left.
@@ -90,7 +90,7 @@
 - Added keybinds to adjust adjustment percentage
 
 
-### Tilemap maker
+### Tilemap maker - Deprecated, these features exist/will soon be added into spritesheet tilemode for cleaner UX
 #### Basic controls
 - Click a tile on the right then left click to place
 - Shift click a tile to select
@@ -114,7 +114,7 @@
 
 *There is no undo/redo stack in this mode to warn you, this is just a simple editor.*
 
-#### Collision editor
+#### Collision editor - Deprecated, these features will be later added into spritesheet editor tile mode for cleaner UX
 - Hold 'n' to create points. Press space to turn them into a polygon.
 - You can shift click to select (may take a few tries)
 - Blender-like controls, g to grab, click a vertex then e to extrude, r to rotate.

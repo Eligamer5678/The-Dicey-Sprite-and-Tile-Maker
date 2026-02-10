@@ -1705,6 +1705,23 @@ export class SpriteScene extends Scene {
                 if (this.keys.released('8')) setAdjustChannel('v');
                 if (this.keys.released('9')) setAdjustChannel('a');
 
+                // Arrow left/right step selected frame within the current animation.
+                const framesArr = (this.currentSprite && this.currentSprite._frames && this.selectedAnimation)
+                    ? (this.currentSprite._frames.get(this.selectedAnimation) || [])
+                    : [];
+                const frameCount = Array.isArray(framesArr) ? framesArr.length : 0;
+                if (frameCount > 0) {
+                    const wrap = (v) => (v % frameCount + frameCount) % frameCount;
+                    if (this.keys.released('ArrowLeft')) {
+                        this.selectedFrame = wrap((this.selectedFrame || 0) - 1);
+                        if (this.FrameSelect && this.FrameSelect._multiSelected) this.FrameSelect._multiSelected.clear();
+                    }
+                    if (this.keys.released('ArrowRight')) {
+                        this.selectedFrame = wrap((this.selectedFrame || 0) + 1);
+                        if (this.FrameSelect && this.FrameSelect._multiSelected) this.FrameSelect._multiSelected.clear();
+                    }
+                }
+
                 // +/- adjust the per-channel adjustment percent (Shift = 0.1% steps, else 1%)
                 const activeChannel = this.adjustChannel || 'v';
                 const incPressed = this.keys.released('+') || this.keys.released('=');
@@ -2973,7 +2990,6 @@ export class SpriteScene extends Scene {
                 const fHeldTime = Math.max(this.keys.held('f', true), this.keys.held('F', true));
                 const fPressed = (this.keys.pressed('f') || this.keys.pressed('F'));
                 if (fHeldTime > 1 || (fPressed && !this.keys.held('Alt'))) {
-                    console.log('hello')
                     const pos = this.getPos(this.mouse && this.mouse.pos);
                     if (!pos || !pos.inside) return;
                     const sheet = this.currentSprite;
@@ -3476,7 +3492,7 @@ export class SpriteScene extends Scene {
                     }
 
                     // while holding left, update the origin based on mouse pos inside frozen preview
-                    if (this._clipboardPreviewDragging && this.mouse.held('left')) {
+                    if (this._clipboardPreviewDragging && this.mouse.held('left',"pasteMode")) {
                         const posInfo = this.getPos(this.mouse.pos);
                         if (posInfo && posInfo.inside) {
                             const topLeftX = this._clipboardPreviewDragging.topLeftX;
@@ -3488,7 +3504,7 @@ export class SpriteScene extends Scene {
                     }
 
                     // on release, stop dragging (but keep preview if Alt still held)
-                    if (this._clipboardPreviewDragging && !this.mouse.held('left')) {
+                    if (this._clipboardPreviewDragging && !this.mouse.held('left',"pasteMode")) {
                         this._clipboardPreviewDragging = null;
                     }
                 }
