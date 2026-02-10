@@ -89,6 +89,14 @@
 - Improved Noise to use the adjustment percentage and channel
 - Added keybinds to adjust adjustment percentage
 
+- **Features in development**
+- Improved UI
+- Pallet controls & global pallet swap
+- Selection keyframing, including non 90 degree rotation & flip values
+- Multiple tilemaps & tilemap controls
+- Synced tilemaps in online colab 
+- In-game simulation in tilemode (this will make the previous tilemap maker obsolete, and thus it will be removed)
+
 
 ### Tilemap maker - Deprecated, these features exist/will soon be added into spritesheet tilemode for cleaner UX
 #### Basic controls
