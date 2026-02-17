@@ -6995,6 +6995,11 @@ export class SpriteScene extends Scene {
             const cellW = dstW / this.currentSprite.slicePx;
             const cellH = dstH / this.currentSprite.slicePx;
 
+            // Keep cursor/selection outlines thin on larger canvases
+            const sliceSize = Math.max(1, this.currentSprite && this.currentSprite.slicePx ? this.currentSprite.slicePx : 1);
+            const outlineScale = Math.max(0.35, Math.min(1, 32 / sliceSize));
+            const scaleOutline = (base) => base * outlineScale;
+
             // Determine which draw area (if any) the mouse is currently over
             // so we can limit tilemode previews to matching frame types.
             const posInfoGlobal = this.getPos(this.mouse && this.mouse.pos);
@@ -7038,7 +7043,7 @@ export class SpriteScene extends Scene {
                     const cellX = dstPos.x + point.x * cellW;
                     const cellY = dstPos.y + point.y * cellH;
                     this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW/3, cellH/3), '#00FFFF55', true); // Aqua fill
-                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#00FFFFFF', false, true, 1, '#00FFFFFF'); // Aqua outline
+                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#00FFFFFF', false, true, scaleOutline(1), '#00FFFFFF'); // Aqua outline
                 }
             }
 
@@ -7059,7 +7064,7 @@ export class SpriteScene extends Scene {
                         const rectH = (maxY - minY + 1) * cellH;
                         // translucent fill + outline for selection region
                         this.Draw.rect(new Vector(rectX, rectY), new Vector(rectW, rectH), '#00FF0055', true);
-                        this.Draw.rect(new Vector(rectX, rectY), new Vector(rectW, rectH), '#00FF00AA', false, true, 2, '#00FF00AA');
+                        this.Draw.rect(new Vector(rectX, rectY), new Vector(rectW, rectH), '#00FF00AA', false, true, scaleOutline(2), '#00FF00AA');
                     }
                 } catch (e) {
                     // ignore region-draw errors
@@ -7245,12 +7250,12 @@ export class SpriteScene extends Scene {
                     const drawW = side * cellW;
                     const drawH = side * cellH;
                     this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), '#FFFFFF22', true);
-                    this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), '#FFFFFFEE', false, true, 2, '#FFFFFFEE');
+                    this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), '#FFFFFFEE', false, true, scaleOutline(2), '#FFFFFFEE');
                 } catch (e) {
                     const cellX = dstPos.x + mousePixelPos.x * cellW;
                     const cellY = dstPos.y + mousePixelPos.y * cellH;
                     this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFF22', true);
-                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFFEE', false, true, 2, '#FFFFFFEE');
+                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFFEE', false, true, scaleOutline(2), '#FFFFFFEE');
                 }
             }
         } catch (e) {
