@@ -1774,6 +1774,7 @@ export class SpriteScene extends Scene {
                             const current = this.onionRange;
                             const before = (current && typeof current.before === 'number') ? current.before : (typeof current === 'number' ? current : 1);
                             const after = (current && typeof current.after === 'number') ? current.after : (typeof current === 'number' ? current : 1);
+                            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                             const input = window.prompt('Onion range (format "before,after", e.g. "5,2" or "-5,2")', `${before},${after}`);
                             if (input !== null) {
                                 const parts = String(input).split(',').map(s => s.trim()).filter(s => s.length > 0);
@@ -1801,6 +1802,7 @@ export class SpriteScene extends Scene {
                         try {
                             const multiActive = this.FrameSelect && this.FrameSelect._multiSelected && this.FrameSelect._multiSelected.size > 0;
                             const current = multiActive ? (this.layerAlpha ?? 1) : (this.onionAlpha ?? 1);
+                            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                             const input = window.prompt(multiActive ? 'Layer alpha (0-1)' : 'Onion alpha (0-1)', String(current));
                             if (input !== null) {
                                 const parsed = Number(input);
@@ -1827,6 +1829,7 @@ export class SpriteScene extends Scene {
                     if (this.keys.held('Shift')) {
                         try {
                             const current = Number(this.paletteStepMax || 3);
+                            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                             const input = window.prompt('Palette swap step range (1-6 recommended)', String(current));
                             if (input !== null && input !== undefined) {
                                 const parsed = Math.max(0, Math.floor(Number(String(input).trim())));
@@ -1850,6 +1853,7 @@ export class SpriteScene extends Scene {
                         this.keys.update(tickDelta)
                         console.log('prompting')
                         try {
+                            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                             const input = window.prompt('Buffer amount (default 1)', '1');
                             if (input !== null) {
                                 const parsed = parseFloat(String(input).trim());
@@ -1869,14 +1873,16 @@ export class SpriteScene extends Scene {
 
                 // Backtick (`) prompts for a square resize (single value applies to both dimensions)
                 if (this.keys.released('`')) {
-                    try {
-                        const current = Math.max(1, this.currentSprite && this.currentSprite.slicePx ? this.currentSprite.slicePx : 16);
-                        const input = window.prompt('Resize canvas (square only, px)', String(current));
+                        try {
+                            const current = Math.max(1, this.currentSprite && this.currentSprite.slicePx ? this.currentSprite.slicePx : 16);
+                            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                            const input = window.prompt('Resize canvas (square only, px)', String(current));
                         if (input !== null) {
                             const parsed = Math.floor(Number(String(input).trim()));
                             if (Number.isFinite(parsed) && parsed > 0) {
                                 let resizeContent = true;
                                 try {
+                                    try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                                     const resp = window.prompt('Resize content? (y/n, default y)', 'y');
                                     if (resp !== null) {
                                         const normalized = String(resp).trim().toLowerCase();
@@ -1917,6 +1923,7 @@ export class SpriteScene extends Scene {
                     const defCols = Math.max(1, (this.tileCols|0) || 3);
                     const defRows = Math.max(1, (this.tileRows|0) || defCols);
                     const defStr = defCols === defRows ? String(defRows) : (defRows + 'x' + defCols);
+                    try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                     const input = window.prompt('Grid size (default "3x3")', defStr);
                     if (input != null) {
                         const raw = String(input).trim().toLowerCase();
@@ -2007,43 +2014,48 @@ export class SpriteScene extends Scene {
                 // bind key: press 'y' to bind a single selected frame to the area under mouse
                 try {
                     if (this.keys && typeof this.keys.released === 'function' && this.keys.released('y')) {
-                        const pos = this.getPos(this.mouse && this.mouse.pos);
-                        if (pos && (pos.inside || pos.renderOnly) && typeof pos.areaIndex === 'number') {
-                            // determine which frame to bind: prefer primary selection, but capture any layered stack for preview reuse
-                            let frameIdx = this.selectedFrame;
-                            let anim = this.selectedAnimation;
-                            let stack = [];
-                            const pushFrame = (v) => {
-                                if (!Number.isFinite(v)) return;
-                                const n = Number(v);
-                                if (!stack.includes(n)) stack.push(n);
-                            };
-                            try {
-                                pushFrame(frameIdx);
-                                const fs = this.FrameSelect;
-                                if (fs && fs._multiSelected && fs._multiSelected.size > 0) {
-                                    const arr = Array.from(fs._multiSelected).filter(i => Number.isFinite(i)).map(Number).sort((a,b)=>a-b);
-                                    for (const i of arr) pushFrame(i);
+                        // area binding / mirror-to-map is a tilemode-only action
+                        if (!this.tilemode) {
+                            // ignore in non-tilemode
+                        } else {
+                            const pos = this.getPos(this.mouse && this.mouse.pos);
+                            if (pos && (pos.inside || pos.renderOnly) && typeof pos.areaIndex === 'number') {
+                                // determine which frame to bind: prefer primary selection, but capture any layered stack for preview reuse
+                                let frameIdx = this.selectedFrame;
+                                let anim = this.selectedAnimation;
+                                let stack = [];
+                                const pushFrame = (v) => {
+                                    if (!Number.isFinite(v)) return;
+                                    const n = Number(v);
+                                    if (!stack.includes(n)) stack.push(n);
+                                };
+                                try {
+                                    pushFrame(frameIdx);
+                                    const fs = this.FrameSelect;
+                                    if (fs && fs._multiSelected && fs._multiSelected.size > 0) {
+                                        const arr = Array.from(fs._multiSelected).filter(i => Number.isFinite(i)).map(Number).sort((a,b)=>a-b);
+                                        for (const i of arr) pushFrame(i);
+                                    }
+                                    // Normalize: sort, dedupe, and discard single-frame stacks so toggle works with legacy bindings
+                                    stack = Array.from(new Set(stack)).sort((a,b)=>a-b);
+                                    if (stack.length <= 1) stack = [];
+                                } catch (e) { /* ignore stack build errors */ }
+                                // Toggle behavior: if area already bound to same anim/frame, clear it
+                                const existing = (Array.isArray(this._areaBindings) && this._areaBindings[pos.areaIndex]) ? this._areaBindings[pos.areaIndex] : null;
+                                const sameStack = (() => {
+                                    if (!existing) return false;
+                                    const existingStack = Array.isArray(existing.multiFrames) ? existing.multiFrames : [];
+                                    if (existingStack.length !== stack.length) return false;
+                                    if (existingStack.length === 0 && stack.length === 0) return true;
+                                    for (let i = 0; i < stack.length; i++) if (Number(existingStack[i]) !== Number(stack[i])) return false;
+                                    return true;
+                                })();
+                                if (existing && existing.anim === anim && Number(existing.index) === Number(frameIdx) && sameStack) {
+                                    this.clearAreaBinding(pos.areaIndex);
+                                } else {
+                                    const savedStack = stack.length >= 2 ? stack : null;
+                                    this.bindArea(pos.areaIndex, anim, frameIdx, savedStack);
                                 }
-                                // Normalize: sort, dedupe, and discard single-frame stacks so toggle works with legacy bindings
-                                stack = Array.from(new Set(stack)).sort((a,b)=>a-b);
-                                if (stack.length <= 1) stack = [];
-                            } catch (e) { /* ignore stack build errors */ }
-                            // Toggle behavior: if area already bound to same anim/frame, clear it
-                            const existing = (Array.isArray(this._areaBindings) && this._areaBindings[pos.areaIndex]) ? this._areaBindings[pos.areaIndex] : null;
-                            const sameStack = (() => {
-                                if (!existing) return false;
-                                const existingStack = Array.isArray(existing.multiFrames) ? existing.multiFrames : [];
-                                if (existingStack.length !== stack.length) return false;
-                                if (existingStack.length === 0 && stack.length === 0) return true;
-                                for (let i = 0; i < stack.length; i++) if (Number(existingStack[i]) !== Number(stack[i])) return false;
-                                return true;
-                            })();
-                            if (existing && existing.anim === anim && Number(existing.index) === Number(frameIdx) && sameStack) {
-                                this.clearAreaBinding(pos.areaIndex);
-                            } else {
-                                const savedStack = stack.length >= 2 ? stack : null;
-                                this.bindArea(pos.areaIndex, anim, frameIdx, savedStack);
                             }
                         }
                     }
@@ -2722,6 +2734,7 @@ export class SpriteScene extends Scene {
     _promptPaletteSwap() {
         try {
             const srcHex = this.penColor || '#000000';
+            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
             const input = window.prompt('Palette swap target color (hex #RRGGBB or #RRGGBBAA)', srcHex);
             if (input === null || input === undefined) return;
             const targetHex = String(input).trim();
@@ -2966,6 +2979,16 @@ export class SpriteScene extends Scene {
                 if (this.keys.held('Shift')) this._selectPolygonFromSelection();
                 else this._commitPolygonFromSelection();
             }
+
+            // Grow / Shrink selection: ';' to grow, '\'' to shrink (released)
+            try {
+                if (this.keys.released(';')) {
+                    try { this._growSelection(); } catch (e) { /* ignore */ }
+                }
+                if (this.keys.released("'")) {
+                    try { this._shrinkSelection(); } catch (e) { /* ignore */ }
+                }
+            } catch (e) { /* ignore grow/shrink key errors */ }
 
             // set tool keys when we have a primary anchor point.
             // Circles support an "even-centered" mode when 4 pixels are selected
@@ -3214,6 +3237,25 @@ export class SpriteScene extends Scene {
                 if (fHeldTime > 1 || (fPressed && !this.keys.held('Alt'))) {
                     const pos = this.getPos(this.mouse && this.mouse.pos);
                     if (!pos || !pos.inside) return;
+                    // If there is an explicit selection (points or region), treat
+                    // pressing 'f' as "draw selected" (same as Alt+S) instead of
+                    // performing a flood-fill into the hovered frame.
+                    try {
+                        const hasSelection = (this.selectionPoints && this.selectionPoints.length > 0) || !!this.selectionRegion;
+                        // Respect Shift+F: when Shift is held, 'f' should perform
+                        // the flood-select behavior (different from Alt+S). Only
+                        // trigger drawSelected when there is a selection and
+                        // Shift is NOT held.
+                        if (hasSelection && !this.keys.held('Shift')) {
+                            if (window.Debug && typeof window.Debug.emit === 'function') {
+                                window.Debug.emit('drawSelected');
+                            } else if (window.Debug && typeof window.Debug.createSignal === 'function') {
+                                const sig = window.Debug.signals && window.Debug.signals.get && window.Debug.signals.get('drawSelected');
+                                if (typeof sig === 'function') sig();
+                            }
+                            return;
+                        }
+                    } catch (e) { /* ignore selection->draw dispatch errors */ }
                     const sheet = this.currentSprite;
                     // prefer the bound frame for the area under the mouse
                     let anim = this.selectedAnimation;
@@ -4614,7 +4656,13 @@ export class SpriteScene extends Scene {
 
                 if (this.maskShapesWithSelection && this.isPixelMasked(target.localX, target.localY, areaIndex)) continue;
 
-                if (typeof sheet.setPixel === 'function') {
+                // If pixel-perfect mode is active, route single-pixel writes through
+                // the pixel-perfect handler so strokes can restore L-bend pixels.
+                if (this.pixelPerfect) {
+                    try {
+                        this._applyPixelPerfectPixel(sheet, anim, frameIdx, target.localX, target.localY, color, areaIndex);
+                    } catch (e) { /* ignore pixel-perfect write errors */ }
+                } else if (typeof sheet.setPixel === 'function') {
                     try { sheet.setPixel(anim, frameIdx, target.localX, target.localY, color, 'replace'); } catch (e) { /* ignore per-pixel errors */ }
                 } else if (typeof sheet.modifyFrame === 'function') {
                     try { sheet.modifyFrame(anim, frameIdx, { x: target.localX, y: target.localY, color, blendType: 'replace' }); } catch (e) { /* ignore per-pixel errors */ }
@@ -4799,6 +4847,180 @@ export class SpriteScene extends Scene {
             this.currentTool = null;
         } catch (e) {
             console.warn('_selectPolygonFromSelection failed', e);
+        }
+    }
+
+    // Expand selection by one pixel in the 4 cardinal directions per-area.
+    _growSelection() {
+        try {
+            const sheet = this.currentSprite;
+            if (!sheet) return;
+            const slice = (sheet && sheet.slicePx) ? sheet.slicePx : 1;
+
+            // Build initial points list from explicit points or region fallback
+            let pts = (this.selectionPoints && this.selectionPoints.length > 0) ? this.selectionPoints.slice() : [];
+            if ((!pts || pts.length === 0) && this.selectionRegion) {
+                pts = this._snapshotToPoints({ type: 'region', start: this.selectionRegion.start, end: this.selectionRegion.end, areaIndex: (typeof this.selectionRegion.areaIndex === 'number') ? this.selectionRegion.areaIndex : null });
+            }
+            if (!pts || pts.length === 0) return;
+
+            // Determine target area indices to operate on.
+            const areaSet = new Set();
+            const anyGlobal = pts.some(p => p.areaIndex === null || p.areaIndex === undefined);
+            if (this.tilemode) {
+                if (anyGlobal) {
+                    for (let i = 0; Array.isArray(this._tileIndexToCoord) && i < this._tileIndexToCoord.length; i++) {
+                        if (this._isTileActive && !this._isTileActive(this._tileIndexToCoord[i].col, this._tileIndexToCoord[i].row)) continue;
+                        areaSet.add(i);
+                    }
+                } else {
+                    for (const p of pts) if (typeof p.areaIndex === 'number') areaSet.add(p.areaIndex);
+                }
+            } else {
+                areaSet.add(null);
+            }
+
+            const nextSel = [];
+            const seen = new Set();
+
+            for (const areaIdx of Array.from(areaSet)) {
+                // Build mask for this area
+                const w = slice, h = slice;
+                const n = w * h;
+                const mask = new Uint8Array(n);
+                for (const p of pts) {
+                    const pa = (typeof p.areaIndex === 'number') ? p.areaIndex : null;
+                    if (pa !== null && areaIdx !== null && pa !== areaIdx) continue;
+                    if (pa === null && this.tilemode && areaIdx === null) continue; // skip invalid
+                    const x = p.x|0; const y = p.y|0;
+                    if (x < 0 || y < 0 || x >= w || y >= h) continue;
+                    mask[y * w + x] = 1;
+                }
+
+                // Expand by neighbors into out. Use 8-way when Shift held.
+                const useDiagonals = !!(this.keys && this.keys.held && this.keys.held('Shift'));
+                const out = new Uint8Array(n);
+                for (let y = 0; y < h; y++) {
+                    for (let x = 0; x < w; x++) {
+                        const i = y * w + x;
+                        if (mask[i]) {
+                            out[i] = 1;
+                            if (x > 0) out[i - 1] = 1;
+                            if (x < w - 1) out[i + 1] = 1;
+                            if (y > 0) out[i - w] = 1;
+                            if (y < h - 1) out[i + w] = 1;
+                            if (useDiagonals) {
+                                if (x > 0 && y > 0) out[i - w - 1] = 1;
+                                if (x < w - 1 && y > 0) out[i - w + 1] = 1;
+                                if (x > 0 && y < h - 1) out[i + w - 1] = 1;
+                                if (x < w - 1 && y < h - 1) out[i + w + 1] = 1;
+                            }
+                        }
+                    }
+                }
+
+                for (let y = 0; y < h; y++) {
+                    for (let x = 0; x < w; x++) {
+                        const i = y * w + x;
+                        if (!out[i]) continue;
+                        const key = `${areaIdx === null ? 'null' : areaIdx}:${x},${y}`;
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        nextSel.push({ x, y, areaIndex: (typeof areaIdx === 'number') ? areaIdx : null });
+                    }
+                }
+            }
+
+            this.selectionPoints = nextSel;
+            this.selectionRegion = null;
+        } catch (e) {
+            console.warn('_growSelection failed', e);
+        }
+    }
+
+    // Contract selection by removing pixels at the outer boundary (4-direction erosion).
+    _shrinkSelection() {
+        try {
+            const sheet = this.currentSprite;
+            if (!sheet) return;
+            const slice = (sheet && sheet.slicePx) ? sheet.slicePx : 1;
+
+            let pts = (this.selectionPoints && this.selectionPoints.length > 0) ? this.selectionPoints.slice() : [];
+            if ((!pts || pts.length === 0) && this.selectionRegion) {
+                pts = this._snapshotToPoints({ type: 'region', start: this.selectionRegion.start, end: this.selectionRegion.end, areaIndex: (typeof this.selectionRegion.areaIndex === 'number') ? this.selectionRegion.areaIndex : null });
+            }
+            if (!pts || pts.length === 0) return;
+
+            const areaSet = new Set();
+            const anyGlobal = pts.some(p => p.areaIndex === null || p.areaIndex === undefined);
+            if (this.tilemode) {
+                if (anyGlobal) {
+                    for (let i = 0; Array.isArray(this._tileIndexToCoord) && i < this._tileIndexToCoord.length; i++) {
+                        if (this._isTileActive && !this._isTileActive(this._tileIndexToCoord[i].col, this._tileIndexToCoord[i].row)) continue;
+                        areaSet.add(i);
+                    }
+                } else {
+                    for (const p of pts) if (typeof p.areaIndex === 'number') areaSet.add(p.areaIndex);
+                }
+            } else {
+                areaSet.add(null);
+            }
+
+            const nextSel = [];
+            const seen = new Set();
+
+            for (const areaIdx of Array.from(areaSet)) {
+                const w = slice, h = slice;
+                const n = w * h;
+                const mask = new Uint8Array(n);
+                for (const p of pts) {
+                    const pa = (typeof p.areaIndex === 'number') ? p.areaIndex : null;
+                    if (pa !== null && areaIdx !== null && pa !== areaIdx) continue;
+                    const x = p.x|0; const y = p.y|0;
+                    if (x < 0 || y < 0 || x >= w || y >= h) continue;
+                    mask[y * w + x] = 1;
+                }
+
+                const out = new Uint8Array(n);
+                const useDiagonals = !!(this.keys && this.keys.held && this.keys.held('Shift'));
+                for (let y = 0; y < h; y++) {
+                    for (let x = 0; x < w; x++) {
+                        const i = y * w + x;
+                        if (!mask[i]) continue;
+                        // For shrink, require neighbors in cardinal directions;
+                        // if Shift held, require all 8 neighbors to be present.
+                        const left = (x > 0) ? mask[i - 1] : 0;
+                        const right = (x < w - 1) ? mask[i + 1] : 0;
+                        const up = (y > 0) ? mask[i - w] : 0;
+                        const down = (y < h - 1) ? mask[i + w] : 0;
+                        if (useDiagonals) {
+                            const ul = (x > 0 && y > 0) ? mask[i - w - 1] : 0;
+                            const ur = (x < w - 1 && y > 0) ? mask[i - w + 1] : 0;
+                            const dl = (x > 0 && y < h - 1) ? mask[i + w - 1] : 0;
+                            const dr = (x < w - 1 && y < h - 1) ? mask[i + w + 1] : 0;
+                            if (left && right && up && down && ul && ur && dl && dr) out[i] = 1;
+                        } else {
+                            if (left && right && up && down) out[i] = 1;
+                        }
+                    }
+                }
+
+                for (let y = 0; y < h; y++) {
+                    for (let x = 0; x < w; x++) {
+                        const i = y * w + x;
+                        if (!out[i]) continue;
+                        const key = `${areaIdx === null ? 'null' : areaIdx}:${x},${y}`;
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        nextSel.push({ x, y, areaIndex: (typeof areaIdx === 'number') ? areaIdx : null });
+                    }
+                }
+            }
+
+            this.selectionPoints = nextSel;
+            this.selectionRegion = null;
+        } catch (e) {
+            console.warn('_shrinkSelection failed', e);
         }
     }
 
@@ -5249,6 +5471,10 @@ export class SpriteScene extends Scene {
 
             const writeRGBAWorld = (wx, wy, r, g, b, a) => {
                 if (a === 0) return;
+                // In non-tile mode, do not wrap pixels outside the single frame bounds.
+                if (!this.tilemode) {
+                    if (wx < 0 || wy < 0 || wx >= slice || wy >= slice) return;
+                }
                 const t = this._worldPixelToTile(wx, wy, slice);
                 if (!t) return;
                 if (this.tilemode && !this._isTileActive(t.col, t.row)) return;
@@ -7219,10 +7445,16 @@ export class SpriteScene extends Scene {
             }
 
             if (mousePixelPos) {
+                // Color tokens: default white, switch to yellow when pixel-perfect pen enabled
+                const previewLineColor = this.pixelPerfect ? '#FFFF0088' : '#FFFFFF88';
+                const previewFillColor = this.pixelPerfect ? '#FFFF0044' : '#FFFFFF44';
+                const cursorFillColor = this.pixelPerfect ? '#FFFF0022' : '#FFFFFF22';
+                const cursorOutlineColor = this.pixelPerfect ? '#FFFF00EE' : '#FFFFFFEE';
+
                 if (this.currentTool === 'line' && this.selectionPoints.length === 1) {
-                    this.drawLine(this.selectionPoints[0], mousePixelPos, '#FFFFFF88');
+                    this.drawLine(this.selectionPoints[0], mousePixelPos, previewLineColor);
                 } else if (this.currentTool === 'box' && this.selectionPoints.length === 1) {
-                    this.drawBox(this.selectionPoints[0], mousePixelPos, '#FFFFFF88', this.keys.held('Alt'));
+                    this.drawBox(this.selectionPoints[0], mousePixelPos, previewLineColor, this.keys.held('Alt'));
                 } else if (this.currentTool === 'circle' && this.selectionPoints && this.selectionPoints.length > 0 && typeof this.computeCirclePixels === 'function') {
                     // For circles, allow preview with either a single anchor pixel
                     // or an even-centered 2x2 anchor (4 pixels). In both cases we
@@ -7235,12 +7467,12 @@ export class SpriteScene extends Scene {
                     for (const p of circlePixels) {
                         const cellX = dstPos.x + p.x * cellW;
                         const cellY = dstPos.y + p.y * cellH;
-                        this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFF44', true);
+                        this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), previewFillColor, true);
                     }
                 }
 
                 // draw brush-sized cursor (NxN where N is this.brushSize)
-                try {
+                    try {
                     const side = Math.max(1, Math.min(15, this.brushSize || 1));
                     const half = Math.floor((side - 1) / 2);
                     const sx = mousePixelPos.x - half;
@@ -7249,13 +7481,13 @@ export class SpriteScene extends Scene {
                     const drawY = dstPos.y + sy * cellH;
                     const drawW = side * cellW;
                     const drawH = side * cellH;
-                    this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), '#FFFFFF22', true);
-                    this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), '#FFFFFFEE', false, true, scaleOutline(2), '#FFFFFFEE');
+                    this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), cursorFillColor, true);
+                    this.Draw.rect(new Vector(drawX, drawY), new Vector(drawW, drawH), cursorOutlineColor, false, true, scaleOutline(2), cursorOutlineColor);
                 } catch (e) {
                     const cellX = dstPos.x + mousePixelPos.x * cellW;
                     const cellY = dstPos.y + mousePixelPos.y * cellH;
-                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFF22', true);
-                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), '#FFFFFFEE', false, true, scaleOutline(2), '#FFFFFFEE');
+                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), cursorFillColor, true);
+                    this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), cursorOutlineColor, false, true, scaleOutline(2), cursorOutlineColor);
                 }
             }
         } catch (e) {

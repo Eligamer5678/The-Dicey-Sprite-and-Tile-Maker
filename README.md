@@ -42,12 +42,14 @@
 - j to grab the average color
 - up/down keys to move the frame
 - '/' to duplicate frame
-- f to fill region
-- [ for vertical mirror, and ] for horizontal mirroring
+- f to fill region (or if stuff selected, fill selected)
+- ] for vertical mirror, and [ for horizontal mirroring
 - shift+f to select region
 - a to toggle pixel perfect drawing when the pen size is 1 (i.e. cornercutting)
 - ctrl + z = Undo
 - ` to resize canvas (instead of 16x16)
+- ; grow selection
+- ' shrink selection
 
 - Press the upper left corner to access the console
 
@@ -82,8 +84,8 @@
 - msg() to message players.
 
 - **Latest update** - as of 2/9/26
-- Added selection keyframing
-- Added pallet swap (click p on the base color of a pallet)
+- Made f do fill selected when stuff is selected, as alt+s felt unintuitive
+- Make ; grow selection & ' shrink selection
 
 - **Features in development**
 - Improved UI

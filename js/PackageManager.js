@@ -139,6 +139,7 @@ export default class PackageManager {
                 // Prompt for filename; if the user cancels (null), abort instead of downloading
                 let userFileName = filename;
                 if (typeof window.prompt === 'function') {
+                    try { if (this.scene && this.scene.keys && typeof this.scene.keys.pause === 'function') this.scene.keys.pause(); if (this.scene && this.scene.mouse && typeof this.scene.mouse.pause === 'function') this.scene.mouse.pause(); } catch(e){}
                     const res = window.prompt('Enter filename to save', filename);
                     if (res === null) {
                         console.log('User cancelled filename prompt. Export aborted.');
@@ -320,6 +321,7 @@ export default class PackageManager {
                             img.src = dataUrl; await p;
                             let defaultSlice = 16;
                             try { const m = f.name.match(/(\d{2,3})/); if (m) defaultSlice = parseInt(m[1], 10); } catch (e) {}
+                            try { if (this.scene && this.scene.keys && typeof this.scene.keys.pause === 'function') this.scene.keys.pause(); if (this.scene && this.scene.mouse && typeof this.scene.mouse.pause === 'function') this.scene.mouse.pause(); } catch(e){}
                             const sliceStr = window.prompt(`Enter tile slice size (px) for ${f.name}:`, String(defaultSlice));
                             const slicePx = Math.max(1, Number(sliceStr) || defaultSlice);
                             const id = f.name.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -518,6 +520,7 @@ export default class PackageManager {
             try {
                 let userFileName = filename;
                 if (typeof window.prompt === 'function') {
+                    try { if (this.scene && this.scene.keys && typeof this.scene.keys.pause === 'function') this.scene.keys.pause(); if (this.scene && this.scene.mouse && typeof this.scene.mouse.pause === 'function') this.scene.mouse.pause(); } catch(e){}
                     const res = window.prompt('Enter filename to save', filename);
                     if (res === null) { console.log('User cancelled filename prompt.'); return false; }
                     userFileName = (res && res.trim()) ? res.trim() : filename;

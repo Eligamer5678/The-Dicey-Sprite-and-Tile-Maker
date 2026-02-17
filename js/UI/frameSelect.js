@@ -241,6 +241,7 @@ export default class FrameSelect {
             // Ask whether this file should be treated as a spritesheet (default) or tilesheet
             let importMode = 'spritesheet';
             try {
+                try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                 const choice = window.prompt('Import as? 1 = spritesheet, 2 = tilesheet', '1');
                 if (choice !== null) {
                     const v = String(choice).trim();
@@ -267,6 +268,7 @@ export default class FrameSelect {
             }
             // Prompt for slice size
             const defaultSlice = (this.sprite && this.sprite.slicePx) ? this.sprite.slicePx : 16;
+            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
             let sliceStr = window.prompt('Enter slice size (px) for frames (one tile size)', String(defaultSlice));
             if (!sliceStr) { try { if (img && img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src); } catch(e){} return; }
             let slice = parseInt(sliceStr, 10);
@@ -362,6 +364,7 @@ export default class FrameSelect {
             // Ask whether to export as spritesheet (packed) or tilesheet (current tile-mode view)
             let exportMode = 'spritesheet';
             try {
+                try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                 const choice = window.prompt('Export as? 1 = spritesheet, 2 = tilesheet', '1');
                 if (choice !== null) {
                     const v = String(choice).trim();
@@ -370,6 +373,7 @@ export default class FrameSelect {
                 }
             } catch (e) { /* ignore and keep spritesheet */ }
             const defaultName = (this.scene && this.scene.currentSprite && this.scene.currentSprite.name) ? this.scene.currentSprite.name : 'spritesheet';
+            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
             const filenamePrompt = window.prompt('Export filename', defaultName + '.png');
             // If the user cancelled the prompt (null), abort export and do not download.
             if (filenamePrompt === null) return;
@@ -378,9 +382,11 @@ export default class FrameSelect {
             let wantMeta = false;
             let chosenMetaFilename = null;
             try {
-                const wantMetaConfirm = window.confirm('Also download metadata JSON alongside the PNG?');
+                    try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                    const wantMetaConfirm = window.confirm('Also download metadata JSON alongside the PNG?');
                 if (wantMetaConfirm) {
                     const suggestedMeta = (filename && filename.toLowerCase().endsWith('.png')) ? filename.replace(/\.png$/i, '.json') : (filename + '.json');
+                    try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                     const metaPrompt = window.prompt('Metadata filename (Cancel to skip)', suggestedMeta);
                     if (metaPrompt !== null) {
                         chosenMetaFilename = metaPrompt || suggestedMeta;

@@ -952,6 +952,7 @@ export class TitleScene extends Scene {
                 // Prompt for filename; if the user cancels (null), abort instead of downloading
                 let userFileName = filename;
                 if (typeof window.prompt === 'function') {
+                    try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                     const res = window.prompt('Enter filename to save', filename);
                     if (res === null) {
                         console.log('User cancelled filename prompt. Export aborted.');
@@ -1049,6 +1050,7 @@ export class TitleScene extends Scene {
                                 const m = f.name.match(/(\d{2,3})/);
                                 if (m) defaultSlice = parseInt(m[1], 10);
                             } catch (e) {}
+                            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                             const sliceStr = window.prompt(`Enter tile slice size (px) for ${f.name}:`, String(defaultSlice));
                             const slicePx = Math.max(1, Number(sliceStr) || defaultSlice);
                             const id = f.name.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, '_');
