@@ -328,7 +328,7 @@ export class SpriteScene extends Scene {
         // palette swap variant step depth (number of +/- steps per channel)
         this.paletteStepMax = 3;
         // zoom limits and smoothing params
-        this.minZoom = 0.25;
+        this.minZoom = 0.05;
         this.maxZoom = 16;
         this.zoomSmooth = 8; // damping (larger = snappier)
         this.zoomImpulse = 12; // multiplier for wheel->velocity impulse
@@ -367,6 +367,10 @@ export class SpriteScene extends Scene {
         this.selectionRegion = null;
         // clipboard stores { w, h, data(Uint8ClampedArray), originOffset: {ox,oy} }
         this.clipboard = null;
+        // tile clipboard (render-only tilemode): { binding, transform }
+        this._tileClipboard = null;
+        // tile selection set (render-only tilemode)
+        this._tileSelection = new Set();
         // When true, pen pastes clipboard content each frame (custom brush)
         this._clipboardBrushActive = false;
         // Latch to avoid re-triggering clipboard brush activation every frame while keys are held
@@ -1575,8 +1579,8 @@ export class SpriteScene extends Scene {
                 try { area.renderOnly = this._isSimTooSmall(area); } catch (e) { area.renderOnly = false; }
             }
 
-            // If this area is render-only (too small), treat it as non-interactive for edits
-            // but still surface tile coordinates and area index so activation/binding toggles can work.
+            // If this area is render-only (too small), treat it as non-interactive for pixel edits
+            // but still surface tile coordinates and area index so render-only tilemode can paint tiles.
             if (area.renderOnly) {
                 this._activeDrawAreaIndex = null;
                 const col = (areaCoord && areaCoord.col !== undefined) ? areaCoord.col : (area.tileCol !== undefined ? area.tileCol : null);
@@ -1612,7 +1616,8 @@ export class SpriteScene extends Scene {
             const px = Math.min(this.currentSprite.slicePx - 1, Math.max(0, Math.floor(relX * this.currentSprite.slicePx)));
             const py = Math.min(this.currentSprite.slicePx - 1, Math.max(0, Math.floor(relY * this.currentSprite.slicePx)));
             const inside = tileActive && !(px === undefined || py === undefined) && (mx >= area.dstPos.x && my >= area.dstPos.y && mx <= area.dstPos.x + area.dstW && my <= area.dstPos.y + area.dstH);
-            return { inside, x: px, y: py, relX, relY, areaIndex: this._activeDrawAreaIndex, tileCol: areaCoord ? areaCoord.col : null, tileRow: areaCoord ? areaCoord.row : null, tileActive };
+            const renderOnly = !!(area && area.renderOnly);
+            return { inside, renderOnly, x: px, y: py, relX, relY, areaIndex: this._activeDrawAreaIndex, tileCol: areaCoord ? areaCoord.col : null, tileRow: areaCoord ? areaCoord.row : null, tileActive };
         } catch (e) {
             return null;
         }
@@ -1671,6 +1676,8 @@ export class SpriteScene extends Scene {
         this._clipboardBrushBlinkPhase = (this._clipboardBrushBlinkPhase || 0) + tickDelta;
         this.mouse.setMask(0)
         this.FrameSelect.update()
+        // Keep tile brush binding in sync with current selection by default
+        this._tileBrushBinding = { anim: this.selectedAnimation, index: this.selectedFrame }
         this.mouse.setPower(0)
         this._ensureMirrorWrapper()
         // When the frame/animation changes, apply any interpolated selection for the new frame.
@@ -2180,6 +2187,11 @@ export class SpriteScene extends Scene {
             
             // Use the shared helper to map mouse -> pixel coords
             const pos = this.getPos(this.mouse.pos);
+            // When in render-only tilemode, treat the pen as a tile brush (place/erase bindings per tile).
+            if (this.tilemode && pos && pos.renderOnly) {
+                this._handleRenderOnlyTilePaint(pos);
+                return;
+            }
             if (!pos || !pos.inside) return;
             const sheet = this.currentSprite;
             // If clipboard brush mode is active, paste (left) or erase (right) with clipboard shape instead of square brush
@@ -2283,6 +2295,103 @@ export class SpriteScene extends Scene {
         this._pixelPerfectStrokeActive = false;
         this._pixelPerfectHistory = [];
         this._pixelPerfectOriginals = new Map();
+    }
+
+    // Tile brush handler for render-only tilemode (zoomed-out tilemap editing).
+    _handleRenderOnlyTilePaint(pos) {
+        try {
+            if (!this.tilemode) return;
+            const center = (() => {
+                if (pos && pos.tileCol !== null && pos.tileCol !== undefined && pos.tileRow !== null && pos.tileRow !== undefined) {
+                    return { col: pos.tileCol, row: pos.tileRow };
+                }
+                if (typeof pos?.areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                    const cr = this._tileIndexToCoord[pos.areaIndex];
+                    if (cr) return { col: cr.col, row: cr.row };
+                }
+                return null;
+            })();
+            if (!center) return;
+
+            const side = Math.max(1, Math.min(15, this.brushSize || 1));
+            const tiles = this._tileBrushTiles(center.col, center.row, side);
+            if (!tiles.length) return;
+
+            // Build the frame stack so tile painting mirrors the 'y' bind behavior (multi-select aware).
+            const buildStack = () => {
+                const frames = [];
+                const pushFrame = (v) => {
+                    if (!Number.isFinite(v)) return;
+                    const n = Number(v);
+                    if (!frames.includes(n)) frames.push(n);
+                };
+                try { pushFrame(this.selectedFrame); } catch (e) {}
+                try {
+                    const fs = this.FrameSelect;
+                    if (fs && fs._multiSelected && fs._multiSelected.size > 0) {
+                        const arr = Array.from(fs._multiSelected).filter(i => Number.isFinite(i)).map(Number).sort((a,b)=>a-b);
+                        for (const i of arr) pushFrame(i);
+                    }
+                } catch (e) { /* ignore multi-select gather errors */ }
+                const deduped = Array.from(new Set(frames)).sort((a,b)=>a-b);
+                return (deduped.length > 1) ? deduped : [];
+            };
+
+            const stack = buildStack();
+
+            // Binding to apply comes from tile eyedrop (if any) or current selection
+            const baseBinding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
+            const baseTransform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
+
+            if (this.mouse.held('left')) {
+                if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
+                for (const t of tiles) {
+                    const idx = (typeof t.areaIndex === 'number') ? t.areaIndex : this._getAreaIndexForCoord(t.col, t.row);
+                    if (idx === null || idx === undefined) continue;
+                    this._activateTile(t.col, t.row);
+                    const entry = { ...baseBinding };
+                    if (stack.length > 0) entry.multiFrames = stack;
+                    this._areaBindings[idx] = entry;
+                    if (!this._areaTransforms) this._areaTransforms = [];
+                    this._areaTransforms[idx] = baseTransform ? { ...baseTransform } : this._areaTransforms[idx];
+                }
+            } else if (this.mouse.held('right')) {
+                // If tiles are selected, right-drag acts as deselect instead of erase
+                if (this._tileSelection && this._tileSelection.size > 0) {
+                    for (const t of tiles) this._tileSelection.delete(this._tileKey(t.col, t.row));
+                    this.mouse.pause(0.2); // prevent the same press from leaking into erase
+                    return;
+                } else {
+                    for (const t of tiles) {
+                        const idx = (typeof t.areaIndex === 'number') ? t.areaIndex : this._getAreaIndexForCoord(t.col, t.row);
+                        if (idx === null || idx === undefined) continue;
+                        try { this._deactivateTile(t.col, t.row); } catch (e) { /* ignore */ }
+                        if (Array.isArray(this._areaBindings)) this._areaBindings[idx] = null;
+                        if (Array.isArray(this._areaTransforms)) this._areaTransforms[idx] = null;
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('render-only tile paint failed', e);
+        }
+    }
+
+    // Compute tile footprint for a brush centered at (col,row) covering `side` tiles per edge.
+    _tileBrushTiles(centerCol, centerRow, side) {
+        const tiles = [];
+        const n = Math.max(1, Math.min(1000, Number(side) || 1));
+        const start = -Math.floor(n / 2);
+        for (let ddy = 0; ddy < n; ddy++) {
+            const dy = start + ddy;
+            for (let ddx = 0; ddx < n; ddx++) {
+                const dx = start + ddx;
+                const col = centerCol + dx;
+                const row = centerRow + dy;
+                const areaIndex = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(col, row) : null;
+                tiles.push({ col, row, areaIndex });
+            }
+        }
+        return tiles;
     }
 
     // Ensure the current sprite has mirror-aware wrappers so any edit (not just pen) is mirrored.
@@ -2751,12 +2860,24 @@ export class SpriteScene extends Scene {
         try {
             if (!this.mouse) return;
 
-            // Right click (without Shift) to cancel selection (also clear any region selection)
-            if (this.mouse.pressed('right') && !this.keys.held('Shift') && this.selectionPoints.length !== 0) {
-                this.selectionPoints = [];
-                this.currentTool = null;
-                this.selectionRegion = null;
-                this.mouse.pause(0.3)
+            const pos = this.getPos(this.mouse.pos);
+            const renderOnlyTile = !!(this.tilemode && pos && pos.renderOnly);
+            if (renderOnlyTile && pos && pos.tileCol !== undefined && pos.tileRow !== undefined) {
+                this._tileHoverAnchor = { col: pos.tileCol, row: pos.tileRow };
+            }
+
+            // Right click (without Shift) clears existing selection(s); when none, allow erase to proceed.
+            if (this.mouse.pressed('right') && !this.keys.held('Shift')) {
+                const hadPixelSelection = (this.selectionPoints && this.selectionPoints.length) || this.selectionRegion;
+                const hadTileSelection = renderOnlyTile && this._tileSelection && this._tileSelection.size > 0;
+                if (hadPixelSelection || hadTileSelection) {
+                    this.selectionPoints = [];
+                    this.currentTool = null;
+                    this.selectionRegion = null;
+                    if (hadTileSelection) this._tileSelection.clear();
+                    this.mouse.pause(0.2);
+                    return true;
+                }
             }
 
             // Clear clipboard preview when Alt is released or preview expired
@@ -2764,6 +2885,13 @@ export class SpriteScene extends Scene {
                 this.clipboardPreview = false;
                 this._clipboardPreviewDragging = null;
                 this.keys.resetPasscode();
+            }
+
+            // In render-only tilemode, right-click clears the current tile selection (no erase).
+            if (renderOnlyTile && this.mouse.pressed('right') && !this.keys.held('shift') && this._tileSelection && this._tileSelection.size) {
+                this._tileSelection.clear();
+                this.mouse.pause(0.2);
+                return true;
             }
 
             // Keyframing: Shift+I for selection, I for frame (uses selection mask if present)
@@ -2776,6 +2904,21 @@ export class SpriteScene extends Scene {
             let ctrlHeld = this.keys.held('Control',true)
             if (ctrlHeld) {
                 try {
+                    // Tile eyedrop (render-only tilemode): capture tile binding + transform
+                    try {
+                        if (renderOnlyTile && typeof pos.areaIndex === 'number') {
+                            const binding = this.getAreaBinding(pos.areaIndex);
+                            const transform = (Array.isArray(this._areaTransforms) && this._areaTransforms[pos.areaIndex]) ? this._areaTransforms[pos.areaIndex] : null;
+                            if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                                this.selectedAnimation = binding.anim;
+                                this.selectedFrame = Number(binding.index);
+                            }
+                            this._tileBrushBinding = binding ? { ...binding } : { anim: this.selectedAnimation, index: this.selectedFrame };
+                            this._tileBrushTransform = transform ? { rot: transform.rot || 0, flipH: !!transform.flipH } : null;
+                            return;
+                        }
+                    } catch (e) { /* ignore tile eyedrop errors */ }
+
                     // initialize stored original color when Control first held
                     if (this._eyedropperOriginalColor === undefined) {
                         this._eyedropperOriginalColor = this.penColor;
@@ -2804,14 +2947,14 @@ export class SpriteScene extends Scene {
                     if (this._eyedropperCancelled) {
                         // noop while cancelled
                     } else {
-                        const pos = this.getPos(this.mouse.prevPos);
-                        if (pos && pos.inside && this.currentSprite && (ctrlHeld<0.05 || ctrlHeld > 0.3)) {
+                        const posPrev = this.getPos(this.mouse.prevPos);
+                        if (posPrev && posPrev.inside && this.currentSprite && (ctrlHeld<0.05 || ctrlHeld > 0.3)) {
                             const sheet = this.currentSprite;
                             // Prefer the frame bound to the area under the mouse. Fall back to selected frame.
                             let anim = this.selectedAnimation;
                             let frameIdx = this.selectedFrame;
-                            if (typeof pos.areaIndex === 'number') {
-                                const binding = this.getAreaBinding(pos.areaIndex);
+                            if (typeof posPrev.areaIndex === 'number') {
+                                const binding = this.getAreaBinding(posPrev.areaIndex);
                                 if (binding && binding.anim !== undefined && binding.index !== undefined) {
                                     anim = binding.anim;
                                     frameIdx = Number(binding.index);
@@ -2821,7 +2964,7 @@ export class SpriteScene extends Scene {
                             if (frameCanvas) {
                                 const ctx = frameCanvas.getContext('2d');
                                 try {
-                                    const d = ctx.getImageData(pos.x, pos.y, 1, 1).data;
+                                    const d = ctx.getImageData(posPrev.x, posPrev.y, 1, 1).data;
                                     // set internal pen color including alpha
                                     const hex8 = this.rgbaToHex(d[0], d[1], d[2], d[3]);
                                     this.penColor = hex8;
@@ -2853,13 +2996,13 @@ export class SpriteScene extends Scene {
             // Middle-click eyedropper: immediate sample on middle button press
             try {
                 if (this.mouse.held('middle')) {
-                    const pos = this.getPos(this.mouse.pos);
-                    if (pos && pos.inside && this.currentSprite) {
+                    const posMid = this.getPos(this.mouse.pos);
+                    if (posMid && posMid.inside && this.currentSprite) {
                         const sheet = this.currentSprite;
                         let anim = this.selectedAnimation;
                         let frameIdx = this.selectedFrame;
-                        if (typeof pos.areaIndex === 'number') {
-                            const binding = this.getAreaBinding(pos.areaIndex);
+                        if (typeof posMid.areaIndex === 'number') {
+                            const binding = this.getAreaBinding(posMid.areaIndex);
                             if (binding && binding.anim !== undefined && binding.index !== undefined) {
                                 anim = binding.anim;
                                 frameIdx = Number(binding.index);
@@ -2869,7 +3012,7 @@ export class SpriteScene extends Scene {
                         if (frameCanvas) {
                             const ctx = frameCanvas.getContext('2d');
                             try {
-                                const d = ctx.getImageData(pos.x, pos.y, 1, 1).data;
+                                const d = ctx.getImageData(posMid.x, posMid.y, 1, 1).data;
                                 const hex8 = this.rgbaToHex(d[0], d[1], d[2], d[3]);
                                 this.penColor = hex8;
                                 if (this._colorInput) {
@@ -2888,12 +3031,22 @@ export class SpriteScene extends Scene {
             // Shift + Right click to remove points under the cursor (also
             // respecting brush size).
             if (this.keys.held('Shift')) {
-                const pos = this.getPos(this.mouse.pos);
-                if (pos && pos.inside) {
+                if (renderOnlyTile) {
+                    // Tile selection in render-only tilemode
+                    const tileBrush = this._tileBrushTiles(pos.tileCol ?? 0, pos.tileRow ?? 0, this.brushSize || 1);
+                    if (this.mouse.held('left')) {
+                        for (const t of tileBrush) this._tileSelection.add(this._tileKey(t.col, t.row));
+                    } else if (this.mouse.held('right')) {
+                        for (const t of tileBrush) this._tileSelection.delete(this._tileKey(t.col, t.row));
+                    }
+                    return;
+                }
+                const posSel = this.getPos(this.mouse.pos);
+                if (posSel && posSel.inside) {
                     if (this.mouse.held('left')) {
                         const side = Math.max(1, Math.min(15, this.brushSize || 1));
                         const half = Math.floor((side - 1) / 2);
-                        const areaIndex = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
+                        const areaIndex = (typeof posSel.areaIndex === 'number') ? posSel.areaIndex : null;
                         const slice = (this.currentSprite && this.currentSprite.slicePx) ? this.currentSprite.slicePx : 1;
                         // map a local pixel (relative to the hovered tile) to its owning tile in tilemode
                         const mapToTile = (lx, ly) => {
@@ -2911,8 +3064,8 @@ export class SpriteScene extends Scene {
                         };
                         for (let yy = 0; yy < side; yy++) {
                             for (let xx = 0; xx < side; xx++) {
-                                const px = pos.x - half + xx;
-                                const py = pos.y - half + yy;
+                                const px = posSel.x - half + xx;
+                                const py = posSel.y - half + yy;
                                 const mapped = mapToTile(px, py);
                                 const tgtArea = (typeof mapped.areaIndex === 'number') ? mapped.areaIndex : areaIndex;
                                 const exists = this.selectionPoints.some(p => p.x === mapped.x && p.y === mapped.y && p.areaIndex === tgtArea);
@@ -2927,7 +3080,7 @@ export class SpriteScene extends Scene {
                     } else if (this.mouse.held('right')) {
                         const side = Math.max(1, Math.min(15, this.brushSize || 1));
                         const half = Math.floor((side - 1) / 2);
-                        const areaIndex = (typeof pos.areaIndex === 'number') ? pos.areaIndex : null;
+                        const areaIndex = (typeof posSel.areaIndex === 'number') ? posSel.areaIndex : null;
                         const slice = (this.currentSprite && this.currentSprite.slicePx) ? this.currentSprite.slicePx : 1;
                         const mapToTile = (lx, ly) => {
                             if (!this.tilemode) return { x: lx, y: ly, areaIndex };
@@ -2961,7 +3114,7 @@ export class SpriteScene extends Scene {
                                     }
                                 }
                             }
-                            const mappedPos = mapToTile(pos.x, pos.y);
+                            const mappedPos = mapToTile(posSel.x, posSel.y);
                             const targetArea = (typeof mappedPos.areaIndex === 'number') ? mappedPos.areaIndex : areaIndex;
                             if (pArea !== targetArea) return true;
                             const dx = pX - mappedPos.x;
@@ -2995,7 +3148,9 @@ export class SpriteScene extends Scene {
             // and brushSize === 2 (treated as a 2x2 center block).
             const hasSingleAnchor = (this.selectionPoints.length === 1);
             const hasEvenCenterAnchor = (this.selectionPoints.length === 4 && this.brushSize === 2);
-            if (hasSingleAnchor || hasEvenCenterAnchor) {
+            // Tile-mode: use tile selection set instead of pixel selectionPoints
+            const tileHasSingle = (this.tilemode && this._tileSelection && this._tileSelection.size === 1);
+            if (hasSingleAnchor || hasEvenCenterAnchor || tileHasSingle) {
                 if (hasSingleAnchor && this.keys.pressed('l')) {
                     this.currentTool = 'line';
                 }
@@ -3006,10 +3161,14 @@ export class SpriteScene extends Scene {
                     this.currentTool = 'circle';
                 }
 
-                // If user clicks left (without Shift) while a tool is active, commit the selection
-                // This draws the computed pixels into the current sprite/frame. We then briefly
-                // pause the mouse so the next pen stroke doesn't immediately fire from the
-                // same click event.
+                // Tile-mode: support tile shape tools using a single tile anchor
+                if (this.tilemode && tileHasSingle) {
+                    if (this.keys.pressed('l')) this.currentToolTile = 'line';
+                    if (this.keys.pressed('b')) this.currentToolTile = 'box';
+                    if (this.keys.pressed('o')) this.currentToolTile = 'circle';
+                }
+
+                // If user clicks left (without Shift) while a pixel tool is active, commit the selection
                 if (!this.keys.held('Shift') && this.mouse.pressed('left') && this.currentTool) {
                     const pos = this.getPos(this.mouse.pos);
                     const anchor = this.selectionPoints[0];
@@ -3025,8 +3184,84 @@ export class SpriteScene extends Scene {
                         const end = { x: target.x, y: target.y };
                         this.commitSelection(start, end);
                         try { if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.1); } catch (e) {}
-                        // keep selection points so user can continue editing; just exit the active tool
                         this.currentTool = null;
+                    }
+                }
+
+                // Tile-mode: if a tile tool is active and user clicks, apply tile-shaped action
+                if (this.tilemode && this.currentToolTile && this.mouse.pressed('left') && this._tileSelection && this._tileSelection.size === 1) {
+                    const anchorKey = Array.from(this._tileSelection)[0];
+                    const anchorTile = this._parseTileKey(anchorKey);
+                    const pos = this.getPos(this.mouse.pos);
+                    let targetTile = null;
+                    if (pos && pos.renderOnly && typeof pos.tileCol === 'number') targetTile = { col: pos.tileCol, row: pos.tileRow };
+                    if (!targetTile) targetTile = anchorTile;
+                    if (anchorTile && targetTile) {
+                        // compute interior vs border tiles so Alt (filled) vs outline-only matches preview
+                        const interior = [];
+                        const border = [];
+                        const x0 = anchorTile.col, y0 = anchorTile.row, x1 = targetTile.col, y1 = targetTile.row;
+                        if (this.currentToolTile === 'box') {
+                            const minC = Math.min(x0,x1), maxC = Math.max(x0,x1);
+                            const minR = Math.min(y0,y1), maxR = Math.max(y0,y1);
+                            for (let r = minR; r <= maxR; r++) for (let c = minC; c <= maxC; c++) {
+                                if (r === minR || r === maxR || c === minC || c === maxC) border.push({col:c,row:r});
+                                else interior.push({col:c,row:r});
+                            }
+                        } else if (this.currentToolTile === 'line') {
+                            let x = x0, y = y0;
+                            const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+                            const dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+                            let err = dx + dy;
+                            while (true) {
+                                border.push({col:x,row:y});
+                                if (x === x1 && y === y1) break;
+                                const e2 = 2 * err;
+                                if (e2 >= dy) { err += dy; x += sx; }
+                                if (e2 <= dx) { err += dx; y += sy; }
+                            }
+                        } else if (this.currentToolTile === 'circle') {
+                            const dx = x1 - x0, dy = y1 - y0;
+                            const r = Math.max(Math.abs(dx), Math.abs(dy));
+                            const r2 = r * r;
+                            const borderBand = Math.max(1, r);
+                            for (let rr = -r; rr <= r; rr++) for (let cc = -r; cc <= r; cc++) {
+                                const dist2 = cc*cc + rr*rr;
+                                const isBorder = (dist2 >= r2 - borderBand && dist2 <= r2 + borderBand);
+                                const isInside = (dist2 <= r2);
+                                if (isBorder) border.push({col: x0+cc, row: y0+rr});
+                                else if (isInside) interior.push({col: x0+cc, row: y0+rr});
+                            }
+                        }
+
+                        const applyTiles = [];
+                        const isAlt = (this.keys && typeof this.keys.held === 'function' && this.keys.held('Alt'));
+                        if (this.currentToolTile === 'line') {
+                            applyTiles.push(...border);
+                        } else {
+                            if (isAlt) applyTiles.push(...interior);
+                            applyTiles.push(...border);
+                        }
+
+                        if (applyTiles.length) {
+                            if (this.keys.held('Shift')) {
+                                for (const t of applyTiles) this._tileSelection.add(this._tileKey(t.col,t.row));
+                            } else {
+                                // apply current tile brush binding to tiles
+                                const binding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
+                                const transform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
+                                if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
+                                if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
+                                for (const t of applyTiles) {
+                                    const idx = this._getAreaIndexForCoord(t.col, t.row);
+                                    this._activateTile(t.col, t.row);
+                                    this._areaBindings[idx] = binding ? { ...binding } : null;
+                                    this._areaTransforms[idx] = transform ? { ...transform } : this._areaTransforms[idx];
+                                }
+                            }
+                        }
+                        this.currentToolTile = null;
+                        try { if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.1); } catch (e) {}
                     }
                 }
             }
@@ -3191,17 +3426,23 @@ export class SpriteScene extends Scene {
                     // Always try to refresh from system clipboard; if it succeeds it overwrites any local copy.
                     fetchSystemClipboard(false);
                 }
+                const posForClipboard = this.getPos(this.mouse && this.mouse.pos);
+                const allowTileClipboard = !!(this.tilemode && ((posForClipboard && posForClipboard.renderOnly) || (this._tileSelection && this._tileSelection.size > 0)));
                 if (this.keys.pressed('c')) {
-                    if (this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) this.doCopy();
+                    if (allowTileClipboard || this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) this.doCopy();
                 }
                 if (this.keys.pressed('x')) {
-                    if (this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) this.doCut();
+                    if (allowTileClipboard || this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) this.doCut();
                 }
                 if (this.keys.released('v')) {
-                    // paste at mouse pixel position using stored origin offset
-                    if (this.clipboard) {
+                    // paste at mouse position (tiles or pixels)
+                    const posInfo = this.getPos(this.mouse && this.mouse.pos);
+                    const allowTilePaste = !!(this.tilemode && posInfo && posInfo.renderOnly && this._tileClipboard);
+                    if (allowTilePaste) {
                         this.doPaste(this.mouse && this.mouse.pos);
-                        // mark that a paste just occurred so we can avoid key-order races
+                        this._justPasted = true;
+                    } else if (this.clipboard) {
+                        this.doPaste(this.mouse && this.mouse.pos);
                         this._justPasted = true;
                     } else {
                         // No local data yet: pull from system clipboard and paste once ready.
@@ -5245,6 +5486,28 @@ export class SpriteScene extends Scene {
     doCopy(localOnly = false) {
         try {
             const sheet = this.currentSprite;
+            const posInfoForTile = this.getPos(this.mouse && this.mouse.pos);
+            const haveTileSelection = !!(this._tileSelection && this._tileSelection.size > 0);
+            if (this.tilemode && (haveTileSelection || (posInfoForTile && posInfoForTile.renderOnly))) {
+                const tiles = this._tileSelection && this._tileSelection.size > 0 ? Array.from(this._tileSelection) : (typeof posInfoForTile.areaIndex === 'number' ? [this._tileKey(posInfoForTile.tileCol, posInfoForTile.tileRow)] : []);
+                const entries = [];
+                for (const key of tiles) {
+                    const c = this._parseTileKey(key);
+                    if (!c) continue;
+                    const idx = this._getAreaIndexForCoord(c.col, c.row);
+                    const binding = this.getAreaBinding(idx);
+                    const transform = (Array.isArray(this._areaTransforms) && this._areaTransforms[idx]) ? this._areaTransforms[idx] : null;
+                    entries.push({ col: c.col, row: c.row, binding: binding ? { ...binding } : null, transform: transform ? { rot: transform.rot || 0, flipH: !!transform.flipH } : null });
+                }
+                if (entries.length > 0) {
+                    const minCol = Math.min(...entries.map(e => e.col));
+                    const minRow = Math.min(...entries.map(e => e.row));
+                    this._tileClipboard = {
+                        tiles: entries.map(e => ({ dc: e.col - minCol, dr: e.row - minRow, binding: e.binding, transform: e.transform }))
+                    };
+                }
+                return;
+            }
             // Determine source area/frame. Prefer the area where the selection was created
             // (selectionPoints or selectionRegion), otherwise fall back to the mouse-over area.
             let sourceAreaIndex = null;
@@ -5369,6 +5632,31 @@ export class SpriteScene extends Scene {
     doCut() {
         try {
             if (!this.currentSprite) return;
+            const posInfoForTile = this.getPos(this.mouse && this.mouse.pos);
+            const haveTileSelection = !!(this._tileSelection && this._tileSelection.size > 0);
+            if (this.tilemode && (haveTileSelection || (posInfoForTile && posInfoForTile.renderOnly))) {
+                const tiles = this._tileSelection && this._tileSelection.size > 0 ? Array.from(this._tileSelection) : (typeof posInfoForTile.areaIndex === 'number' ? [this._tileKey(posInfoForTile.tileCol, posInfoForTile.tileRow)] : []);
+                const entries = [];
+                for (const key of tiles) {
+                    const c = this._parseTileKey(key);
+                    if (!c) continue;
+                    const idx = this._getAreaIndexForCoord(c.col, c.row);
+                    const binding = this.getAreaBinding(idx);
+                    const transform = (Array.isArray(this._areaTransforms) && this._areaTransforms[idx]) ? this._areaTransforms[idx] : null;
+                    entries.push({ col: c.col, row: c.row, binding: binding ? { ...binding } : null, transform: transform ? { rot: transform.rot || 0, flipH: !!transform.flipH } : null });
+                    if (Array.isArray(this._areaBindings)) this._areaBindings[idx] = null;
+                    if (Array.isArray(this._areaTransforms)) this._areaTransforms[idx] = null;
+                }
+                if (entries.length > 0) {
+                    const minCol = Math.min(...entries.map(e => e.col));
+                    const minRow = Math.min(...entries.map(e => e.row));
+                    this._tileClipboard = {
+                        tiles: entries.map(e => ({ dc: e.col - minCol, dr: e.row - minRow, binding: e.binding, transform: e.transform }))
+                    };
+                }
+                this._tileSelection = new Set();
+                return;
+            }
             // Determine source area/frame for cut: prefer selection origin, otherwise mouse-over
             let sourceAreaIndex = null;
             if (this.selectionPoints && this.selectionPoints.length > 0 && typeof this.selectionPoints[0].areaIndex === 'number') {
@@ -5439,11 +5727,12 @@ export class SpriteScene extends Scene {
     // Paste clipboard at a screen mouse position (mousePos is a Vector in screen space)
     doPaste(mousePos) {
         try {
-            if (!this.clipboard || !this.currentSprite) return;
+            if (!this.clipboard && !this._tileClipboard) return;
+            if (!this.currentSprite) return;
             const sheet = this.currentSprite;
             const slice = sheet.slicePx || 1;
             const pos = this.getPos(mousePos);
-            if (!pos || !pos.inside) return;
+            if (!pos || (!pos.inside && !(this.tilemode && pos.renderOnly))) return;
 
             // Resolve destination anim/frame and tile origin (col,row) when in tilemode
             let anim = this.selectedAnimation;
@@ -5461,6 +5750,26 @@ export class SpriteScene extends Scene {
                     frameIdx = Number(binding.index);
                 }
             }
+
+            // Tile clipboard paste in render-only tilemode
+            if (this.tilemode && pos.renderOnly && this._tileClipboard) {
+                const tiles = Array.isArray(this._tileClipboard.tiles) && this._tileClipboard.tiles.length > 0
+                    ? this._tileClipboard.tiles
+                    : (this._tileClipboard.binding ? [{ dc:0, dr:0, binding: this._tileClipboard.binding, transform: this._tileClipboard.transform }] : []);
+                for (const t of tiles) {
+                    const tCol = col + (t.dc|0);
+                    const tRow = row + (t.dr|0);
+                    const idx = this._getAreaIndexForCoord(tCol, tRow);
+                    this._activateTile(tCol, tRow);
+                    if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
+                    if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
+                    this._areaBindings[idx] = t.binding ? { ...t.binding } : { anim, index: frameIdx };
+                    this._areaTransforms[idx] = t.transform ? { ...t.transform } : this._areaTransforms[idx];
+                }
+                return;
+            }
+
+            if (!this.clipboard) return;
 
             const ox = (this.clipboard.originOffset && typeof this.clipboard.originOffset.ox === 'number') ? this.clipboard.originOffset.ox : 0;
             const oy = (this.clipboard.originOffset && typeof this.clipboard.originOffset.oy === 'number') ? this.clipboard.originOffset.oy : 0;
@@ -6627,8 +6936,8 @@ export class SpriteScene extends Scene {
         const zy = this.zoom && this.zoom.y ? this.zoom.y : 1;
         const scrW = area.dstW * zx;
         const scrH = area.dstH * zy;
-        const minW = SCREEN_W / 7;
-        const minH = SCREEN_H / 7;
+        const minW = SCREEN_W / 6;
+        const minH = SCREEN_H / 6;
         return (scrW < minW) || (scrH < minH);
     }
 
@@ -6937,6 +7246,8 @@ export class SpriteScene extends Scene {
             for (const area of areas) {
                 this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'overlay');
             }
+            // Draw the global tile cursor / selection / paste preview once (not per-area)
+            try { if (typeof this._drawTileCursorOverlay === 'function') this._drawTileCursorOverlay(); } catch (e) {}
         }
 
         // Remove previous transform container to prevent transform stacking
@@ -7051,8 +7362,8 @@ export class SpriteScene extends Scene {
 
             // draw the frame image centered inside the box with some padding
             if (sheet) {
-                // determine effective animation/frame for this area (respect bindings)
-                const binding = (typeof areaIndex === 'number' && Array.isArray(this._areaBindings)) ? this._areaBindings[areaIndex] : null;
+                // determine effective animation/frame for this area (respect bindings only in tilemode)
+                const binding = (this.tilemode && typeof areaIndex === 'number' && Array.isArray(this._areaBindings)) ? this._areaBindings[areaIndex] : null;
                 const coordForArea = (typeof areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) ? this._tileIndexToCoord[areaIndex] : null;
                 const tileIsActive = (!this.tilemode) || (coordForArea && this._isTileActive(coordForArea.col, coordForArea.row));
                 if (this.tilemode && !tileIsActive) {
@@ -7159,8 +7470,8 @@ export class SpriteScene extends Scene {
                             }
                         } catch (e) { /* ignore onion/multi preparation errors */ }
 
-                        // If a preview transform exists for this area, draw a transformed temporary canvas
-                        const transform = (typeof areaIndex === 'number' && Array.isArray(this._areaTransforms)) ? this._areaTransforms[areaIndex] : null;
+                        // If a preview transform exists for this area (tilemode only), draw a transformed temporary canvas
+                        const transform = (this.tilemode && typeof areaIndex === 'number' && Array.isArray(this._areaTransforms)) ? this._areaTransforms[areaIndex] : null;
                         const hasTransform = !!(transform && ((transform.rot || 0) !== 0 || transform.flipH));
                         const drawable = layeredCanvas || frameCanvas;
                         if (hasTransform && drawable) {
@@ -7199,10 +7510,10 @@ export class SpriteScene extends Scene {
                     this.Draw.image(sheet.sheet, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
                 }
 
-                // After drawing the frame, show binding label (or mirrored note) unless render-only.
+                // After drawing the frame, show binding label (or mirrored note).
                 if (modeBase) {
                     try {
-                        if (typeof areaIndex === 'number' && Array.isArray(this._areaBindings) && this._areaBindings[areaIndex]) {
+                        if (typeof areaIndex === 'number' && Array.isArray(this._areaBindings) && this._areaBindings[areaIndex] && this.tilemode) {
                             const b = this._areaBindings[areaIndex];
                             const label = (b && b.anim) ? `${b.anim}:${b.index}` : String(b && b.index);
                             this.Draw.text(label, new Vector(pos.x + 6, pos.y + 14), '#FFFFFF', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' });
@@ -7213,17 +7524,18 @@ export class SpriteScene extends Scene {
                 }
 
                 // Draw a pixel cursor / selection preview unless render-only.
-                if (modeOverlay && !renderOnly) {
+                if (modeOverlay && (!renderOnly || this.tilemode)) {
                     // In tilemode this is restricted to tiles that mirror the same effective frame
-                    this.displayCursor(dstPos,dstW,dstH,binding,effAnim,effFrame,areaIndex)
+                    this.displayCursor(dstPos,dstW,dstH,binding,effAnim,effFrame,areaIndex,renderOnly)
                 }
             }
         } catch (e) {
             console.warn('displayDrawArea failed', e);
         }
     }
-    displayCursor(dstPos,dstW,dstH,binding,effAnim,effFrame,areaIndex){
+    displayCursor(dstPos,dstW,dstH,binding,effAnim,effFrame,areaIndex,renderOnly=false){
         try {
+            const isRenderOnly = !!renderOnly;
             const cellW = dstW / this.currentSprite.slicePx;
             const cellH = dstH / this.currentSprite.slicePx;
 
@@ -7237,6 +7549,12 @@ export class SpriteScene extends Scene {
             const posInfoGlobal = this.getPos(this.mouse && this.mouse.pos);
             const hoveredInside = !!(posInfoGlobal && posInfoGlobal.inside);
             const hoveredAreaIndex = hoveredInside ? posInfoGlobal.areaIndex : null;
+            const areaInfo = (Array.isArray(this._drawAreas) && typeof areaIndex === 'number')
+                ? this._drawAreas.find(a => a && a.areaIndex === areaIndex)
+                : null;
+
+            // Render-only handled separately to avoid per-area stacking
+            if (isRenderOnly) return;
 
             // If there is an active selection tied to this area, always draw it here
             // even if the cursor is hovering a different tile.
@@ -7560,5 +7878,191 @@ export class SpriteScene extends Scene {
         const cellX = area.dstPos.x + x * cellW;
         const cellY = area.dstPos.y + y * cellH;
         this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), color, true);
+    }
+
+    // Draw the tile cursor, selection outlines, and paste preview once per frame.
+    _drawTileCursorOverlay() {
+        try {
+            if (!this.tilemode) return;
+            const baseArea = (typeof this.computeDrawArea === 'function') ? this.computeDrawArea() : null;
+            if (!baseArea) return;
+            const basePos = baseArea.topLeft;
+            const tileSize = baseArea.size;
+            // anchor tile (last hovered or explicit)
+            const anchor = this._tileHoverAnchor ? { ...this._tileHoverAnchor } : null;
+
+            // Draw selection outlines for selected tiles — only when relevant renderOnly areas exist
+            try {
+                let showTileSelection = false;
+                if (this._tileSelection && this._tileSelection.size > 0) {
+                    for (const key of this._tileSelection) {
+                        const c = this._parseTileKey(key);
+                        if (!c) continue;
+                        const idx = this._getAreaIndexForCoord(c.col, c.row);
+                        const areaInfo = (Array.isArray(this._drawAreas) && typeof idx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === idx) : null;
+                        if (areaInfo && areaInfo.renderOnly) { showTileSelection = true; break; }
+                    }
+                }
+                // also allow selection drawing when anchor is over a renderOnly tile
+                if (!showTileSelection && anchor) {
+                    const aidx = this._getAreaIndexForCoord(anchor.col, anchor.row);
+                    const ainfo = (Array.isArray(this._drawAreas) && typeof aidx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === aidx) : null;
+                    if (ainfo && ainfo.renderOnly) showTileSelection = true;
+                }
+
+                if (showTileSelection) {
+                    const selStroke = '#00FFFFFF';
+                    const selStrokeW = Math.max(2, Math.round(Math.min(tileSize.x, tileSize.y) * 0.015));
+                    for (const key of this._tileSelection) {
+                        const c = this._parseTileKey(key);
+                        if (!c) continue;
+                        const topLeft = this._tileCoordToPos(c.col, c.row, basePos, tileSize);
+                        this.Draw.rect(topLeft, tileSize, null, false, true, selStrokeW, selStroke);
+                        const cornerSize = Math.max(4, Math.round(Math.min(tileSize.x, tileSize.y) * 0.18));
+                        this.Draw.rect(new Vector(topLeft.x + 1, topLeft.y + 1), new Vector(cornerSize, cornerSize), null, false, true, Math.max(1, selStrokeW - 1), selStroke);
+                    }
+                }
+            } catch (e) { /* ignore selection draw errors */ }
+
+            // Tile cursor (single rect matching brush footprint) — only draw when anchor area is renderOnly
+            if (anchor) {
+                let showCursor = false;
+                try {
+                    const aidx = this._getAreaIndexForCoord(anchor.col, anchor.row);
+                    const ainfo = (Array.isArray(this._drawAreas) && typeof aidx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === aidx) : null;
+                    if (ainfo && ainfo.renderOnly) showCursor = true;
+                } catch (e) { showCursor = false; }
+                if (showCursor) {
+                const side = Math.max(1, Math.min(15, this.brushSize || 1));
+                const start = -Math.floor(side / 2);
+                const topLeftTile = { col: anchor.col + start, row: anchor.row + start };
+                const topLeft = this._tileCoordToPos(topLeftTile.col, topLeftTile.row, basePos, tileSize);
+                const rectPos = topLeft;
+                const rectSize = new Vector(side * tileSize.x, side * tileSize.y);
+                const cursorFill = '#FFFFFF22';
+                const cursorStroke = '#FFFFFFEE';
+                    const strokeW = Math.max(2, Math.round(Math.min(tileSize.x, tileSize.y) * 0.03));
+                    this.Draw.rect(rectPos, rectSize, cursorFill, true);
+                    this.Draw.rect(rectPos, rectSize, cursorStroke, false, true, strokeW, cursorStroke);
+                }
+            }
+
+            // Tile shape preview (when a single tile is selected and a tile tool is active)
+            try {
+                if (this.currentToolTile && this._tileSelection && this._tileSelection.size === 1) {
+                    const selKey = Array.from(this._tileSelection)[0];
+                    const anchorTile = this._parseTileKey(selKey);
+                    if (anchorTile) {
+                        // determine hovered/target tile under mouse
+                        let posInfo = null;
+                        try { posInfo = (typeof this.getPos === 'function') ? this.getPos(this.mouse && this.mouse.pos) : null; } catch (e) { posInfo = null; }
+                        let targetTile = null;
+                        if (posInfo && posInfo.renderOnly && typeof posInfo.tileCol === 'number' && typeof posInfo.tileRow === 'number') {
+                            targetTile = { col: posInfo.tileCol, row: posInfo.tileRow };
+                        } else {
+                            targetTile = anchorTile;
+                        }
+
+                        // compute tile list for preview, separating interior and border
+                        const interior = [];
+                        const border = [];
+                        const x0 = anchorTile.col, y0 = anchorTile.row;
+                        const x1 = targetTile.col, y1 = targetTile.row;
+                        if (this.currentToolTile === 'box') {
+                            const minC = Math.min(x0,x1), maxC = Math.max(x0,x1);
+                            const minR = Math.min(y0,y1), maxR = Math.max(y0,y1);
+                            for (let r = minR; r <= maxR; r++) for (let c = minC; c <= maxC; c++) {
+                                if (r === minR || r === maxR || c === minC || c === maxC) border.push({col:c,row:r});
+                                else interior.push({col:c,row:r});
+                            }
+                        } else if (this.currentToolTile === 'line') {
+                            let x = x0, y = y0;
+                            const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+                            const dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+                            let err = dx + dy;
+                            while (true) {
+                                border.push({col:x,row:y});
+                                if (x === x1 && y === y1) break;
+                                const e2 = 2 * err;
+                                if (e2 >= dy) { err += dy; x += sx; }
+                                if (e2 <= dx) { err += dx; y += sy; }
+                            }
+                        } else if (this.currentToolTile === 'circle') {
+                            const dx = x1 - x0, dy = y1 - y0;
+                            const r = Math.max(Math.abs(dx), Math.abs(dy));
+                            const r2 = r * r;
+                            const borderBand = Math.max(1, r);
+                            for (let rr = -r; rr <= r; rr++) for (let cc = -r; cc <= r; cc++) {
+                                const dist2 = cc*cc + rr*rr;
+                                const isBorder = (dist2 >= r2 - borderBand && dist2 <= r2 + borderBand);
+                                const isInside = (dist2 <= r2);
+                                if (isBorder) border.push({col: x0+cc, row: y0+rr});
+                                else if (isInside) interior.push({col: x0+cc, row: y0+rr});
+                            }
+                        }
+
+                        // draw preview: outline-only by default; Alt -> fill + outline for box/circle
+                        const isAlt = (this.keys && typeof this.keys.held === 'function' && this.keys.held('Alt'));
+                        const previewFill = '#FFFFFF33';
+                        const previewStroke = '#FFFFFFEE';
+                        const previewStrokeW = Math.max(1, Math.round(Math.min(tileSize.x, tileSize.y) * 0.03));
+
+                        // draw interior first (if Alt and for box/circle)
+                        if (isAlt && (this.currentToolTile === 'box' || this.currentToolTile === 'circle')) {
+                            for (const t of interior) {
+                                const posVec = this._tileCoordToPos(t.col, t.row, basePos, tileSize);
+                                this.Draw.rect(posVec, tileSize, previewFill, true);
+                            }
+                        }
+
+                        // draw border/outline
+                        for (const t of border) {
+                            const posVec = this._tileCoordToPos(t.col, t.row, basePos, tileSize);
+                            this.Draw.rect(posVec, tileSize, null, false, true, previewStrokeW, previewStroke);
+                        }
+                    }
+                }
+            } catch (e) { /* ignore preview errors */ }
+
+            // Paste preview: draw actual tiles from tile clipboard (alpha)
+            const showPreview = this.keys && (this.keys.held('v') || this.clipboardPreview);
+            if (showPreview && this._tileClipboard && anchor) {
+                const tiles = Array.isArray(this._tileClipboard.tiles) && this._tileClipboard.tiles.length > 0
+                    ? this._tileClipboard.tiles
+                    : (this._tileClipboard.binding ? [{ dc:0, dr:0, binding: this._tileClipboard.binding, transform: this._tileClipboard.transform }] : []);
+                const sheet = this.currentSprite;
+                const alpha = 0.6;
+                const drawTilePreview = (binding, transform, posVec) => {
+                    if (!sheet) return;
+                    const anim = (binding && binding.anim !== undefined) ? binding.anim : this.selectedAnimation;
+                    const idx = (binding && binding.index !== undefined) ? binding.index : this.selectedFrame;
+                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, idx) : null;
+                    if (!frameCanvas) return;
+                    const sizeVec = tileSize.clone ? tileSize.clone() : new Vector(tileSize.x, tileSize.y);
+                    const hasTx = !!(transform && ((transform.rot || 0) !== 0 || transform.flipH));
+                    if (hasTx) {
+                        const tmp = document.createElement('canvas');
+                        tmp.width = sizeVec.x; tmp.height = sizeVec.y;
+                        const tctx = tmp.getContext('2d');
+                        try { tctx.imageSmoothingEnabled = false; } catch (e) {}
+                        tctx.save();
+                        tctx.translate(sizeVec.x / 2, sizeVec.y / 2);
+                        if (transform.flipH) tctx.scale(-1, 1);
+                        if (transform.rot) tctx.rotate((transform.rot || 0) * Math.PI / 180);
+                        tctx.drawImage(frameCanvas, -sizeVec.x / 2, -sizeVec.y / 2, sizeVec.x, sizeVec.y);
+                        tctx.restore();
+                        this.Draw.image(tmp, posVec, sizeVec, null, 0, alpha, false);
+                    } else {
+                        this.Draw.image(frameCanvas, posVec, sizeVec, null, 0, alpha, false);
+                    }
+                };
+                for (const t of tiles) {
+                    const gx = anchor.col + (t.dc|0);
+                    const gy = anchor.row + (t.dr|0);
+                    const gPos = this._tileCoordToPos(gx, gy, basePos, tileSize);
+                    drawTilePreview(t.binding, t.transform, gPos);
+                }
+            }
+        } catch (e) { /* ignore overlay draw errors */ }
     }
 }
