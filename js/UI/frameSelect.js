@@ -249,6 +249,16 @@ export default class FrameSelect {
                     else importMode = 'spritesheet';
                 }
             } catch (e) { /* ignore and fall back to spritesheet */ }
+            // Ask whether to replace the current sprite or append animations
+            let appendMode = false;
+            try {
+                try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                const appendChoice = window.prompt('Import behavior? 1 = replace (clear), 2 = append', '1');
+                if (appendChoice !== null) {
+                    const v = String(appendChoice).trim();
+                    appendMode = (v === '2');
+                }
+            } catch (e) { /* default stays replace */ }
             // Prefer createImageBitmap for reliable decoding. Fallback to Image if unavailable.
             let bitmap = null;
             try {
@@ -315,40 +325,84 @@ export default class FrameSelect {
                     }
                 }catch(e){console.warn('post-import refresh failed',e)}
             }, 50);
-            // apply to scene
-            if (this.scene){
-                this.scene.currentSprite = ss;
-                const animNames = Array.from(ss._frames.keys());
-                const firstAnim = animNames[0] || 'idle';
-                this.scene.selectedAnimation = firstAnim;
-                // materialize frames for the first animation so preview shows up
-                try { if (typeof ss._materializeAnimation === 'function') ss._materializeAnimation(firstAnim); } catch(e) {}
-                this.scene.selectedFrame = 0;
-
-                // If importing as a tilesheet, enable tilemode and mirror the grid.
-                if (importMode === 'tilesheet') {
+            // apply to scene (append or replace)
+            const targetScene = this.scene || null;
+            let applied = false;
+            if (appendMode && targetScene && targetScene.currentSprite) {
+                const existing = targetScene.currentSprite;
+                if (existing.slicePx !== ss.slicePx) {
+                    try { window.alert(`Cannot append: slice size mismatch (current ${existing.slicePx}, new ${ss.slicePx}). Falling back to replace.`); } catch (e) {}
+                } else {
                     try {
-                        const scene = this.scene;
-                        scene.tileCols = cols;
-                        scene.tileRows = rows;
-                        scene.tilemode = true;
-                        // reset any existing bindings/transforms
-                        scene._areaBindings = [];
-                        scene._areaTransforms = [];
-                        // Map each grid row to its own animation, each column to a frame in that animation.
-                        const names = animNames && animNames.length ? animNames : Array.from(ss._frames.keys());
-                        for (let r = 0; r < rows; r++){
-                            const animName = names[r] || names[0] || firstAnim;
-                            for (let c = 0; c < cols; c++){
-                                const areaIndex = r * cols + c;
-                                scene._areaBindings[areaIndex] = { anim: animName, index: c };
-                                scene._areaTransforms[areaIndex] = { rot: 0, flipH: false };
+                        const existingNames = new Set(existing._frames ? existing._frames.keys() : []);
+                        const addedNames = [];
+                        for (const [name, frames] of ss._frames.entries()){
+                            let newName = name;
+                            let suffix = 1;
+                            while (existingNames.has(newName)) {
+                                newName = `${name}_import${suffix++}`;
                             }
+                            existingNames.add(newName);
+                            const clonedFrames = Array.isArray(frames) ? frames.map(f => (f && f.__lazy === true ? { ...f } : f)) : [];
+                            existing._frames.set(newName, clonedFrames);
+                            addedNames.push(newName);
                         }
-                    } catch (e) { console.warn('tilesheet import tilemode setup failed', e); }
+                        if (typeof existing._rebuildSheetCanvas === 'function') existing._rebuildSheetCanvas();
+                        this.sprite = existing;
+                        targetScene.currentSprite = existing;
+                        const firstNew = addedNames[0] || targetScene.selectedAnimation || 'idle';
+                        targetScene.selectedAnimation = firstNew;
+                        targetScene.selectedFrame = 0;
+                        applied = true;
+                        console.log('Import appended: animations added =', addedNames.length);
+                    } catch (e) {
+                        console.warn('append import failed, falling back to replace', e);
+                    }
                 }
             }
-            this.sprite = ss;
+
+            if (!applied) {
+                if (this.scene){
+                    this.scene.currentSprite = ss;
+                    const animNames = Array.from(ss._frames.keys());
+                    const firstAnim = animNames[0] || 'idle';
+                    this.scene.selectedAnimation = firstAnim;
+                    // materialize frames for the first animation so preview shows up
+                    try { if (typeof ss._materializeAnimation === 'function') ss._materializeAnimation(firstAnim); } catch(e) {}
+                    this.scene.selectedFrame = 0;
+
+                    // If importing as a tilesheet, enable tilemode and mirror the grid.
+                    if (importMode === 'tilesheet') {
+                        try {
+                            const scene = this.scene;
+                            scene.tileCols = cols;
+                            scene.tileRows = rows;
+                            scene.tilemode = true;
+                            // reset infinite-tile bookkeeping so newly imported grid shows immediately
+                            try {
+                                scene._tileActive = new Set();
+                                scene._tileCoordToIndex = new Map();
+                                scene._tileIndexToCoord = [];
+                                if (typeof scene._seedTileActives === 'function') scene._seedTileActives(cols, rows);
+                            } catch (e) { /* ignore tile reset errors */ }
+                            // reset any existing bindings/transforms
+                            scene._areaBindings = [];
+                            scene._areaTransforms = [];
+                            // Map each grid row to its own animation, each column to a frame in that animation.
+                            const names = animNames && animNames.length ? animNames : Array.from(ss._frames.keys());
+                            for (let r = 0; r < rows; r++){
+                                const animName = names[r] || names[0] || firstAnim;
+                                for (let c = 0; c < cols; c++){
+                                    const areaIndex = r * cols + c;
+                                    scene._areaBindings[areaIndex] = { anim: animName, index: c };
+                                    scene._areaTransforms[areaIndex] = { rot: 0, flipH: false };
+                                }
+                            }
+                        } catch (e) { console.warn('tilesheet import tilemode setup failed', e); }
+                    }
+                }
+                this.sprite = ss;
+            }
             // cleanup URL object if we used Image fallback
             try{ if (img && img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src); } catch(e){}
             console.log('Import completed: animations=', Array.from(ss._frames.keys()).length);

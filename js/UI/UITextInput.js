@@ -15,29 +15,71 @@ export default class UITextInput extends UIButton {
         this._maxLength = 64;
         this._lastKeyTime = {}; // per-key stall timestamps (ms)
         this._stallMs = 120; // 120ms stall to avoid repeated presses
+        this._passcodeToken = 'ui-textinput';
+        this._savedPasscode = null;
+        this._passcodeLocked = false;
     }
 
     focus(){
         this.focused = true;
+        this._lockKeys();
         try{ if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(this.layer); } catch(e){}
     }
     blur(){
         this.focused = false;
+        this._unlockKeys();
+    }
+
+    _lockKeys(){
+        if (!this.keys || this._passcodeLocked) return;
+        try {
+            this._savedPasscode = this.keys.passcode || '';
+            this.keys.setPasscode(this._passcodeToken);
+            this._passcodeLocked = true;
+        } catch (e) {}
+    }
+
+    _unlockKeys(){
+        if (!this.keys) { this._passcodeLocked = false; return; }
+        if (!this._passcodeLocked) return;
+        try {
+            // Drop any queued presses/releases captured while locked so they don't
+            // fire global shortcuts after we restore the passcode.
+            if (typeof this.keys.clearState === 'function') this.keys.clearState();
+            if (this.keys.passcode === this._passcodeToken) {
+                const restore = (typeof this._savedPasscode === 'string') ? this._savedPasscode : '';
+                this.keys.setPasscode(restore);
+            }
+        } catch (e) {}
+        this._passcodeLocked = false;
+        this._savedPasscode = null;
     }
 
     update(delta){
         // basic hover/pressed handling from UIButton
         super.update(delta);
-        if(!this.visible) return;
+        if(!this.visible){
+            this._unlockKeys();
+            return;
+        }
         this._blink += delta;
         if (this._blink > 0.5) { this._blink = 0; this._caretVisible = !this._caretVisible; }
+
+        const rectPos = this.pos.add(this.offset);
+        const isInside = (()=>{
+            if (!this.mouse || !this.mouse.pos) return false;
+            const p = this.mouse.pos;
+            return (p.x >= rectPos.x && p.y >= rectPos.y && p.x <= rectPos.x + this.size.x && p.y <= rectPos.y + this.size.y);
+        })();
+
+        // lock keybinds when hovering over the text input to avoid triggering global shortcuts
+        if (isInside || this.focused) this._lockKeys();
+        else this._unlockKeys();
 
         // click to focus
         if (this.mouse && this.mouse.released && this.mouse.released('left')){
             // clicked inside?
-            const rectPos = this.pos.add(this.offset);
-            const p = this.mouse.pos;
-            if (p.x >= rectPos.x && p.y >= rectPos.y && p.x <= rectPos.x + this.size.x && p.y <= rectPos.y + this.size.y){
+            if (isInside){
                 this.focus();
             } else {
                 // click outside blurs
@@ -51,7 +93,7 @@ export default class UITextInput extends UIButton {
         const now = Date.now();
         const consumeKey = (k)=>{
             try{
-                if (!this.keys.pressed(k)) return false;
+                if (!this.keys.pressed(k, this._passcodeToken)) return false;
             } catch(e){ return false; }
             const last = this._lastKeyTime[k] || 0;
             if (now - last < this._stallMs) return false;

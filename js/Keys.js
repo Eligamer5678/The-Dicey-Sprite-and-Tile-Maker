@@ -5,8 +5,21 @@ export default class Keys { // Key input
         this.releasedFrame = {};
         this.passcode = "" // allow key context
         this.pauseTime = 0;
+        // clear any stuck key state when focus changes
+        const clearState = () => {
+            this._clearAllKeys();
+            this.pauseTime = 0.1;
+        };
+
+        const shouldIgnore = (e) => {
+            const tgt = e?.target;
+            const active = document.activeElement;
+            const isDebugInput = (tgt && tgt.id === 'debug-input') || (active && active.id === 'debug-input');
+            return isDebugInput;
+        };
 
         window.addEventListener("keydown", e => {
+            if (shouldIgnore(e)) return; // ignore global shortcuts while debug input focused
             // prevent browser interfering with shortcuts
             if ((e.key === 'u' || e.key === 'U') && e.altKey && e.shiftKey) {
                 e.preventDefault();
@@ -29,6 +42,7 @@ export default class Keys { // Key input
         });
         
         window.addEventListener("keyup", e => {
+            if (shouldIgnore(e)) return; // ignore releases from debug input
             if ((e.key === 'u' || e.key === 'U') && e.altKey && e.shiftKey) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -46,9 +60,23 @@ export default class Keys { // Key input
             this.firstFrame[e.key] = false;
             this.releasedFrame[e.key] = true; // mark released
         });
+
+        // When the window loses focus (e.g., clicking outside the canvas),
+        // reset key states so held keys do not remain "stuck".
+        window.addEventListener('blur', clearState);
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) clearState();
+        });
+        window.addEventListener('focus', () => { this._clearAllKeys(); });
     }
     setPasscode(passcode){
         this.passcode = passcode
+    }
+    clearState(){ this._clearAllKeys(); }
+    _clearAllKeys(){
+        this.keys = {};
+        this.firstFrame = {};
+        this.releasedFrame = {};
     }
     resetPasscode(){
         this.passcode = ""

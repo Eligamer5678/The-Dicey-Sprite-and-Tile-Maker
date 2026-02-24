@@ -7011,18 +7011,24 @@ export class SpriteScene extends Scene {
             const renderOnly = !!(areaInfo && areaInfo.renderOnly);
             const modeBase = drawMode === 'both' || drawMode === 'base';
             const modeOverlay = drawMode === 'both' || drawMode === 'overlay';
+            const hideGrid = renderOnly; // renderOnly already signals "simplified" mode when zoomed out
             // draw a subtle checkerboard background for transparency
             if (modeBase) {
-                const tile = 16;
-                const cols = Math.ceil(size.x / tile);
-                const rows = Math.ceil(size.y / tile);
-                for (let y = 0; y < rows; y++) {
-                    for (let x = 0; x < cols; x++) {
-                        const px = pos.x + x * tile;
-                        const py = pos.y + y * tile;
-                        const isLight = ((x + y) % 2) === 0;
-                        this.Draw.rect(new Vector(px, py), new Vector(tile, tile), isLight ? '#3a3a3aff' : '#2e2e2eff', true);
+                if (!hideGrid) {
+                    const tile = 16;
+                    const cols = Math.ceil(size.x / tile);
+                    const rows = Math.ceil(size.y / tile);
+                    for (let y = 0; y < rows; y++) {
+                        for (let x = 0; x < cols; x++) {
+                            const px = pos.x + x * tile;
+                            const py = pos.y + y * tile;
+                            const isLight = ((x + y) % 2) === 0;
+                            this.Draw.rect(new Vector(px, py), new Vector(tile, tile), isLight ? '#3a3a3aff' : '#2e2e2eff', true);
+                        }
                     }
+                } else {
+                    // flat fill to avoid drawing many rects when zoomed out
+                    this.Draw.rect(pos, size, '#2e2e2eff', true);
                 }
 
                 // draw border
