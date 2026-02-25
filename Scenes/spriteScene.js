@@ -5803,7 +5803,16 @@ export class SpriteScene extends Scene {
                 if (entries.length > 0) {
                     const minCol = Math.min(...entries.map(e => e.col));
                     const minRow = Math.min(...entries.map(e => e.row));
+                    // Determine origin tile relative to minCol/minRow based on mouse position
+                    let originOffsetTile = { ox: 0, oy: 0 };
+                    try {
+                        if (posInfoForTile && typeof posInfoForTile.tileCol === 'number' && typeof posInfoForTile.tileRow === 'number') {
+                            originOffsetTile.ox = posInfoForTile.tileCol - minCol;
+                            originOffsetTile.oy = posInfoForTile.tileRow - minRow;
+                        }
+                    } catch (e) {}
                     this._tileClipboard = {
+                        originOffsetTile,
                         tiles: entries.map(e => ({ dc: e.col - minCol, dr: e.row - minRow, binding: e.binding, transform: e.transform }))
                     };
                 }
@@ -6059,9 +6068,14 @@ export class SpriteScene extends Scene {
                 const tiles = Array.isArray(this._tileClipboard.tiles) && this._tileClipboard.tiles.length > 0
                     ? this._tileClipboard.tiles
                     : (this._tileClipboard.binding ? [{ dc:0, dr:0, binding: this._tileClipboard.binding, transform: this._tileClipboard.transform }] : []);
+                // honor originOffsetTile so mouse position maps to that origin when pasting
+                const origin = (this._tileClipboard.originOffsetTile && typeof this._tileClipboard.originOffsetTile.ox === 'number')
+                    ? this._tileClipboard.originOffsetTile : { ox: 0, oy: 0 };
+                const baseCol = col - (origin.ox|0);
+                const baseRow = row - (origin.oy|0);
                 for (const t of tiles) {
-                    const tCol = col + (t.dc|0);
-                    const tRow = row + (t.dr|0);
+                    const tCol = baseCol + (t.dc|0);
+                    const tRow = baseRow + (t.dr|0);
                     const idx = this._getAreaIndexForCoord(tCol, tRow);
                     this._activateTile(tCol, tRow);
                     if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
@@ -7005,104 +7019,177 @@ export class SpriteScene extends Scene {
     // Rotate the stored clipboard 90 degrees clockwise.
     rotateClipboardCW() {
         try {
-            if (!this.clipboard) return;
+            if (!this.clipboard && !this._tileClipboard) return;
             const cb = this.clipboard;
-            // Image clipboard (dense RGBA array)
-            if ((cb.type === 'image' || !cb.type) && typeof cb.w === 'number' && typeof cb.h === 'number' && cb.data) {
-                const w = cb.w;
-                const h = cb.h;
-                const old = cb.data;
-                const nw = h;
-                const nh = w;
-                const out = new Uint8ClampedArray(nw * nh * 4);
-                for (let y = 0; y < h; y++) {
-                    for (let x = 0; x < w; x++) {
-                        const srcIdx = (y * w + x) * 4;
-                        const nx = h - 1 - y;
-                        const ny = x;
-                        const dstIdx = (ny * nw + nx) * 4;
-                        out[dstIdx] = old[srcIdx];
-                        out[dstIdx + 1] = old[srcIdx + 1];
-                        out[dstIdx + 2] = old[srcIdx + 2];
-                        out[dstIdx + 3] = old[srcIdx + 3];
+            if (cb) {
+                // Image clipboard (dense RGBA array)
+                if ((cb.type === 'image' || !cb.type) && typeof cb.w === 'number' && typeof cb.h === 'number' && cb.data) {
+                    const w = cb.w;
+                    const h = cb.h;
+                    const old = cb.data;
+                    const nw = h;
+                    const nh = w;
+                    const out = new Uint8ClampedArray(nw * nh * 4);
+                    for (let y = 0; y < h; y++) {
+                        for (let x = 0; x < w; x++) {
+                            const srcIdx = (y * w + x) * 4;
+                            const nx = h - 1 - y;
+                            const ny = x;
+                            const dstIdx = (ny * nw + nx) * 4;
+                            out[dstIdx] = old[srcIdx];
+                            out[dstIdx + 1] = old[srcIdx + 1];
+                            out[dstIdx + 2] = old[srcIdx + 2];
+                            out[dstIdx + 3] = old[srcIdx + 3];
+                        }
+                    }
+                    cb.data = out;
+                    cb.w = nw;
+                    cb.h = nh;
+                    if (cb.originOffset) {
+                        const ox = cb.originOffset.ox || 0;
+                        const oy = cb.originOffset.oy || 0;
+                        cb.originOffset = { ox: h - 1 - oy, oy: ox };
+                    }
+                } else if (cb.type === 'points' && Array.isArray(cb.pixels)) {
+                    // Sparse point clipboard: rotate each point and adjust bbox
+                    const oldW = cb.w || 0;
+                    const oldH = cb.h || 0;
+                    for (const p of cb.pixels) {
+                        const nx = oldH - 1 - p.y;
+                        const ny = p.x;
+                        p.x = nx;
+                        p.y = ny;
+                    }
+                    const nw = oldH;
+                    const nh = oldW;
+                    cb.w = nw;
+                    cb.h = nh;
+                    if (cb.originOffset) {
+                        const ox = cb.originOffset.ox || 0;
+                        const oy = cb.originOffset.oy || 0;
+                        cb.originOffset = { ox: oldH - 1 - oy, oy: ox };
                     }
                 }
-                cb.data = out;
-                cb.w = nw;
-                cb.h = nh;
-                if (cb.originOffset) {
-                    const ox = cb.originOffset.ox || 0;
-                    const oy = cb.originOffset.oy || 0;
-                    cb.originOffset = { ox: h - 1 - oy, oy: ox };
-                }
-            } else if (cb.type === 'points' && Array.isArray(cb.pixels)) {
-                // Sparse point clipboard: rotate each point and adjust bbox
-                const oldW = cb.w || 0;
-                const oldH = cb.h || 0;
-                for (const p of cb.pixels) {
-                    const nx = oldH - 1 - p.y;
-                    const ny = p.x;
-                    p.x = nx;
-                    p.y = ny;
-                }
-                const nw = oldH;
-                const nh = oldW;
-                cb.w = nw;
-                cb.h = nh;
-                if (cb.originOffset) {
-                    const ox = cb.originOffset.ox || 0;
-                    const oy = cb.originOffset.oy || 0;
-                    cb.originOffset = { ox: oldH - 1 - oy, oy: ox };
-                }
             }
+            // also rotate tile clipboard if present
+            try { this._rotateTileClipboardCW(); } catch (e) {}
         } catch (e) {
             console.warn('rotateClipboardCW failed', e);
+        }
+    }
+
+    // Rotate the stored tile clipboard 90 degrees clockwise (if present).
+    // This will rotate tile positions within the clipboard and bump per-tile transform.rot.
+    _rotateTileClipboardCW() {
+        try {
+            if (!this._tileClipboard || !Array.isArray(this._tileClipboard.tiles) || this._tileClipboard.tiles.length === 0) return;
+            const tiles = this._tileClipboard.tiles;
+            let maxDc = 0, maxDr = 0;
+            for (const t of tiles) {
+                const dc = Number(t.dc) || 0;
+                const dr = Number(t.dr) || 0;
+                if (dc > maxDc) maxDc = dc;
+                if (dr > maxDr) maxDr = dr;
+            }
+            const oldW = maxDc + 1;
+            const oldH = maxDr + 1;
+            // rotate positions and update transforms
+            for (const t of tiles) {
+                const dc = Number(t.dc) || 0;
+                const dr = Number(t.dr) || 0;
+                const nx = oldH - 1 - dr;
+                const ny = dc;
+                t.dc = nx;
+                t.dr = ny;
+                if (!t.transform) t.transform = { rot: 0, flipH: false };
+                t.transform.rot = ((Number(t.transform.rot) || 0) + 90) % 360;
+            }
+            // update originOffsetTile if present
+            if (this._tileClipboard.originOffsetTile) {
+                const ox = Number(this._tileClipboard.originOffsetTile.ox) || 0;
+                const oy = Number(this._tileClipboard.originOffsetTile.oy) || 0;
+                this._tileClipboard.originOffsetTile = { ox: oldH - 1 - oy, oy: ox };
+            }
+        } catch (e) {
+            console.warn('_rotateTileClipboardCW failed', e);
+        }
+    }
+
+    // Flip the stored tile clipboard horizontally (mirror left-right).
+    _flipTileClipboardH() {
+        try {
+            if (!this._tileClipboard || !Array.isArray(this._tileClipboard.tiles) || this._tileClipboard.tiles.length === 0) return;
+            const tiles = this._tileClipboard.tiles;
+            let maxDc = 0;
+            for (const t of tiles) {
+                const dc = Number(t.dc) || 0;
+                if (dc > maxDc) maxDc = dc;
+            }
+            const oldW = maxDc + 1;
+            for (const t of tiles) {
+                const dc = Number(t.dc) || 0;
+                const nx = oldW - 1 - dc;
+                t.dc = nx;
+                if (!t.transform) t.transform = { rot: 0, flipH: false };
+                t.transform.flipH = !Boolean(t.transform.flipH);
+            }
+            if (this._tileClipboard.originOffsetTile) {
+                const ox = Number(this._tileClipboard.originOffsetTile.ox) || 0;
+                const oy = Number(this._tileClipboard.originOffsetTile.oy) || 0;
+                this._tileClipboard.originOffsetTile = { ox: oldW - 1 - ox, oy };
+            }
+        } catch (e) {
+            console.warn('_flipTileClipboardH failed', e);
         }
     }
 
     // Flip the stored clipboard horizontally (mirror left-right).
     flipClipboardH() {
         try {
-            if (!this.clipboard) return;
+            if (!this.clipboard && !this._tileClipboard) return;
             const cb = this.clipboard;
-            // Image clipboard (dense RGBA array)
-            if ((cb.type === 'image' || !cb.type) && typeof cb.w === 'number' && typeof cb.h === 'number' && cb.data) {
-                const w = cb.w;
-                const h = cb.h;
-                const old = cb.data;
-                const out = new Uint8ClampedArray(w * h * 4);
-                for (let y = 0; y < h; y++) {
-                    for (let x = 0; x < w; x++) {
-                        const srcIdx = (y * w + x) * 4;
-                        const nx = w - 1 - x;
-                        const ny = y;
-                        const dstIdx = (ny * w + nx) * 4;
-                        out[dstIdx] = old[srcIdx];
-                        out[dstIdx + 1] = old[srcIdx + 1];
-                        out[dstIdx + 2] = old[srcIdx + 2];
-                        out[dstIdx + 3] = old[srcIdx + 3];
+            if (cb) {
+                // Image clipboard (dense RGBA array)
+                if ((cb.type === 'image' || !cb.type) && typeof cb.w === 'number' && typeof cb.h === 'number' && cb.data) {
+                    const w = cb.w;
+                    const h = cb.h;
+                    const old = cb.data;
+                    const out = new Uint8ClampedArray(w * h * 4);
+                    for (let y = 0; y < h; y++) {
+                        for (let x = 0; x < w; x++) {
+                            const srcIdx = (y * w + x) * 4;
+                            const nx = w - 1 - x;
+                            const ny = y;
+                            const dstIdx = (ny * w + nx) * 4;
+                            out[dstIdx] = old[srcIdx];
+                            out[dstIdx + 1] = old[srcIdx + 1];
+                            out[dstIdx + 2] = old[srcIdx + 2];
+                            out[dstIdx + 3] = old[srcIdx + 3];
+                        }
+                    }
+                    cb.data = out;
+                    // dimensions unchanged
+                    // adjust originOffset if present (mirror ox horizontally)
+                    if (cb.originOffset) {
+                        const ox = cb.originOffset.ox || 0;
+                        const oy = cb.originOffset.oy || 0;
+                        cb.originOffset = { ox: w - 1 - ox, oy };
+                    }
+                } else if (cb.type === 'points' && Array.isArray(cb.pixels)) {
+                    // Sparse point clipboard: mirror each point across vertical center
+                    const oldW = cb.w || 0;
+                    for (const p of cb.pixels) {
+                        p.x = oldW - 1 - p.x;
+                    }
+                    if (cb.originOffset) {
+                        const ox = cb.originOffset.ox || 0;
+                        const oy = cb.originOffset.oy || 0;
+                        cb.originOffset = { ox: oldW - 1 - ox, oy };
                     }
                 }
-                cb.data = out;
-                // dimensions unchanged
-                // adjust originOffset if present (mirror ox horizontally)
-                if (cb.originOffset) {
-                    const ox = cb.originOffset.ox || 0;
-                    const oy = cb.originOffset.oy || 0;
-                    cb.originOffset = { ox: w - 1 - ox, oy };
-                }
-            } else if (cb.type === 'points' && Array.isArray(cb.pixels)) {
-                // Sparse point clipboard: mirror each point across vertical center
-                const oldW = cb.w || 0;
-                for (const p of cb.pixels) {
-                    p.x = oldW - 1 - p.x;
-                }
-                if (cb.originOffset) {
-                    const ox = cb.originOffset.ox || 0;
-                    const oy = cb.originOffset.oy || 0;
-                    cb.originOffset = { ox: oldW - 1 - ox, oy };
-                }
             }
+            // also flip tile clipboard if present
+            try { this._flipTileClipboardH(); } catch (e) {}
         } catch (e) {
             console.warn('flipClipboardH failed', e);
         }
@@ -8374,9 +8461,14 @@ export class SpriteScene extends Scene {
                         this.Draw.image(frameCanvas, posVec, sizeVec, null, 0, alpha, false);
                     }
                 };
+                // honor originOffsetTile so preview matches paste origin
+                const origin = (this._tileClipboard && this._tileClipboard.originOffsetTile && typeof this._tileClipboard.originOffsetTile.ox === 'number')
+                    ? this._tileClipboard.originOffsetTile : { ox: 0, oy: 0 };
+                const baseCol = anchor.col - (origin.ox|0);
+                const baseRow = anchor.row - (origin.oy|0);
                 for (const t of tiles) {
-                    const gx = anchor.col + (t.dc|0);
-                    const gy = anchor.row + (t.dr|0);
+                    const gx = baseCol + (t.dc|0);
+                    const gy = baseRow + (t.dr|0);
                     const gPos = this._tileCoordToPos(gx, gy, basePos, tileSize);
                     drawTilePreview(t.binding, t.transform, gPos);
                 }

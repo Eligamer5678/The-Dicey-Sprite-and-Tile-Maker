@@ -50,6 +50,7 @@
 - ` to resize canvas (instead of 16x16)
 - ; grow selection
 - ' shrink selection
+- Note, when you zoom out enough in tilemode, you are then able to edit tiles just as if they were pixels.
 
 - Press the upper left corner to access the console
 
