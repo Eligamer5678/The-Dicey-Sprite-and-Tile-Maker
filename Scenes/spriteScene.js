@@ -3342,6 +3342,29 @@ export class SpriteScene extends Scene {
                 }
             }
 
+            // Tile-mode: if exactly two tiles are selected and user presses 'b',
+            // expand selection to include the full tile rectangle between them (inclusive).
+            try {
+                if (this.tilemode && this._tileSelection && this._tileSelection.size === 2 && this.keys.pressed('b')) {
+                    const keys = Array.from(this._tileSelection);
+                    if (keys.length === 2) {
+                        const a = this._parseTileKey(keys[0]);
+                        const b = this._parseTileKey(keys[1]);
+                        if (a && b) {
+                            const minC = Math.min(a.col, b.col);
+                            const maxC = Math.max(a.col, b.col);
+                            const minR = Math.min(a.row, b.row);
+                            const maxR = Math.max(a.row, b.row);
+                            for (let r = minR; r <= maxR; r++) {
+                                for (let c = minC; c <= maxC; c++) {
+                                    this._tileSelection.add(this._tileKey(c, r));
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e) { /* ignore tile box-select errors */ }
+
             // Clipboard operations: copy (c), cut (x), paste (v)
             // Copy/Cut operate on active selectionRegion or explicit selectionPoints.
             // Holding 'v' previews clipboard; releasing 'v' pastes at the mouse pixel.
@@ -3477,7 +3500,7 @@ export class SpriteScene extends Scene {
                 const fPressed = (this.keys.pressed('f') || this.keys.pressed('F'));
                 if (fHeldTime > 1 || (fPressed && !this.keys.held('Alt'))) {
                     const pos = this.getPos(this.mouse && this.mouse.pos);
-                    if (!pos || !pos.inside) return;
+                    if (!pos || (!pos.inside && !(this.tilemode && pos.renderOnly))) return;
                     // If there is an explicit selection (points or region), treat
                     // pressing 'f' as "draw selected" (same as Alt+S) instead of
                     // performing a flood-fill into the hovered frame.
@@ -3507,6 +3530,67 @@ export class SpriteScene extends Scene {
                             anim = binding.anim;
                             frameIdx = Number(binding.index);
                         }
+                    }
+                    // Tile-mode: perform tile-region fill or tile-region select when renderOnly
+                    if (this.tilemode && pos && pos.renderOnly) {
+                        try {
+                            const startCol = (typeof pos.tileCol === 'number') ? pos.tileCol : null;
+                            const startRow = (typeof pos.tileRow === 'number') ? pos.tileRow : null;
+                            if (startCol === null || startRow === null) return;
+                            const startIdx = this._getAreaIndexForCoord(startCol, startRow);
+                            const startBinding = (typeof startIdx === 'number') ? this.getAreaBinding(startIdx) : null;
+                            const matchBinding = (a, b) => {
+                                if (!a && !b) return true;
+                                if (!a || !b) return false;
+                                return (a.anim === b.anim && Number(a.index) === Number(b.index));
+                            };
+                            const MAX_NODES = 200;
+                            const stack = [{col: startCol, row: startRow}];
+                            const seen = new Set();
+                            const results = [];
+                            while (stack.length) {
+                                const n = stack.pop();
+                                const key = this._tileKey(n.col, n.row);
+                                if (seen.has(key)) continue;
+                                seen.add(key);
+                                const idx = this._getAreaIndexForCoord(n.col, n.row);
+                                if (!Number.isFinite(idx)) continue;
+                                // include inactive tiles as valid region members (empty tiles form regions)
+                                // Do not skip based on _isTileActive here.
+                                const b = this.getAreaBinding(idx);
+                                if (!matchBinding(b, startBinding)) continue;
+                                results.push({col: n.col, row: n.row, idx});
+                                if (results.length >= MAX_NODES) break;
+                                // neighbors 4-connected
+                                stack.push({col: n.col - 1, row: n.row});
+                                stack.push({col: n.col + 1, row: n.row});
+                                stack.push({col: n.col, row: n.row - 1});
+                                stack.push({col: n.col, row: n.row + 1});
+                            }
+
+                            if (results.length === 0) return;
+
+                            if (this.keys.held('Shift')) {
+                                // select the region
+                                if (!this._tileSelection) this._tileSelection = new Set();
+                                for (const t of results) this._tileSelection.add(this._tileKey(t.col, t.row));
+                                // update hover anchor so selection overlay shows immediately
+                                this._tileHoverAnchor = { col: startCol, row: startRow };
+                                return;
+                            } else {
+                                // apply fill binding to region
+                                const binding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
+                                const transform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
+                                if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
+                                if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
+                                for (const t of results) {
+                                    this._activateTile(t.col, t.row);
+                                    this._areaBindings[t.idx] = binding ? { ...binding } : null;
+                                    this._areaTransforms[t.idx] = transform ? { ...transform } : this._areaTransforms[t.idx];
+                                }
+                                return;
+                            }
+                        } catch (e) { /* ignore tile fill/select errors */ return; }
                     }
                     if (!sheet) return;
                     const frameCanvas = sheet.getFrame(anim, frameIdx);
@@ -5644,8 +5728,10 @@ export class SpriteScene extends Scene {
                     const binding = this.getAreaBinding(idx);
                     const transform = (Array.isArray(this._areaTransforms) && this._areaTransforms[idx]) ? this._areaTransforms[idx] : null;
                     entries.push({ col: c.col, row: c.row, binding: binding ? { ...binding } : null, transform: transform ? { rot: transform.rot || 0, flipH: !!transform.flipH } : null });
+                    // clear tile binding/transform and deactivate tile so it no longer renders
                     if (Array.isArray(this._areaBindings)) this._areaBindings[idx] = null;
                     if (Array.isArray(this._areaTransforms)) this._areaTransforms[idx] = null;
+                    this._deactivateTile(c.col, c.row);
                 }
                 if (entries.length > 0) {
                     const minCol = Math.min(...entries.map(e => e.col));
@@ -7898,15 +7984,27 @@ export class SpriteScene extends Scene {
                     for (const key of this._tileSelection) {
                         const c = this._parseTileKey(key);
                         if (!c) continue;
+                        // try to find in current draw areas first
                         const idx = this._getAreaIndexForCoord(c.col, c.row);
-                        const areaInfo = (Array.isArray(this._drawAreas) && typeof idx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === idx) : null;
+                        let areaInfo = (Array.isArray(this._drawAreas) && typeof idx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === idx) : null;
+                        // fallback: compute area info from tile coords
+                        if (!areaInfo) {
+                            try {
+                                const pos = this._tileCoordToPos(c.col, c.row, basePos, tileSize);
+                                areaInfo = this.computeAreaInfo(pos, tileSize);
+                                if (areaInfo) areaInfo.renderOnly = this._isSimTooSmall(areaInfo);
+                            } catch (e) { areaInfo = null; }
+                        }
                         if (areaInfo && areaInfo.renderOnly) { showTileSelection = true; break; }
                     }
                 }
                 // also allow selection drawing when anchor is over a renderOnly tile
                 if (!showTileSelection && anchor) {
                     const aidx = this._getAreaIndexForCoord(anchor.col, anchor.row);
-                    const ainfo = (Array.isArray(this._drawAreas) && typeof aidx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === aidx) : null;
+                    let ainfo = (Array.isArray(this._drawAreas) && typeof aidx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === aidx) : null;
+                    if (!ainfo) {
+                        try { const pos = this._tileCoordToPos(anchor.col, anchor.row, basePos, tileSize); ainfo = this.computeAreaInfo(pos, tileSize); if (ainfo) ainfo.renderOnly = this._isSimTooSmall(ainfo); } catch(e) { ainfo = null; }
+                    }
                     if (ainfo && ainfo.renderOnly) showTileSelection = true;
                 }
 
@@ -7929,7 +8027,10 @@ export class SpriteScene extends Scene {
                 let showCursor = false;
                 try {
                     const aidx = this._getAreaIndexForCoord(anchor.col, anchor.row);
-                    const ainfo = (Array.isArray(this._drawAreas) && typeof aidx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === aidx) : null;
+                    let ainfo = (Array.isArray(this._drawAreas) && typeof aidx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === aidx) : null;
+                    if (!ainfo) {
+                        try { const pos = this._tileCoordToPos(anchor.col, anchor.row, basePos, tileSize); ainfo = this.computeAreaInfo(pos, tileSize); if (ainfo) ainfo.renderOnly = this._isSimTooSmall(ainfo); } catch(e) { ainfo = null; }
+                    }
                     if (ainfo && ainfo.renderOnly) showCursor = true;
                 } catch (e) { showCursor = false; }
                 if (showCursor) {
