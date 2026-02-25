@@ -1851,7 +1851,7 @@ export class SpriteScene extends Scene {
                 if (this.keys.comboPressed(['s','Alt'])) {
                     console.log('emmiting')
                     window.Debug.emit('drawSelected');
-                } else if ((this.keys.pressed('s')||this.keys.pressed('S')) && !this.keys.held('Alt')) {
+                } else if ((this.keys.pressed('s')||this.keys.pressed('S')) && !this.keys.held('Alt') && !renderOnlyTile) {
                     const col = Color.convertColor(this.penColor || '#000000');
                     const hex = col.toHex();
                     let buffer = 1;
@@ -2862,11 +2862,74 @@ export class SpriteScene extends Scene {
 
             const pos = this.getPos(this.mouse.pos);
             const renderOnlyTile = !!(this.tilemode && pos && pos.renderOnly);
+
+            // Ensure pixel-mode Select All ('s' / Shift+S) fires reliably when not in render-only tile mode
+            if (!renderOnlyTile && (this.keys.pressed('s') || this.keys.pressed('S')) && !this.keys.held('Alt')) {
+                const col = Color.convertColor(this.penColor || '#000000');
+                const hex = col.toHex();
+                let buffer = 1;
+                if (this.keys.held('Shift')) {
+                    try {
+                        try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                        const input = window.prompt('Buffer amount (default 1)', '1');
+                        if (input !== null) {
+                            const parsed = parseFloat(String(input).trim());
+                            if (!Number.isNaN(parsed) && isFinite(parsed)) buffer = parsed;
+                        }
+                    } catch (e) { /* ignore prompt errors */ }
+                }
+                if (window.Debug && typeof window.Debug.emit === 'function') {
+                    window.Debug.emit('select', hex, buffer);
+                } else if (window.Debug && typeof window.Debug.createSignal === 'function') {
+                    const sig = window.Debug.signals && window.Debug.signals.get && window.Debug.signals.get('select');
+                    if (typeof sig === 'function') sig(hex, buffer);
+                }
+                // Prevent further handling in selectionTool for this keypress
+                return;
+            }
             if (renderOnlyTile && pos && pos.tileCol !== undefined && pos.tileRow !== undefined) {
                 this._tileHoverAnchor = { col: pos.tileCol, row: pos.tileRow };
             }
 
-            // Right click (without Shift) clears existing selection(s); when none, allow erase to proceed.
+            // Tile selection: 's' and Shift+S for select all (strictly render-only tilemode)
+            if (renderOnlyTile && (this.keys.pressed('s') || this.keys.pressed('S'))) {
+                const pos = this.getPos(this.mouse && this.mouse.pos);
+                if (pos && typeof pos.tileCol === 'number' && typeof pos.tileRow === 'number') {
+                    const idx = this._getAreaIndexForCoord(pos.tileCol, pos.tileRow);
+                    const refBinding = (typeof idx === 'number') ? this.getAreaBinding(idx) : null;
+                    // Default to {rot:0, flipH:false} if missing
+                    const refTransform = (typeof idx === 'number' && Array.isArray(this._areaTransforms) && this._areaTransforms[idx]) ? this._areaTransforms[idx] : { rot: 0, flipH: false };
+                    if (!this._tileSelection || !(this._tileSelection instanceof Set)) {
+                        this._tileSelection = new Set();
+                    }
+                    for (let i = 0; Array.isArray(this._tileIndexToCoord) && i < this._tileIndexToCoord.length; i++) {
+                        const tile = this._tileIndexToCoord[i];
+                        if (!tile) continue;
+                        const binding = this.getAreaBinding(i);
+                        // Default to {rot:0, flipH:false} if missing
+                        const transform = (Array.isArray(this._areaTransforms) && this._areaTransforms[i]) ? this._areaTransforms[i] : { rot: 0, flipH: false };
+                        // Only select if binding exists and matches
+                        if (!binding || !refBinding) continue;
+                        const sameType = (binding.anim === refBinding.anim && Number(binding.index) === Number(refBinding.index));
+                        if (this.keys.held('Shift')) {
+                            // Shift+S: select all with same type only (additive)
+                            if (sameType) {
+                                this._tileSelection.add(this._tileKey(tile.col, tile.row));
+                            }
+                        } else {
+                            // 's': select all with same type+rotation+flip (additive)
+                            if (!sameType) continue;
+                            const rotEq = (Number(refTransform.rot) === Number(transform.rot));
+                            const flipEq = (!!refTransform.flipH === !!transform.flipH);
+                            if (rotEq && flipEq) {
+                                this._tileSelection.add(this._tileKey(tile.col, tile.row));
+                            }
+                        }
+                    }
+                }
+                // Prevent pixel select all prompt when in renderOnlyTile mode
+                return;
+            }
             if (this.mouse.pressed('right') && !this.keys.held('Shift')) {
                 const hadPixelSelection = (this.selectionPoints && this.selectionPoints.length) || this.selectionRegion;
                 const hadTileSelection = renderOnlyTile && this._tileSelection && this._tileSelection.size > 0;
@@ -3029,10 +3092,15 @@ export class SpriteScene extends Scene {
 
             // Shift + Left click to add points (respecting brush size) and
             // Shift + Right click to remove points under the cursor (also
-            // respecting brush size).
-            if (this.keys.held('Shift')) {
+            // respecting brush size). Skip this block when Shift is paired
+            // with flood-fill keys so Shift+F can reach the fill handler.
+            const shiftHeld = this.keys.held('Shift');
+            const shiftForFill = shiftHeld && (this.keys.pressed('f') || this.keys.pressed('F') || this.keys.held('f') || this.keys.held('F'));
+            // Skip the selection-add brush when Shift is being used for flood-fill (Shift+F)
+            if (shiftHeld && !shiftForFill) {
                 if (renderOnlyTile) {
                     // Tile selection in render-only tilemode
+                    if (!this._tileSelection) this._tileSelection = new Set();
                     const tileBrush = this._tileBrushTiles(pos.tileCol ?? 0, pos.tileRow ?? 0, this.brushSize || 1);
                     if (this.mouse.held('left')) {
                         for (const t of tileBrush) this._tileSelection.add(this._tileKey(t.col, t.row));
@@ -3128,18 +3196,138 @@ export class SpriteScene extends Scene {
             // With 2+ selection points, 'l' draws a polygon (Alt to fill) in world space.
             // Holding Shift selects the polygon instead of drawing.
             const polyKey = (this.keys.pressed('l') || this.keys.pressed('L'));
-            if (this.selectionPoints.length >= 2 && polyKey) {
-                if (this.keys.held('Shift')) this._selectPolygonFromSelection();
-                else this._commitPolygonFromSelection();
+            if (polyKey) {
+                // Pixel mode: original behavior
+                if (this.selectionPoints.length >= 2 && !(renderOnlyTile && this.tilemode)) {
+                    if (this.keys.held('Shift')) this._selectPolygonFromSelection();
+                    else this._commitPolygonFromSelection();
+                }
+                // Render-only tilemode: connect selected tiles as polygon
+                if (renderOnlyTile && this._tileSelection && this._tileSelection.size >= 2) {
+                    const tileKeys = Array.from(this._tileSelection);
+                    const tilePoints = tileKeys.map(key => this._parseTileKey(key)).filter(Boolean);
+                    if (tilePoints.length >= 2) {
+                        // Build polygon path from tile integer coordinates
+                        const poly = tilePoints.map(t => ({ x: t.col, y: t.row }));
+                        // Rasterize polygon to tile set
+                        let fillTiles = new Set();
+                        if (this.keys.held('Alt')) {
+                            // Fill polygon interior (simple scanline fill)
+                            // Find bounds
+                            let minX = Math.floor(Math.min(...poly.map(p => p.x)));
+                            let maxX = Math.ceil(Math.max(...poly.map(p => p.x)));
+                            let minY = Math.floor(Math.min(...poly.map(p => p.y)));
+                            let maxY = Math.ceil(Math.max(...poly.map(p => p.y)));
+                            for (let y = minY; y < maxY; ++y) {
+                                // Find intersections with polygon edges
+                                let nodes = [];
+                                for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+                                    let yi = poly[i].y, yj = poly[j].y;
+                                    let xi = poly[i].x, xj = poly[j].x;
+                                    if ((yi < y && yj >= y) || (yj < y && yi >= y)) {
+                                        let xInt = xi + (y - yi) * (xj - xi) / (yj - yi);
+                                        nodes.push(xInt);
+                                    }
+                                }
+                                nodes.sort((a, b) => a - b);
+                                for (let k = 0; k + 1 < nodes.length; k += 2) {
+                                    let xStart = Math.floor(nodes[k]);
+                                    let xEnd = Math.ceil(nodes[k + 1]);
+                                    for (let x = xStart; x < xEnd; ++x) {
+                                        fillTiles.add(this._tileKey(x, y));
+                                    }
+                                }
+                            }
+                        } else {
+                            // Outline: connect the dots
+                            for (let i = 0; i < poly.length; ++i) {
+                                let a = poly[i], b = poly[(i + 1) % poly.length];
+                                // Bresenham's line between a and b
+                                let x0 = Math.round(a.x), y0 = Math.round(a.y);
+                                let x1 = Math.round(b.x), y1 = Math.round(b.y);
+                                let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+                                let sx = x0 < x1 ? 1 : -1;
+                                let sy = y0 < y1 ? 1 : -1;
+                                let err = dx - dy;
+                                while (true) {
+                                    fillTiles.add(this._tileKey(x0, y0));
+                                    if (x0 === x1 && y0 === y1) break;
+                                    let e2 = 2 * err;
+                                    if (e2 > -dy) { err -= dy; x0 += sx; }
+                                    if (e2 < dx) { err += dx; y0 += sy; }
+                                }
+                            }
+                        }
+                        // Apply fill/outline to tiles
+                        const binding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
+                        const transform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
+                        if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
+                        if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
+                        for (const key of fillTiles) {
+                            const tile = this._parseTileKey(key);
+                            if (!tile) continue;
+                            const idx = this._getAreaIndexForCoord(tile.col, tile.row);
+                            if (!Number.isFinite(idx)) continue;
+                            this._activateTile(tile.col, tile.row);
+                            this._areaBindings[idx] = binding ? { ...binding } : null;
+                            this._areaTransforms[idx] = transform ? { ...transform } : this._areaTransforms[idx];
+                        }
+                        return;
+                    }
+                }
             }
+
 
             // Grow / Shrink selection: ';' to grow, '\'' to shrink (released)
             try {
                 if (this.keys.released(';')) {
-                    try { this._growSelection(); } catch (e) { /* ignore */ }
+                    if (renderOnlyTile && this._tileSelection && this._tileSelection.size > 0) {
+                        // Grow tile selection
+                        const newTiles = new Set(this._tileSelection);
+                        for (const key of this._tileSelection) {
+                            const tile = this._parseTileKey(key);
+                            if (!tile) continue;
+                            // 4-way neighbors
+                            const neighbors = [
+                                { col: tile.col - 1, row: tile.row },
+                                { col: tile.col + 1, row: tile.row },
+                                { col: tile.col, row: tile.row - 1 },
+                                { col: tile.col, row: tile.row + 1 }
+                            ];
+                            for (const n of neighbors) {
+                                newTiles.add(this._tileKey(n.col, n.row));
+                            }
+                        }
+                        this._tileSelection = newTiles;
+                    } else {
+                        try { this._growSelection(); } catch (e) { /* ignore */ }
+                    }
                 }
                 if (this.keys.released("'")) {
-                    try { this._shrinkSelection(); } catch (e) { /* ignore */ }
+                    if (renderOnlyTile && this._tileSelection && this._tileSelection.size > 0) {
+                        // Shrink tile selection
+                        // Remove tiles that have any neighbor not in the selection
+                        const toRemove = new Set();
+                        for (const key of this._tileSelection) {
+                            const tile = this._parseTileKey(key);
+                            if (!tile) continue;
+                            const neighbors = [
+                                { col: tile.col - 1, row: tile.row },
+                                { col: tile.col + 1, row: tile.row },
+                                { col: tile.col, row: tile.row - 1 },
+                                { col: tile.col, row: tile.row + 1 }
+                            ];
+                            for (const n of neighbors) {
+                                if (!this._tileSelection.has(this._tileKey(n.col, n.row))) {
+                                    toRemove.add(key);
+                                    break;
+                                }
+                            }
+                        }
+                        for (const key of toRemove) this._tileSelection.delete(key);
+                    } else {
+                        try { this._shrinkSelection(); } catch (e) { /* ignore */ }
+                    }
                 }
             } catch (e) { /* ignore grow/shrink key errors */ }
 
@@ -3448,6 +3636,9 @@ export class SpriteScene extends Scene {
                 if (this.keys.pressed('v')) {
                     // Always try to refresh from system clipboard; if it succeeds it overwrites any local copy.
                     fetchSystemClipboard(false);
+                    // Always show clipboard preview after requesting clipboard
+                    this.clipboardPreview = true;
+                    this.keys.setPasscode('pasteMode');
                 }
                 const posForClipboard = this.getPos(this.mouse && this.mouse.pos);
                 const allowTileClipboard = !!(this.tilemode && ((posForClipboard && posForClipboard.renderOnly) || (this._tileSelection && this._tileSelection.size > 0)));
@@ -3534,6 +3725,26 @@ export class SpriteScene extends Scene {
                     // Tile-mode: perform tile-region fill or tile-region select when renderOnly
                     if (this.tilemode && pos && pos.renderOnly) {
                         try {
+                            // If there is a tile selection, fill all selected tiles
+                            if (this._tileSelection && this._tileSelection.size > 0 && !this.keys.held('Shift')) {
+                                const binding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
+                                const transform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
+                                if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
+                                if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
+                                for (const key of this._tileSelection) {
+                                    const tile = this._parseTileKey(key);
+                                    if (!tile) continue;
+                                    const idx = this._getAreaIndexForCoord(tile.col, tile.row);
+                                    if (!Number.isFinite(idx)) continue;
+                                    this._activateTile(tile.col, tile.row);
+                                    this._areaBindings[idx] = binding ? { ...binding } : null;
+                                    this._areaTransforms[idx] = transform ? { ...transform } : this._areaTransforms[idx];
+                                }
+                                return;
+                            }
+                            console.log('hello')
+
+                            // Otherwise, do normal flood fill/select
                             const startCol = (typeof pos.tileCol === 'number') ? pos.tileCol : null;
                             const startRow = (typeof pos.tileRow === 'number') ? pos.tileRow : null;
                             if (startCol === null || startRow === null) return;
@@ -3568,9 +3779,14 @@ export class SpriteScene extends Scene {
                                 stack.push({col: n.col, row: n.row + 1});
                             }
 
-                            if (results.length === 0) return;
+                            if (results.length === 0) { return; }
 
+                            // If we hit the MAX_NODES limit, treat as runoff and do not fill/select
+                            if (results.length >= MAX_NODES) { return; }
+
+                            
                             if (this.keys.held('Shift')) {
+                                console.log('yay')
                                 // select the region
                                 if (!this._tileSelection) this._tileSelection = new Set();
                                 for (const t of results) this._tileSelection.add(this._tileKey(t.col, t.row));
@@ -3578,6 +3794,7 @@ export class SpriteScene extends Scene {
                                 this._tileHoverAnchor = { col: startCol, row: startRow };
                                 return;
                             } else {
+                                console.log('heelo')
                                 // apply fill binding to region
                                 const binding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
                                 const transform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
