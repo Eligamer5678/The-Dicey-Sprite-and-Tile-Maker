@@ -362,6 +362,8 @@ export class SpriteScene extends Scene {
         this._pixelPerfectStrokeActive = false;
         this._pixelPerfectHistory = [];
         this._pixelPerfectOriginals = new Map();
+        // autotile toggle for render-only tilemode
+        this.autotile = false;
 
         // region-based selection (for cut/copy/paste)
         this.selectionRegion = null;
@@ -398,6 +400,10 @@ export class SpriteScene extends Scene {
         this._areaTransforms = [];
 
         this.FrameSelect = new FrameSelect(this,this.currentSprite,this.mouse,this.keys,this.UIDraw,1)
+        // load available tile connection mapping (tiles.json) for autotile matching
+        try {
+            fetch('tiles.json').then(r=>r.json()).then(obj=>{ this._availableTileConn = obj || {}; this._availableTileKeys = Object.keys(this._availableTileConn || {}); }).catch(()=>{});
+        } catch(e){}
         // create a simple color picker input positioned to the right of the left menu (shifted 200px)
         try {
             // ensure a default pen color exists
@@ -1823,11 +1829,16 @@ export class SpriteScene extends Scene {
                     }
                 }
 
-                // Toggle pixel-perfect drawing mode with 'a'. When enabled,
-                // the pen tool performs corner-cutting to avoid "L" shapes.
+                // Toggle pixel-perfect drawing mode with 'a' (when not in tilemode).
+                // If in tilemode, toggle autotile instead.
                 if (this.keys.released('a') || this.keys.released('A')) {
-                    this.pixelPerfect = !this.pixelPerfect;
-                    try { console.log('Pixel-perfect mode:', this.pixelPerfect); } catch (e) {}
+                    if (this.tilemode) {
+                        this.autotile = !this.autotile;
+                        try { console.log('Autotile mode:', this.autotile); } catch (e) {}
+                    } else {
+                        this.pixelPerfect = !this.pixelPerfect;
+                        try { console.log('Pixel-perfect mode:', this.pixelPerfect); } catch (e) {}
+                    }
                 }
 
                 // Palette swap: press 'p' to map current pen color to a target color (plus stepped variants) across all frames.
@@ -2118,20 +2129,52 @@ export class SpriteScene extends Scene {
                         const posForTransform = this.getPos(this.mouse && this.mouse.pos);
                         if (this.tilemode) {
                             const ai = posForTransform.areaIndex;
+                            const hasSelection = this._tileSelection && this._tileSelection.size > 0;
                             // Rotate: plain 'r' = preview rotate 90deg CW, Shift+'r' = commit rotate to frame data
                             if ((this.keys.pressed('R')||this.keys.pressed('r'))) {
-                                if (this.keys.held('Shift')) {
-                                    try { this.applyAreaRotateData(ai); } catch (e) { /* ignore */ }
+                                if (hasSelection) {
+                                    // apply to all selected tiles
+                                    for (const key of Array.from(this._tileSelection)) {
+                                        try {
+                                            const c = this._parseTileKey(key);
+                                            if (!c) continue;
+                                            const idx = this._getAreaIndexForCoord(c.col, c.row);
+                                            if (this.keys.held('Shift')) {
+                                                try { this.applyAreaRotateData(idx); } catch (e) {}
+                                            } else {
+                                                try { this.toggleAreaPreviewRotate(idx); } catch (e) {}
+                                            }
+                                        } catch (e) { continue; }
+                                    }
                                 } else {
-                                    try { this.toggleAreaPreviewRotate(ai); } catch (e) { /* ignore */ }
+                                    if (this.keys.held('Shift')) {
+                                        try { this.applyAreaRotateData(ai); } catch (e) { /* ignore */ }
+                                    } else {
+                                        try { this.toggleAreaPreviewRotate(ai); } catch (e) { /* ignore */ }
+                                    }
                                 }
                             }
                             // Flip: Alt+f toggles preview flip, Alt+Shift+f applies flip to frame data
                             if ((this.keys.pressed('F')||this.keys.pressed('f')) && this.keys.held('Alt')) {
-                                if (this.keys.held('Shift')) {
-                                    try { this.applyAreaFlipData(ai); } catch (e) { /* ignore */ }
+                                if (hasSelection) {
+                                    for (const key of Array.from(this._tileSelection)) {
+                                        try {
+                                            const c = this._parseTileKey(key);
+                                            if (!c) continue;
+                                            const idx = this._getAreaIndexForCoord(c.col, c.row);
+                                            if (this.keys.held('Shift')) {
+                                                try { this.applyAreaFlipData(idx); } catch (e) {}
+                                            } else {
+                                                try { this.toggleAreaPreviewFlip(idx); } catch (e) {}
+                                            }
+                                        } catch (e) { continue; }
+                                    }
                                 } else {
-                                    try { this.toggleAreaPreviewFlip(ai); } catch (e) { /* ignore */ }
+                                    if (this.keys.held('Shift')) {
+                                        try { this.applyAreaFlipData(ai); } catch (e) { /* ignore */ }
+                                    } else {
+                                        try { this.toggleAreaPreviewFlip(ai); } catch (e) { /* ignore */ }
+                                    }
                                 }
                             }
                         }
@@ -2351,9 +2394,27 @@ export class SpriteScene extends Scene {
                     this._activateTile(t.col, t.row);
                     const entry = { ...baseBinding };
                     if (stack.length > 0) entry.multiFrames = stack;
+                    // apply autotile selection if enabled
+                    if (this.autotile) {
+                        try {
+                            const anim = entry.anim || (this.selectedAnimation || '');
+                            // compute key and choose best tile index
+                            const chosen = this._computeConnectionKey ? this._chooseBestTileIndex(this._computeConnectionKey(t.col, t.row, anim), anim) : null;
+                            if (chosen !== null && typeof chosen !== 'undefined') {
+                                entry.index = chosen;
+                            }
+                        } catch (e) {}
+                    }
                     this._areaBindings[idx] = entry;
+                    try {
+                        const frameKey = (this.selectedAnimation || '') + '::' + (Number.isFinite(this.selectedFrame) ? this.selectedFrame : 0);
+                        const connKey = this.selectedTileConnection || ((this._tileConnMap && this._tileConnMap[frameKey]) ? this._tileConnMap[frameKey] : null);
+                        console.log('Placed tile connection:', connKey, 'at', t.col, t.row, entry);
+                    } catch (e) {}
                     if (!this._areaTransforms) this._areaTransforms = [];
                     this._areaTransforms[idx] = baseTransform ? { ...baseTransform } : this._areaTransforms[idx];
+                    // update neighbors if autotile enabled
+                    try { if (this.autotile) this._updateAutotileNeighbors(t.col, t.row, entry.anim || this.selectedAnimation); } catch(e){}
                 }
             } else if (this.mouse.held('right')) {
                 // If tiles are selected, right-drag acts as deselect instead of erase
@@ -2392,6 +2453,121 @@ export class SpriteScene extends Scene {
             }
         }
         return tiles;
+    }
+
+    // Compute an 8-bit connection key for tile at (col,row) for a given animation name.
+    _computeConnectionKey(col, row, anim) {
+        // bits: edges top,right,bottom,left then corners tl,tr,br,bl. '1' means closed (no neighbor)
+        const hasNeighbor = (c, r) => {
+            const ai = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(c, r) : null;
+            if (ai === null || ai === undefined) return false;
+            const b = Array.isArray(this._areaBindings) ? this._areaBindings[ai] : null;
+            if (!b) return false;
+            return (b.anim === anim);
+        };
+
+        const top = hasNeighbor(col, row-1);
+        const right = hasNeighbor(col+1, row);
+        const bottom = hasNeighbor(col, row+1);
+        const left = hasNeighbor(col-1, row);
+        // edges: closed if no neighbor
+        let eTop = top ? '0' : '1';
+        let eRight = right ? '0' : '1';
+        let eBottom = bottom ? '0' : '1';
+        let eLeft = left ? '0' : '1';
+
+        // corners: check diagonal neighbors
+        const tl = hasNeighbor(col-1, row-1);
+        const tr = hasNeighbor(col+1, row-1);
+        const br = hasNeighbor(col+1, row+1);
+        const bl = hasNeighbor(col-1, row+1);
+        let cTL = tl ? '0' : '1';
+        let cTR = tr ? '0' : '1';
+        let cBR = br ? '0' : '1';
+        let cBL = bl ? '0' : '1';
+
+        // If an edge is closed, its touching corners must also close
+        if (eTop === '1') { cTL = '1'; cTR = '1'; }
+        if (eRight === '1') { cTR = '1'; cBR = '1'; }
+        if (eBottom === '1') { cBR = '1'; cBL = '1'; }
+        if (eLeft === '1') { cTL = '1'; cBL = '1'; }
+
+        // Final key: edges then corners
+        return '' + eTop + eRight + eBottom + eLeft + cTL + cTR + cBR + cBL;
+    }
+
+    // Choose best matching available tile index for a desired key and animation.
+    _chooseBestTileIndex(desiredKey, anim) {
+        if (!this._availableTileConn) return null;
+        const candidates = this._availableTileKeys || Object.keys(this._availableTileConn || {});
+        if (candidates.includes(desiredKey)) return this._availableTileConn[desiredKey];
+
+        // scoring priorities: same closed edges, same open edges, same open corners, same closed corners
+        const scoreFor = (candKey) => {
+            let scClosedEdges = 0, scOpenEdges = 0, scOpenCorners = 0, scClosedCorners = 0;
+            for (let i = 0; i < 4; i++) {
+                const d = desiredKey[i];
+                const c = candKey[i];
+                if (d === '1' && c === '1') scClosedEdges++;
+                if (d === '0' && c === '0') scOpenEdges++;
+            }
+            for (let i = 4; i < 8; i++) {
+                const d = desiredKey[i];
+                const c = candKey[i];
+                if (d === '0' && c === '0') scOpenCorners++;
+                if (d === '1' && c === '1') scClosedCorners++;
+            }
+            return [scClosedEdges, scOpenEdges, scOpenCorners, scClosedCorners];
+        };
+
+        let best = null;
+        let bestScore = null;
+        for (const ck of candidates) {
+            const score = scoreFor(ck);
+            if (!bestScore || compareScore(score, bestScore) > 0) {
+                best = ck;
+                bestScore = score;
+            }
+        }
+        if (best) return this._availableTileConn[best];
+        return null;
+
+        function compareScore(a, b) {
+            for (let i = 0; i < a.length; i++) {
+                if (a[i] > b[i]) return 1;
+                if (a[i] < b[i]) return -1;
+            }
+            return 0;
+        }
+    }
+
+    // Apply autotile to the tile at (col,row) for a given anim: choose best tile and set binding.
+    _applyAutotileAt(col, row, anim) {
+        const areaIdx = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(col, row) : null;
+        if (areaIdx === null || areaIdx === undefined) return;
+        const key = this._computeConnectionKey(col, row, anim);
+        const chosen = this._chooseBestTileIndex(key, anim);
+        if (chosen === null || chosen === undefined) return;
+        if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
+        const old = this._areaBindings[areaIdx];
+        const entry = (old && typeof old === 'object') ? { ...old } : { anim: anim, index: chosen };
+        entry.index = chosen;
+        this._areaBindings[areaIdx] = entry;
+        return true;
+    }
+
+    // Update neighboring tiles around (col,row) for autotile (4-way and diagonals)
+    _updateAutotileNeighbors(col, row, anim) {
+        const deltas = [ [0,0], [0,-1],[1,0],[0,1],[-1,0],[-1,-1],[1,-1],[1,1],[-1,1] ];
+        for (const d of deltas) {
+            const c = col + d[0];
+            const r = row + d[1];
+            const ai = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(c, r) : null;
+            if (ai === null || ai === undefined) continue;
+            const b = Array.isArray(this._areaBindings) ? this._areaBindings[ai] : null;
+            if (!b || b.anim !== anim) continue;
+            this._applyAutotileAt(c, r, anim);
+        }
     }
 
     // Ensure the current sprite has mirror-aware wrappers so any edit (not just pen) is mirrored.
@@ -8160,10 +8336,11 @@ export class SpriteScene extends Scene {
 
             if (mousePixelPos) {
                 // Color tokens: default white, switch to yellow when pixel-perfect pen enabled
-                const previewLineColor = this.pixelPerfect ? '#FFFF0088' : '#FFFFFF88';
-                const previewFillColor = this.pixelPerfect ? '#FFFF0044' : '#FFFFFF44';
-                const cursorFillColor = this.pixelPerfect ? '#FFFF0022' : '#FFFFFF22';
-                const cursorOutlineColor = this.pixelPerfect ? '#FFFF00EE' : '#FFFFFFEE';
+                const useYellow = (!this.tilemode && this.pixelPerfect) || (this.tilemode && this.autotile);
+                const previewLineColor = useYellow ? '#FFFF0088' : '#FFFFFF88';
+                const previewFillColor = useYellow ? '#FFFF0044' : '#FFFFFF44';
+                const cursorFillColor = useYellow ? '#FFFF0022' : '#FFFFFF22';
+                const cursorOutlineColor = useYellow ? '#FFFF00EE' : '#FFFFFFEE';
 
                 if (this.currentTool === 'line' && this.selectionPoints.length === 1) {
                     this.drawLine(this.selectionPoints[0], mousePixelPos, previewLineColor);

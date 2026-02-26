@@ -9,6 +9,7 @@ import UITextInput from './UITextInput.js';
 import SpriteSheet from '../Spritesheet.js';
 import createHButton from '../htmlElements/createHButton.js';
 import createHInput from '../htmlElements/createHInput.js';
+import TileConnPicker from './TileConnPicker.js';
 
 export default class FrameSelect {
     constructor(scene,sprite, mouse, keys, UIDraw, layer = 1) {
@@ -48,6 +49,31 @@ export default class FrameSelect {
         this._importBtn = null;
         this._exportBtn = null;
         this._createImportExportUI();
+
+        // Tile connection picker sidebar (to the right of the frame sidebar)
+        try {
+            // shift down to avoid scene header and tighten width, increase height
+            const sidePos = new Vector(this.menu.pos.x + this.menu.size.x + 8, this.menu.pos.y + 8 + 75);
+            // scale container up by ~50% to reduce compression on small screens
+            const sideSize = new Vector(Math.round(140 * 1.5), Math.round(600 * 1.5));
+            this.tileConnMenu = new Menu(this.mouse, this.keys, sidePos, sideSize, this.layer, '#FFFFFF11');
+            this.tileConnPicker = new TileConnPicker(this.mouse, this.keys, new Vector(sidePos.x + 4, sidePos.y + 4), new Vector(sideSize.x - 8, sideSize.y - 8), this.layer+1, { sheetPath: 'Assets/tiles.png', jsonPath: 'tiles.json', slice: 16, cellSize: 32, onSelect: (k,i)=>{} });
+            // when user selects a connection type, store per-frame on scene for placement logging
+            try {
+                this.tileConnPicker.onSelect = (key, index) => {
+                    try {
+                        if (!this.scene) return;
+                        if (!this.scene._tileConnMap) this.scene._tileConnMap = {};
+                        const anim = (this.scene.selectedAnimation || '');
+                        const frame = Number.isFinite(this.scene.selectedFrame) ? this.scene.selectedFrame : 0;
+                        const k = anim + '::' + frame;
+                        this.scene._tileConnMap[k] = key;
+                        // also store a scene-level recent selection for immediate placement fallback
+                        this.scene.selectedTileConnection = key;
+                    } catch (e) {}
+                };
+            } catch (e) {}
+        } catch (e) { console.warn('TileConnPicker init failed', e); }
     }
 
     // Rebuild palette entries from scene.tileTypes (array of {sheetId,row,col})
@@ -796,6 +822,17 @@ export default class FrameSelect {
 
     update(delta) {
         this.menu.update(delta);
+        try { if (this.tileConnMenu) this.tileConnMenu.update(delta); } catch(e){}
+        try { if (this.tileConnPicker) this.tileConnPicker.update(delta); } catch(e){}
+        // keep picker selection in sync with current animation/frame (per-frame selection)
+        try {
+            if (this.tileConnPicker && this.scene) {
+                const anim = (this.scene.selectedAnimation || '');
+                const frame = Number.isFinite(this.scene.selectedFrame) ? this.scene.selectedFrame : 0;
+                const k = (this.scene._tileConnMap && this.scene._tileConnMap[anim + '::' + frame]) ? this.scene._tileConnMap[anim + '::' + frame] : null;
+                this.tileConnPicker.selected = k;
+            }
+        } catch (e) {}
         // active group (id of last-clicked group slot)
         if (typeof this._activeGroup === 'undefined') this._activeGroup = null;
         if(this.mouse.pos.x <= 200){
@@ -1668,6 +1705,8 @@ export default class FrameSelect {
 
         // draw the menu and its children
         this.menu.draw(this.UIDraw);
+        try { if (this.tileConnMenu) this.tileConnMenu.draw(this.UIDraw); } catch(e){}
+        try { if (this.tileConnPicker) this.tileConnPicker.draw(this.UIDraw); } catch(e){}
         // draw animation list under preview
         try{
             const outerPos = new Vector(1920-this._previewBuffer*3-this._previewSize, this._previewBuffer);
@@ -1794,6 +1833,18 @@ export default class FrameSelect {
                         } catch (e) {}
                         if (isPrimary) this.UIDraw.rect(slotPos, slotSize, '#00000000', false, true, 4, '#FFFF00FF');
                         if (isMulti) this.UIDraw.rect(slotPos, slotSize, '#00000000', false, true, 4, '#00FF00FF');
+                        // draw per-frame tile selection indicator: check scene._tileConnMap for this frame
+                        try {
+                            if (this.scene) {
+                                const frameKey = (anim || '') + '::' + i;
+                                const val = (this.scene._tileConnMap && typeof this.scene._tileConnMap[frameKey] !== 'undefined') ? this.scene._tileConnMap[frameKey] : null;
+                                if (val !== null && typeof val !== 'undefined') {
+                                    // draw a cyan bar touching left edge of screen
+                                    const barW = 4; // px
+                                    this.UIDraw.rect(new Vector(0, slotPos.y), new Vector(barW, slotSize.y), '#00FFFFFF', true);
+                                }
+                            }
+                        } catch (e) {}
                     } else if (item.type === 'group'){
                         // if all indices in group are selected, draw group multi outline
                         const gp2 = item.group;
