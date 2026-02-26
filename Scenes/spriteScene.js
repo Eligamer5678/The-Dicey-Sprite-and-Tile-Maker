@@ -2427,8 +2427,15 @@ export class SpriteScene extends Scene {
                         const idx = (typeof t.areaIndex === 'number') ? t.areaIndex : this._getAreaIndexForCoord(t.col, t.row);
                         if (idx === null || idx === undefined) continue;
                         try { this._deactivateTile(t.col, t.row); } catch (e) { /* ignore */ }
+                        // capture old binding anim so neighbors of same animation can be updated
+                        let oldAnim = null;
+                        try {
+                            if (Array.isArray(this._areaBindings) && this._areaBindings[idx] && this._areaBindings[idx].anim) oldAnim = this._areaBindings[idx].anim;
+                        } catch(e){}
                         if (Array.isArray(this._areaBindings)) this._areaBindings[idx] = null;
                         if (Array.isArray(this._areaTransforms)) this._areaTransforms[idx] = null;
+                        // update neighbors if autotile enabled
+                        try { if (this.autotile) this._updateAutotileNeighbors(t.col, t.row, oldAnim || this.selectedAnimation); } catch(e){}
                     }
                 }
             }
@@ -8521,8 +8528,10 @@ export class SpriteScene extends Scene {
                 const topLeft = this._tileCoordToPos(topLeftTile.col, topLeftTile.row, basePos, tileSize);
                 const rectPos = topLeft;
                 const rectSize = new Vector(side * tileSize.x, side * tileSize.y);
-                const cursorFill = '#FFFFFF22';
-                const cursorStroke = '#FFFFFFEE';
+                // use yellow cursor when autotile is enabled
+                const useYellowTileCursor = !!this.autotile;
+                const cursorFill = useYellowTileCursor ? '#FFFF0022' : '#FFFFFF22';
+                const cursorStroke = useYellowTileCursor ? '#FFFF00EE' : '#FFFFFFEE';
                     const strokeW = Math.max(2, Math.round(Math.min(tileSize.x, tileSize.y) * 0.03));
                     this.Draw.rect(rectPos, rectSize, cursorFill, true);
                     this.Draw.rect(rectPos, rectSize, cursorStroke, false, true, strokeW, cursorStroke);

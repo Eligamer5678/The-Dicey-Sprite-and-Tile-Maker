@@ -46,6 +46,7 @@
 - ] for vertical mirror, and [ for horizontal mirroring
 - shift+f to select region
 - a to toggle pixel perfect drawing when the pen size is 1 (i.e. cornercutting)
+- Note: Pixel perfect pen swappes out for auto tile pen in tilemap mode.
 - ctrl + z = Undo
 - ` to resize canvas (instead of 16x16)
 - ; grow selection
