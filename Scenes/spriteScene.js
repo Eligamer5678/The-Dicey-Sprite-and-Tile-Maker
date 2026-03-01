@@ -1,12 +1,17 @@
 import Scene from './Scene.js';
-import Vector from '../js/Vector.js';
-import createHButton from '../js/htmlElements/createHButton.js';
+import Vector,{v} from '../js/Vector.js';
 import createHDiv from '../js/htmlElements/createHDiv.js';
 import createHInput from '../js/htmlElements/createHInput.js';
 import SpriteSheet from '../js/Spritesheet.js';
 import FrameSelect from '../js/UI/frameSelect.js';
 import Color from '../js/Color.js';
 import { copyToClipboard } from '../js/Support.js';
+import { initializeSpriteSceneState } from './spriteScene/stateDefaults.js';
+import { setupSpriteSceneMultiplayerHooks } from './spriteScene/multiplayerBootstrap.js';
+import { createSpriteCollabTransport } from './spriteScene/collabTransport.js';
+import { installSpriteSceneStateBindings } from './spriteScene/stateBindings.js';
+import { createSpriteSceneStateController } from './spriteScene/stateController.js';
+import { createSpriteWebRTCCollabController } from './spriteScene/webrtcCollab.js';
 
 export class SpriteScene extends Scene {
     constructor(...args) {
@@ -16,388 +21,53 @@ export class SpriteScene extends Scene {
     }
 
     onReady() {
-        // Whether shape tools (line/box) should treat selected points as a protective mask.
-        // Default `false` because shapes often use selected points as an origin.
         this.maskShapesWithSelection = false;
 
-        // quick canvas clear 
-        const worldLayers = ['bg', 'base', 'overlay'];
-        for (const ln of worldLayers) {
-            try {
-                this.Draw.useCtx(ln);
-                this.Draw.popMatrix(false,true)
-                this.Draw.clear();
-            } catch (e) { console.warn('Could not clear world layer', ln, e); }
-        }
-        const UILayers = ['UI', 'overlays'];
-        for (const ln of UILayers) {
-            try {
-                this.UIDraw.useCtx(ln);
-                this.UIDraw.popMatrix(false,true)
-                this.UIDraw.clear();
-            } catch (e) { console.warn('Could not clear UI layer', ln, e); }
-        }
-        this.Draw.useCtx('base')
-        this.UIDraw.useCtx('UI')
 
-        // Create or reuse the shared layer panel for persistent HTML buttons
+        this.currentSprite = SpriteSheet.createNew(16, 'idle');
+        this.currentSprite.insertFrame('idle',1)
+        // Quick test paint: draw a small emoji-like face into the first idle frame
         try {
-            const panel = document.getElementById('layer-panel');
-            if (panel) {
-                // If the panel was created by the Tiles scene, update the scene buttons
-                const tilesBtn = document.getElementById('tiles-scene-btn');
-                const spritesBtn = document.getElementById('sprites-scene-btn');
-                const collisionBtn = document.getElementById('collision-scene-btn');
-                if (tilesBtn) {
-                    tilesBtn.style.background = '#333';
-                    tilesBtn.onclick = () => { try { this.switchScene && this.switchScene('title'); } catch(e){} };
-                }
-                if (spritesBtn) {
-                    spritesBtn.style.background = '#555';
-                    spritesBtn.onclick = () => { try { this.switchScene && this.switchScene('spriteScene'); } catch(e){} };
-                }
-                if (collisionBtn) {
-                    collisionBtn.style.background = '#333';
-                    collisionBtn.onclick = () => { try { this.switchScene && this.switchScene('collision'); } catch(e){} };
-                }
-            } else {
-                // If the panel doesn't exist (edge case), create a small placeholder panel
-                const panel2 = createHDiv('layer-panel', new Vector(8,8), new Vector(540,44), '#00000033', { borderRadius: '6px', border: '1px solid #FFFFFF22', padding: '6px', display: 'flex', alignItems: 'center', gap: '6px' }, 'UI');
-                const sceneBtnSize = new Vector(80, 28);
-                const tilesSceneBtn = createHButton('tiles-scene-btn', new Vector(6, 8), sceneBtnSize, '#333', { color: '#fff', borderRadius: '4px', fontSize: 13, border: '1px solid #777' }, panel2);
-                tilesSceneBtn.textContent = 'Tiles';
-                const spritesSceneBtn = createHButton('sprites-scene-btn', new Vector(92, 8), sceneBtnSize, '#333', { color: '#fff', borderRadius: '4px', fontSize: 13, border: '1px solid #777' }, panel2);
-                spritesSceneBtn.textContent = 'Sprites';
-                const collisionSceneBtn = createHButton('collision-scene-btn', new Vector(178, 8), sceneBtnSize, '#333', { color: '#fff', borderRadius: '4px', fontSize: 13, border: '1px solid #777' }, panel2);
-                collisionSceneBtn.textContent = 'Collision';
-                tilesSceneBtn.onclick = () => { try { this.switchScene && this.switchScene('title'); } catch(e){} };
-                spritesSceneBtn.onclick = () => { try { this.switchScene && this.switchScene('spriteScene'); } catch(e){} };
-                spritesSceneBtn.style.background = '#555';
+            const frame = this.currentSprite.getFrame('idle', 0);
+            if (frame) {
+                const fctx = frame.getContext('2d');
+                // clear transparent
+                fctx.clearRect(0, 0, frame.width, frame.height);
+                // orange face
+                fctx.fillStyle = '#FFAA33';
+                fctx.fillRect(1, 1, frame.width - 2, frame.height - 2);
+                // eyes
+                fctx.fillStyle = '#000000';
+                fctx.fillRect(4, 4, 2, 2);
+                fctx.fillRect(10, 4, 2, 2);
+                // mouth
+                fctx.fillRect(6, 10, 4, 1);
             }
-        } catch (e) { console.warn('SpriteScene.createUI failed', e); }
+            // rebuild the packed sheet so Draw.sheet picks up the change
+            if (typeof this.currentSprite._rebuildSheetCanvas === 'function') this.currentSprite._rebuildSheetCanvas();
+        } catch (e) { console.warn('failed to paint test frame', e); }
 
-        // Minimal scene state
-        this.infoText = 'Sprites editor — import images and build animations.';
-        // create a default editable spritesheet to show a blank frame
-        try {
-            this.currentSprite = SpriteSheet.createNew(16, 'idle');
-            this.currentSprite.insertFrame('idle',1)
-            // Quick test paint: draw a small emoji-like face into the first idle frame
-            try {
-                const frame = this.currentSprite.getFrame('idle', 0);
-                if (frame) {
-                    const fctx = frame.getContext('2d');
-                    // clear transparent
-                    fctx.clearRect(0, 0, frame.width, frame.height);
-                    // orange face
-                    fctx.fillStyle = '#FFAA33';
-                    fctx.fillRect(1, 1, frame.width - 2, frame.height - 2);
-                    // eyes
-                    fctx.fillStyle = '#000000';
-                    fctx.fillRect(4, 4, 2, 2);
-                    fctx.fillRect(10, 4, 2, 2);
-                    // mouth
-                    fctx.fillRect(6, 10, 4, 1);
-                }
-                // rebuild the packed sheet so Draw.sheet picks up the change
-                if (typeof this.currentSprite._rebuildSheetCanvas === 'function') this.currentSprite._rebuildSheetCanvas();
-            } catch (e) { console.warn('failed to paint test frame', e); }
-        } catch (e) { console.warn('failed to create default SpriteSheet', e); }
+
 
         // --- Multiplayer edit buffering / hooks ---
-        try {
-            // op buffer collects small edit objects before sending to server
-            this._opBuffer = [];
-            this._seenOpIds = new Set();
-            this._sendScheduledId = null;
-            this._sendIntervalMs = 120; // throttle outgoing batches
-            this.clientId = this.playerId || ('c' + Math.random().toString(36).slice(2,8));
-            this._lastModified = new Map(); // anim -> frameIndex -> Uint32Array timestamps (ms)
-            this._suppressOutgoing = false;
-            // track remote edit entries we have seen so we can prune older ops
-            this._remoteEdits = new Map(); // id -> timestamp (ms)
-            // pruning configuration: prune edits older than 30s (30000ms)
-            this._pruneIntervalMs = 10000;
-            this._pruneThresholdMs = 30000;
-            this._pruneIntervalId = null;
-            // message tracking and local username
-            this._seenMsgIds = new Set();
+        this.collabTransport = createSpriteCollabTransport(this);
+        initializeSpriteSceneState(this, this.currentSprite);
+        installSpriteSceneStateBindings(this);
+        this.stateController = createSpriteSceneStateController(this);
+        this.webrtcCollab = createSpriteWebRTCCollabController(this);
+        setupSpriteSceneMultiplayerHooks(this, this.currentSprite);
+        this.configureCollabTransport();
+        if (this.EM && typeof this.EM.connect === 'function') {
             try {
-                this.playerName = (this.saver && typeof this.saver.get === 'function') ? this.saver.get('player_name') : null;
-            } catch (e) { this.playerName = null; }
-
-            const sheet = this.currentSprite;
-            if (sheet) {
-                // wrap modifyFrame to record pixel changes
-                if (typeof sheet.modifyFrame === 'function') {
-                    const _origModify = sheet.modifyFrame.bind(sheet);
-                    sheet.modifyFrame = (animation, index, changes) => {
-                        try { this._recordUndoPixels(animation, index, changes); } catch (e) { /* ignore undo capture errors */ }
-                        const res = _origModify(animation, index, changes);
-                        try {
-                            const pixels = [];
-                            if (Array.isArray(changes)) {
-                                for (const c of changes) {
-                                    if (!c) continue;
-                                    if (c.x === undefined || c.y === undefined) continue;
-                                    pixels.push({ x: Number(c.x), y: Number(c.y), color: (c.color || c.col || c.c || '#000000') });
-                                }
-                            } else if (changes && typeof changes.x === 'number') {
-                                pixels.push({ x: Number(changes.x), y: Number(changes.y), color: (changes.color || '#000000') });
-                            }
-                            if (pixels.length) {
-                                // update last-modified timestamps for local pixels
-                                try { const now = Date.now(); for (const p of pixels) { try { this._markPixelModified(animation, Number(index), Number(p.x), Number(p.y), now); } catch(e){} } } catch(e){}
-                                if (!this._suppressOutgoing) {
-                                    this._opBuffer.push({ type: 'draw', anim: animation, frame: Number(index), pixels, client: this.clientId, time: Date.now() });
-                                    this._scheduleSend && this._scheduleSend();
-                                }
-                            }
-                        } catch (e) { /* non-fatal */ }
-                        return res;
-                    };
-                }
-                // wrap setPixel convenience if present
-                if (typeof sheet.setPixel === 'function') {
-                    const _origSet = sheet.setPixel.bind(sheet);
-                    sheet.setPixel = (animation, index, x, y, color, blendType) => {
-                        try { this._recordUndoPixels(animation, index, { x, y, color, blendType }); } catch (e) { /* ignore undo capture errors */ }
-                        const res = _origSet(animation, index, x, y, color, blendType);
-                        try {
-                            const now = Date.now(); try { this._markPixelModified(animation, Number(index), Number(x), Number(y), now); } catch(e){}
-                            if (!this._suppressOutgoing) {
-                                this._opBuffer.push({ type: 'draw', anim: animation, frame: Number(index), pixels: [{ x: Number(x), y: Number(y), color: (color || '#000000') }], client: this.clientId, time: now });
-                                this._scheduleSend && this._scheduleSend();
-                            }
-                        } catch (e) { /* ignore */ }
-                        return res;
-                    };
-                }
-                // wrap structural frame/animation methods so remote peers receive metadata updates
-                if (typeof sheet.insertFrame === 'function') {
-                    const _origInsert = sheet.insertFrame.bind(sheet);
-                    sheet.insertFrame = (animation, index) => {
-                        const res = _origInsert(animation, index);
-                        try {
-                            // compute logical count AFTER insertion
-                            const arr = sheet._frames.get(animation) || [];
-                            let logical = 0; for (let i=0;i<arr.length;i++){ const e=arr[i]; if(!e) continue; if(e.__groupStart||e.__groupEnd) continue; logical++; }
-                            if (this.server && !this._suppressOutgoing) {
-                                const diff = {};
-                                // update metadata with new logical frame count
-                                diff['meta/animations/' + encodeURIComponent(animation)] = logical;
-                                // also send an explicit structural op so peers know WHICH index was inserted
-                                const opIndex = (typeof index === 'number' && index >= 0) ? Number(index) : Math.max(0, logical - 1);
-                                const id = (Date.now()) + '_' + Math.random().toString(36).slice(2,6);
-                                diff['edits/' + id] = { type: 'struct', action: 'insertFrame', anim: animation, index: opIndex, client: this.clientId, time: Date.now() };
-                                try { this.server.sendDiff(diff); } catch(e){}
-                            }
-                        } catch(e){}
-                        return res;
-                    };
-                }
-                if (typeof sheet.popFrame === 'function') {
-                    const _origPop = sheet.popFrame.bind(sheet);
-                    sheet.popFrame = (animation, index) => {
-                        // capture frame canvas for undo before deletion
-                        let removedCanvas = null;
-                        try {
-                            const logicalIdx = (typeof index === 'number' && index >= 0) ? Number(index) : 0;
-                            removedCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(animation, logicalIdx) : null;
-                        } catch (e) { /* ignore capture errors */ }
-                        // compute logical count BEFORE deletion so we can infer which index was removed when index is undefined
-                        let preLogical = 0;
-                        try {
-                            const preArr = sheet._frames.get(animation) || [];
-                            for (let i=0;i<preArr.length;i++){ const e=preArr[i]; if(!e) continue; if(e.__groupStart||e.__groupEnd) continue; preLogical++; }
-                        } catch(e) {}
-
-                        const res = _origPop(animation, index);
-                        try {
-                            const arr = sheet._frames.get(animation) || [];
-                            let logical = 0; for (let i=0;i<arr.length;i++){ const e=arr[i]; if(!e) continue; if(e.__groupStart||e.__groupEnd) continue; logical++; }
-                            if (this.server && !this._suppressOutgoing) {
-                                const diff = {};
-                                // update metadata with new logical frame count
-                                diff['meta/animations/' + encodeURIComponent(animation)] = logical;
-                                // and send a structural op describing exactly which logical index was deleted
-                                let opIndex;
-                                if (typeof index === 'number' && index >= 0) opIndex = Number(index);
-                                else opIndex = Math.max(0, preLogical - 1); // last logical frame prior to deletion
-                                const id = (Date.now()) + '_' + Math.random().toString(36).slice(2,6);
-                                diff['edits/' + id] = { type: 'struct', action: 'deleteFrame', anim: animation, index: opIndex, client: this.clientId, time: Date.now() };
-                                try {
-                                    const dataUrl = removedCanvas && removedCanvas.toDataURL ? removedCanvas.toDataURL('image/png') : null;
-                                    this._pushUndo({ type: 'delete-frame', anim: animation, index: opIndex, dataUrl, size: sheet.slicePx || 16, time: Date.now() });
-                                } catch (e) { /* ignore undo capture errors */ }
-                                try { this.server.sendDiff(diff); } catch(e){}
-                            }
-                        } catch(e){}
-                        return res;
-                    };
-                }
-                if (typeof sheet.addAnimation === 'function') {
-                    const _origAddAnim = sheet.addAnimation.bind(sheet);
-                    sheet.addAnimation = (name,row,frameCount) => {
-                        const res = _origAddAnim(name,row,frameCount);
-                        try {
-                            if (this.server && !this._suppressOutgoing) {
-                                const diff = {};
-                                diff['meta/animations/' + encodeURIComponent(name)] = Number(frameCount) || 0;
-                                try { this.server.sendDiff(diff); } catch(e){}
-                            }
-                        } catch(e){}
-                        return res;
-                    };
-                }
-                if (typeof sheet.removeAnimation === 'function') {
-                    const _origRemoveAnim = sheet.removeAnimation.bind(sheet);
-                    sheet.removeAnimation = (name) => {
-                        const res = _origRemoveAnim(name);
-                        try {
-                            if (this.server && !this._suppressOutgoing) {
-                                const diff = {};
-                                // set count to 0 to indicate removal
-                                diff['meta/animations/' + encodeURIComponent(name)] = 0;
-                                try { this.server.sendDiff(diff); } catch(e){}
-                            }
-                        } catch(e){}
-                        return res;
-                    };
-                }
-            }
-
-            // hide multiplayer menu by default if present
-            try {
-                const mp = document.getElementById('multiplayer-menu');
-                if (mp) mp.style.display = 'none';
+                this.EM.connect('spriteScene-webrtc-autostart', async () => {
+                    try {
+                        if (this.webrtcCollab && !this.webrtcCollab.started) {
+                            await this.webrtcCollab.start({ offer: null });
+                        }
+                    } catch (e) { /* ignore autostart errors */ }
+                });
             } catch (e) {}
-
-            // start periodic pruning of old edits (safe to run even if no edits known yet)
-            try {
-                this._pruneIntervalId = setInterval(() => { try { this._pruneOldEdits(); } catch (e) {} }, this._pruneIntervalMs || 10000);
-            } catch (e) {}
-            // cursor presence state
-            try {
-                this._cursorSendIntervalMs = 100; // send at most every 100ms
-                this._cursorThrottleId = null;
-                this._lastCursorPos = null;
-                this._remoteCursors = new Map(); // clientId -> { x,y,time,client,name }
-                this._cursorTTLms = 5000; // remove cursors older than 5s
-                this._cursorCleanupId = setInterval(() => { try { this._cleanupCursors(); } catch (e) {} }, 2000);
-            } catch (e) {}
-        } catch (e) { console.warn('multiplayer hooks setup failed', e); }
-
-        // Sync handshake state (initial full-sync when a collaborator joins)
-        this._syncPaused = false;             // true while sync pause banner visible
-        this._syncOverlay = null;             // DOM overlay shown during sync
-        this._syncOverlayLabel = null;        // overlay text node
-        this._lastSyncRequestId = null;       // last request id we responded to
-        this._lastSyncSnapshotId = null;      // last snapshot id we applied
-        this._syncApplyInFlight = null;       // promise guard for applying snapshot
-        this._syncBuildInFlight = null;       // request id currently being built
-
-        // Undo/redo stacks for pixel edits and frame deletions
-        this._undoStack = [];
-        this._redoStack = [];
-        this._undoMax = 200;
-        this._undoTimeWindowMs = 30000; // 30s window for frame delete undo validity
-        this._ignoreUndoCapture = false; // skip capturing when replaying undo/redo
-        this._undoMergeMs = 100; // merge consecutive pixel edits within this window
-        this._bypassMirrorWrap = false; // allow tools to skip mirror wrapper when they already mirror
-        
-        
-        this.zoom = new Vector(1,1)
-        this.pan = new Vector(0,0)
-        this.offset = new Vector(0,0)
-        this.zoomPos = new Vector(0,0)
-        this.panVlos = new Vector(0,0)
-        this.zoomVlos = new Vector(0,0)
-        this.selectedAnimation = 'idle'
-        this.selectedFrame = 0
-        // brush size: 1..4 (mapped to square sizes 1,3,5,7)
-        this.brushSize = 1;
-        this.penMirrorH = false;
-        this.penMirrorV = false;
-        const defaultAdjust = 0.05;
-        // which channel to adjust with h/k: 'h'|'s'|'v'|'a'
-        this.adjustChannel = 'v';
-        // per-channel linear adjustment amount (0-1 for S/V/A, wrapped for H)
-        this.adjustPercents = { h: defaultAdjust, s: defaultAdjust, v: defaultAdjust, a: defaultAdjust };
-        this.adjustAmount = defaultAdjust;
-        // palette swap variant step depth (number of +/- steps per channel)
-        this.paletteStepMax = 3;
-        // zoom limits and smoothing params
-        this.minZoom = 0.05;
-        this.maxZoom = 16;
-        this.zoomSmooth = 8; // damping (larger = snappier)
-        this.zoomImpulse = 12; // multiplier for wheel->velocity impulse
-        this.zoomStep = -0.001; // exponential factor per wheel delta (use with Math.exp)
-        // pan smoothing and impulse (wheel -> pan velocity)
-        this.panSmooth = 8; // damping for panning velocity
-        this.panImpulse = 1.0; // multiplier for wheel->pan velocity
-        // note: use this.mouse.Wheel (vertical) and this.mouse.WheelX (horizontal) where available
-        
-        this.selectionPoints = [];
-        this.currentTool = null;
-        this._selectionKeyframeStart = null;
-        this._selectionKeyframeTrack = null;
-        this._selectionKeyframePrompt = null;
-        this._selectionKeyframeLastFrame = null;
-        this._selectionKeyframeLastAnim = null;
-        this._selectionKeyframeLastAppliedFrame = null;
-        this._frameKeyframeStart = null;
-        this._frameKeyframePrompt = null;
-
-        // Onion skin + layering visibility
-        this.onionSkin = false;
-        this.onionAlpha = 0.3;
-        this.layerAlpha = 1;
-        this.onionRange = { before: 1, after: 1 };
-
-        // Pixel-perfect drawing mode (toggle with 'a'). When enabled, the pen
-        // tool tracks the last few pixels in the current stroke and avoids
-        // drawing "L"-shaped corners by restoring the bend pixel.
-        this.pixelPerfect = false;
-        this._pixelPerfectStrokeActive = false;
-        this._pixelPerfectHistory = [];
-        this._pixelPerfectOriginals = new Map();
-        // autotile toggle for render-only tilemode
-        this.autotile = false;
-
-        // region-based selection (for cut/copy/paste)
-        this.selectionRegion = null;
-        // clipboard stores { w, h, data(Uint8ClampedArray), originOffset: {ox,oy} }
-        this.clipboard = null;
-        // tile clipboard (render-only tilemode): { binding, transform }
-        this._tileClipboard = null;
-        // tile selection set (render-only tilemode)
-        this._tileSelection = new Set();
-        // When true, pen pastes clipboard content each frame (custom brush)
-        this._clipboardBrushActive = false;
-        // Latch to avoid re-triggering clipboard brush activation every frame while keys are held
-        this._clipboardBrushFired = false;
-        // Phase accumulator for clipboard brush preview blinking
-        this._clipboardBrushBlinkPhase = 0;
-        // transient flag set when a paste just occurred to avoid key-order races
-        this._justPasted = false;
-        this.tilemode = false;
-        // tile grid configuration (columns x rows) when tilemode is enabled.
-        this.tileCols = 3;
-        this.tileRows = 3;
-        // Infinite tile-mode support: track which tile coordinates are active.
-        // Coordinates are centered on (0,0) at the middle tile; keys are "col,row".
-        this._tileActive = new Set();
-        this._tileCoordToIndex = new Map();
-        this._tileIndexToCoord = [];
-        this._seedTileActives();
-
-        // cache of draw areas rendered this tick so input mapping can hit the correct one
-        this._drawAreas = [];
-        // per-area bindings: array where index -> { anim, index }
-        this._areaBindings = [];
-        // per-area visual transforms for previews: { rot: 0|90|180|270, flipH: bool }
-        this._areaTransforms = [];
+        }
 
         this.FrameSelect = new FrameSelect(this,this.currentSprite,this.mouse,this.keys,this.UIDraw,1)
         // load available tile connection mapping (tiles.json) for autotile matching
@@ -407,7 +77,8 @@ export class SpriteScene extends Scene {
         // create a simple color picker input positioned to the right of the left menu (shifted 200px)
         try {
             // ensure a default pen color exists
-            this.penColor = this.penColor || '#000000';
+            if (this.stateController) this.stateController.setPenColor(this.penColor || '#000000');
+            else this.penColor = this.penColor || '#000000';
             // place near the bottom-left, just right of the 200px-wide FrameSelect menu
             const pickerPos = new Vector(208, 1040);
             const pickerSize = new Vector(40, 28);
@@ -415,7 +86,10 @@ export class SpriteScene extends Scene {
             colorInput.value = this.penColor || '#000000';
             colorInput.title = 'Pen color';
             colorInput.addEventListener('input', (e) => {
-                try { this.penColor = e.target.value; } catch (ee) {}
+                try {
+                    if (this.stateController) this.stateController.setPenColor(e.target.value);
+                    else this.penColor = e.target.value;
+                } catch (ee) {}
             });
             // small label to the right of the picker
             const label = document.createElement('div');
@@ -435,759 +109,7 @@ export class SpriteScene extends Scene {
             console.warn('failed to create color picker', e);
         }
 
-        // Register debug signal to grayscale the current frame
-        try {
-            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
-                try {
-                    window.Debug.createSignal('Grayscale', () => {
-                        try {
-                            const sheet = this.currentSprite;
-                            const anim = this.selectedAnimation;
-                            const frameIdx = this.selectedFrame;
-                            if (!sheet) {
-                                window.Debug && window.Debug.log && window.Debug.log('No current sprite to grayscale');
-                                return;
-                            }
-                            const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
-                            if (!frameCanvas) {
-                                window.Debug && window.Debug.log && window.Debug.log('No frame canvas found');
-                                return;
-                            }
-                            const ctx = frameCanvas.getContext('2d');
-                            const w = frameCanvas.width;
-                            const h = frameCanvas.height;
-                            const img = ctx.getImageData(0, 0, w, h);
-                            const data = img.data;
-
-                            const hasPointSelection = (this.selectionPoints && this.selectionPoints.length > 0);
-                            const hasRegionSelection = !!this.selectionRegion;
-
-                            const applyLumAtIdx = (idx) => {
-                                const r = data[idx];
-                                const g = data[idx + 1];
-                                const b = data[idx + 2];
-                                const lum = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
-                                data[idx] = lum;
-                                data[idx + 1] = lum;
-                                data[idx + 2] = lum;
-                            };
-
-                            if (hasPointSelection) {
-                                for (const p of this.selectionPoints) {
-                                    if (!p) continue;
-                                    if (p.x < 0 || p.y < 0 || p.x >= w || p.y >= h) continue;
-                                    const idx = (p.y * w + p.x) * 4;
-                                    applyLumAtIdx(idx);
-                                }
-                            } else if (hasRegionSelection) {
-                                const sr = this.selectionRegion;
-                                const minX = Math.max(0, Math.min(sr.start.x, sr.end.x));
-                                const minY = Math.max(0, Math.min(sr.start.y, sr.end.y));
-                                const maxX = Math.min(w - 1, Math.max(sr.start.x, sr.end.x));
-                                const maxY = Math.min(h - 1, Math.max(sr.start.y, sr.end.y));
-                                for (let yy = minY; yy <= maxY; yy++) {
-                                    for (let xx = minX; xx <= maxX; xx++) {
-                                        const idx = (yy * w + xx) * 4;
-                                        applyLumAtIdx(idx);
-                                    }
-                                }
-                            } else {
-                                for (let i = 0; i < data.length; i += 4) {
-                                    const r = data[i];
-                                    const g = data[i + 1];
-                                    const b = data[i + 2];
-                                    const lum = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
-                                    data[i] = lum;
-                                    data[i + 1] = lum;
-                                    data[i + 2] = lum;
-                                }
-                            }
-
-                            ctx.putImageData(img, 0, 0);
-                            if (typeof sheet._rebuildSheetCanvas === 'function') {
-                                try { sheet._rebuildSheetCanvas(); } catch (e) {}
-                            }
-                            window.Debug && window.Debug.log && window.Debug.log('Applied grayscale to current frame');
-                        } catch (err) {
-                            window.Debug && window.Debug.error && window.Debug.error('Grayscale signal failed: ' + err);
-                        }
-                    });
-                } catch (e) {
-                    console.warn('Failed to register Grayscale debug signal', e);
-                }
-                // Also register CopyColor signal in the same try so both are available
-                try {
-                    window.Debug.createSignal('copy', () => {
-                        try {
-                            const hex = this.penColor || '#000000';
-                            // Use support helper to copy to clipboard
-                            try { copyToClipboard(hex); } catch (err) {
-                                // fallback to navigator if helper unavailable
-                                try { navigator.clipboard.writeText(hex); } catch (e) {}
-                            }
-                            window.Debug && window.Debug.log && window.Debug.log('Copied color to clipboard: ' + hex);
-                        } catch (err) {
-                            window.Debug && window.Debug.error && window.Debug.error('CopyColor signal failed: ' + err);
-                        }
-                    });
-                } catch (e) {
-                    console.warn('Failed to register CopyColor debug signal', e);
-                }
-                try {
-                    window.Debug.createSignal('resize', (sliceSize,resizeContent=true) => {
-                        try {
-                            this.resize(sliceSize,resizeContent)
-                            window.Debug && window.Debug.log && window.Debug.log('Resized canvas to:',sliceSize,'x',sliceSize,'px');
-                        } catch (err) {
-                            window.Debug && window.Debug.error && window.Debug.error('Failed to resize canvas' + err);
-                        }
-                    });
-                } catch (e) {
-                    console.warn('Failed to register CopyColor debug signal', e);
-                }
-                // Configure tile-mode grid size: tileArray(cols, rows).
-                // Example: tileArray(5,5) -> 5x5 grid of mirrored tiles.
-                try {
-                    window.Debug.createSignal('tileArray', (cols = 3, rows = cols) => {
-                        try {
-                            const toInt = (v, def) => {
-                                const n = Math.floor(Number(v));
-                                return Number.isFinite(n) && n > 0 ? n : def;
-                            };
-                            const c = Math.max(1, toInt(cols, this.tileCols || 3));
-                            const r = Math.max(1, toInt(rows, this.tileRows || 3));
-                            this.tileCols = c;
-                            this.tileRows = r;
-                            this._seedTileActives(c, r);
-                            window.Debug && window.Debug.log && window.Debug.log('Tile array size set to', c + 'x' + r);
-                        } catch (err) {
-                            window.Debug && window.Debug.error && window.Debug.error('tileArray signal failed: ' + err);
-                        }
-                    });
-                } catch (e) {
-                    console.warn('Failed to register tileArray debug signal', e);
-                }
-            }
-        } catch (e) {}
-
-        // Register SelectColor debug signal: select(hex, buffer=1)
-        try {
-            window.Debug.createSignal('select', (hex, buffer = 1) => {
-                try {
-                    if (!hex) {
-                        window.Debug && window.Debug.log && window.Debug.log('SelectColor: missing hex argument');
-                        return;
-                    }
-                    const tol = (typeof buffer === 'number') ? buffer : (parseFloat(buffer) || 1);
-                    const colObj = Color.convertColor(hex);
-                    const rgbCol = colObj.toRgb();
-                    // Color.toRgb returns an object where .a/.b/.c hold r/g/b in this project
-                    const tr = Math.round(rgbCol.a || 0);
-                    const tg = Math.round(rgbCol.b || 0);
-                    const tb = Math.round(rgbCol.c || 0);
-                    // If an explicit alpha is present (e.g. 8-digit hex), treat the
-                    // selection as alpha-exclusive instead of RGB distance based.
-                    const hasAlpha = (rgbCol && typeof rgbCol.d === 'number');
-                    const ta = hasAlpha ? Math.round((rgbCol.d || 0) * 255) : null;
-
-                    const sheet = this.currentSprite;
-                    const anim = this.selectedAnimation;
-                    const frameIdx = this.selectedFrame;
-                    if (!sheet) {
-                        window.Debug && window.Debug.log && window.Debug.log('SelectColor: no current sprite');
-                        return;
-                    }
-                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
-                    if (!frameCanvas) {
-                        window.Debug && window.Debug.log && window.Debug.log('SelectColor: no frame canvas');
-                        return;
-                    }
-
-                    const ctx = frameCanvas.getContext('2d');
-                    const w = frameCanvas.width;
-                    const h = frameCanvas.height;
-                    let img;
-                    try { img = ctx.getImageData(0, 0, w, h); } catch (e) { return; }
-                    const data = img.data;
-
-                    const matches = [];
-                    const maxDistSq = tol * tol;
-                    for (let y = 0; y < h; y++) {
-                        for (let x = 0; x < w; x++) {
-                            const i = (y * w + x) * 4;
-                            const r = data[i];
-                            const g = data[i + 1];
-                            const b = data[i + 2];
-                            const a = data[i + 3];
-
-                            const dr = r - tr;
-                            const dg = g - tg;
-                            const db = b - tb;
-                            const distSq = dr * dr + dg * dg + db * db;
-                            if (distSq > maxDistSq) continue;
-
-                            // If no alpha was supplied in the target color, ignore
-                            // pixel alpha. If alpha was supplied (8-digit hex), also
-                            // require exact alpha match.
-                            if (hasAlpha && a !== ta) continue;
-
-                            matches.push({ x, y });
-                        }
-                    }
-
-                    // Merge color-matched points into any existing selection
-                    const merged = (this.selectionPoints && this.selectionPoints.length > 0)
-                        ? this.selectionPoints.slice()
-                        : [];
-                    for (const p of matches) {
-                        const exists = merged.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === undefined);
-                        if (!exists) merged.push({ x: p.x, y: p.y });
-                    }
-                    this.selectionPoints = merged;
-                    this.selectionRegion = null;
-                    window.Debug && window.Debug.log && window.Debug.log(`SelectColor: selected ${matches.length} pixels matching ${hex} (tol=${tol})`);
-                } catch (err) {
-                    window.Debug && window.Debug.error && window.Debug.error('SelectColor failed: ' + err);
-                }
-            });
-        } catch (e) {
-            console.warn('Failed to register select debug signal', e);
-        }
-
-        // Register ReplaceColor debug signal: replace(hex1, hex2, include='frame'|'animation'|'all', buffer=1)
-        try {
-            window.Debug.createSignal('replace', (hex1, hex2, include = 'frame', buffer = 1) => {
-                try {
-                    if (!hex1 || !hex2) {
-                        window.Debug && window.Debug.log && window.Debug.log('ReplaceColor: missing hex1 or hex2 argument');
-                        return;
-                    }
-                    const sheet = this.currentSprite;
-                    if (!sheet) {
-                        window.Debug && window.Debug.log && window.Debug.log('ReplaceColor: no current sprite');
-                        return;
-                    }
-
-                    const tol = (typeof buffer === 'number') ? buffer : (parseFloat(buffer) || 1);
-
-                    const srcCol = Color.convertColor(hex1).toRgb();
-                    const dstCol = Color.convertColor(hex2).toRgb();
-                    const sr = Math.round(srcCol.a || 0);
-                    const sg = Math.round(srcCol.b || 0);
-                    const sb = Math.round(srcCol.c || 0);
-                    const hasSrcAlpha = (srcCol && typeof srcCol.d === 'number');
-                    const sa = hasSrcAlpha ? Math.round((srcCol.d || 0) * 255) : null;
-
-                    const dr = Math.round(dstCol.a || 0);
-                    const dg = Math.round(dstCol.b || 0);
-                    const db = Math.round(dstCol.c || 0);
-                    const da = Math.round(((dstCol.d === undefined ? 1 : dstCol.d) || 0) * 255);
-
-                    const maxDistSq = tol * tol;
-
-                    // Build list of (anim, frameIdx) targets based on include mode.
-                    const targets = [];
-                    const currentAnim = this.selectedAnimation;
-                    const currentFrameIdx = this.selectedFrame;
-
-                    const safeInclude = (typeof include === 'string') ? include.toLowerCase() : 'frame';
-                    if (safeInclude === 'animation') {
-                        try {
-                            const arr = (sheet._frames && sheet._frames.get(currentAnim)) || [];
-                            for (let i = 0; i < arr.length; i++) {
-                                targets.push({ anim: currentAnim, frameIdx: i });
-                            }
-                        } catch (e) { /* ignore frame enumeration errors */ }
-                    } else if (safeInclude === 'all') {
-                        try {
-                            if (sheet._frames && typeof sheet._frames.entries === 'function') {
-                                for (const [animName, arr] of sheet._frames.entries()) {
-                                    if (!Array.isArray(arr)) continue;
-                                    for (let i = 0; i < arr.length; i++) {
-                                        targets.push({ anim: animName, frameIdx: i });
-                                    }
-                                }
-                            }
-                        } catch (e) { /* ignore global frame enumeration errors */ }
-                    } else {
-                        // default: only the currently selected frame
-                        targets.push({ anim: currentAnim, frameIdx: currentFrameIdx });
-                    }
-
-                    let replacedCount = 0;
-
-                    for (const t of targets) {
-                        if (!t || t.anim === undefined || t.frameIdx === undefined) continue;
-                        let frameCanvas = null;
-                        try { frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(t.anim, t.frameIdx) : null; } catch (e) { frameCanvas = null; }
-                        if (!frameCanvas) continue;
-
-                        const ctx = frameCanvas.getContext('2d');
-                        const w = frameCanvas.width;
-                        const h = frameCanvas.height;
-                        let img;
-                        try { img = ctx.getImageData(0, 0, w, h); } catch (e) { continue; }
-                        const data = img.data;
-
-                        for (let y = 0; y < h; y++) {
-                            for (let x = 0; x < w; x++) {
-                                const i = (y * w + x) * 4;
-                                const r = data[i];
-                                const g = data[i + 1];
-                                const b = data[i + 2];
-                                const a = data[i + 3];
-
-                                const rr = r - sr;
-                                const gg = g - sg;
-                                const bb = b - sb;
-                                const distSq = rr * rr + gg * gg + bb * bb;
-                                if (distSq > maxDistSq) continue;
-
-                                // If hex1 included alpha, also require exact alpha match.
-                                if (hasSrcAlpha && a !== sa) continue;
-
-                                data[i] = dr;
-                                data[i + 1] = dg;
-                                data[i + 2] = db;
-                                data[i + 3] = da;
-                                replacedCount++;
-                            }
-                        }
-
-                        try { ctx.putImageData(img, 0, 0); } catch (e) { /* ignore putImageData errors */ }
-                    }
-
-                    // rebuild packed sheet so editor view updates
-                    if (typeof sheet._rebuildSheetCanvas === 'function') {
-                        try { sheet._rebuildSheetCanvas(); } catch (e) { /* ignore */ }
-                    }
-
-                    window.Debug && window.Debug.log && window.Debug.log(`ReplaceColor: replaced ${replacedCount} pixels from ${hex1} to ${hex2} (include=${safeInclude}, tol=${tol})`);
-                } catch (err) {
-                    window.Debug && window.Debug.error && window.Debug.error('ReplaceColor failed: ' + err);
-                }
-            });
-        } catch (e) {
-            console.warn('Failed to register replace debug signal', e);
-        }
-
-        // Debug: draw the current pen color into all selected pixels/region
-        try {
-            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
-                window.Debug.createSignal('drawSelected', () => {
-                    try {
-                        const sheet = this.currentSprite;
-                        if (!sheet) {
-                            window.Debug && window.Debug.log && window.Debug.log('drawSelected: no current sprite');
-                            return;
-                        }
-                        const colorHex = this.penColor || '#000000';
-                        let applied = 0;
-
-                        // helper to write a single pixel using sheet API if available, otherwise direct canvas
-                        const writePixel = (anim, frameIdx, x, y) => {
-                            try {
-                                if (typeof sheet.setPixel === 'function') {
-                                    sheet.setPixel(anim, frameIdx, x, y, colorHex, 'replace');
-                                } else {
-                                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
-                                    if (frameCanvas) {
-                                        const ctx = frameCanvas.getContext('2d');
-                                        try {
-                                            const col = Color.convertColor(colorHex).toRgb();
-                                            const r = Math.round(col.a || 0);
-                                            const g = Math.round(col.b || 0);
-                                            const b = Math.round(col.c || 0);
-                                            const a = (col.d === undefined) ? 1 : (col.d || 0);
-                                            ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
-                                            ctx.fillRect(x, y, 1, 1);
-                                        } catch (e) { /* ignore per-pixel canvas failures */ }
-                                    }
-                                }
-                                applied++;
-                            } catch (e) { /* ignore write errors */ }
-                        };
-
-                        // If explicit point selection exists, use those points (respect areaIndex per-point)
-                        if (this.selectionPoints && this.selectionPoints.length > 0) {
-                            for (const p of this.selectionPoints) {
-                                if (!p) continue;
-                                let anim = this.selectedAnimation;
-                                let frameIdx = this.selectedFrame;
-                                if (p && typeof p.areaIndex === 'number') {
-                                    const binding = this.getAreaBinding(p.areaIndex);
-                                    if (binding && binding.anim !== undefined && binding.index !== undefined) {
-                                        anim = binding.anim;
-                                        frameIdx = Number(binding.index);
-                                    }
-                                }
-                                writePixel(anim, frameIdx, p.x, p.y);
-                            }
-                        } else if (this.selectionRegion) {
-                            // region selection: paint every pixel inside the region
-                            const sr = this.selectionRegion;
-                            const minX = Math.min(sr.start.x, sr.end.x);
-                            const minY = Math.min(sr.start.y, sr.end.y);
-                            const maxX = Math.max(sr.start.x, sr.end.x);
-                            const maxY = Math.max(sr.start.y, sr.end.y);
-                            // prefer region's areaIndex if present
-                            let anim = this.selectedAnimation;
-                            let frameIdx = this.selectedFrame;
-                            if (sr && typeof sr.areaIndex === 'number') {
-                                const binding = this.getAreaBinding(sr.areaIndex);
-                                if (binding && binding.anim !== undefined && binding.index !== undefined) {
-                                    anim = binding.anim;
-                                    frameIdx = Number(binding.index);
-                                }
-                            }
-                            for (let yy = minY; yy <= maxY; yy++) {
-                                for (let xx = minX; xx <= maxX; xx++) {
-                                    writePixel(anim, frameIdx, xx, yy);
-                                }
-                            }
-                        } else {
-                            window.Debug && window.Debug.log && window.Debug.log('drawSelected: no selection to draw into');
-                        }
-
-                        if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
-                        window.Debug && window.Debug.log && window.Debug.log('drawSelected applied to ' + applied + ' pixels');
-                    } catch (err) {
-                        window.Debug && window.Debug.error && window.Debug.error('drawSelected failed: ' + err);
-                    }
-                });
-            }
-        } catch (e) { console.warn('Failed to register drawSelected debug signal', e); }
-
-        // Debug: procedural textures on the current frame.
-        // texture(type, ...args)
-        // 1) texture("pointLight", centerX, centerY, gradStart, gradEnd, lerpCenter)
-        // 2) texture("points", count, color, seed=1)
-        // 3) texture("linear", gradStart, gradEnd, lerpCenter, angleDeg)
-        try {
-            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
-                window.Debug.createSignal('texture', (type, ...args) => {
-                    try {
-                        const sheet = this.currentSprite;
-                        const anim = this.selectedAnimation;
-                        const frameIdx = this.selectedFrame;
-                        if (!sheet) return false;
-                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
-                        if (!frameCanvas) return false;
-
-                        const px = frameCanvas.width;
-                        const py = frameCanvas.height;
-                        const ctx = frameCanvas.getContext('2d');
-                        let img;
-                        try { img = ctx.getImageData(0, 0, px, py); } catch (e) { return false; }
-                        const data = img.data;
-
-                        const clamp01 = (v) => Math.max(0, Math.min(1, v));
-
-                        // Since Debug's input parser naively splits on commas, array literals like
-                        // [0,0,0,0] arrive as multiple arguments ("[0", 0, 0, "0]"). We first
-                        // normalize the raw args back into array-like strings where possible.
-                        const normalizeArgs = (raw) => {
-                            const out = [];
-                            for (let i = 0; i < raw.length; i++) {
-                                const v = raw[i];
-                                if (typeof v === 'string' && v.indexOf('[') !== -1 && v.indexOf(']') === -1) {
-                                    let buf = String(v);
-                                    while (buf.indexOf(']') === -1 && i + 1 < raw.length) {
-                                        i++;
-                                        buf += ',' + String(raw[i]);
-                                    }
-                                    out.push(buf);
-                                } else {
-                                    out.push(v);
-                                }
-                            }
-                            return out;
-                        };
-
-                        const normArgs = normalizeArgs(args);
-
-                        // Parse a color spec which may be an array [r,g,b,a, 'rgba'|'hsva'] or any
-                        // Color.convertColor-compatible input.
-                        const parseColorSpec = (spec) => {
-                            try {
-                                // Allow bracketed array syntax passed as a single string, e.g. "[0,0,0,0]".
-                                if (typeof spec === 'string') {
-                                    const t = spec.trim();
-                                    if (t[0] === '[' && t.indexOf(']') !== -1) {
-                                        try {
-                                            const arr = JSON.parse(t.replace(/'/g, '"'));
-                                            spec = arr;
-                                        } catch (e) {
-                                            // fall through and let other handlers try
-                                        }
-                                    }
-                                }
-                                if (Array.isArray(spec) && spec.length >= 3) {
-                                    const v0 = Number(spec[0]) || 0;
-                                    const v1 = Number(spec[1]) || 0;
-                                    const v2 = Number(spec[2]) || 0;
-                                    let va = (spec[3] === undefined || spec[3] === null) ? 1 : Number(spec[3]);
-                                    let mode = String(spec[4] || 'rgba').toLowerCase();
-                                    if (mode.indexOf('hsv') !== -1) {
-                                        // Treat as HSVA. H in [0,1] or [0,360], S/V/A in [0,1] (A also accepts 0-255).
-                                        let h = v0;
-                                        let s = v1;
-                                        let vv = v2;
-                                        if (h > 1) h = h / 360;
-                                        s = clamp01(s);
-                                        vv = clamp01(vv);
-                                        if (va > 1) va = va / 255;
-                                        va = clamp01(va);
-                                        return { color: new Color(h, s, vv, va, 'hsv'), space: 'hsv' };
-                                    } else {
-                                        // Treat as RGBA. R/G/B in 0-255, A in [0,1] or 0-255.
-                                        let a = va;
-                                        if (a > 1) a = a / 255;
-                                        a = clamp01(a);
-                                        return { color: new Color(v0, v1, v2, a, 'rgb'), space: 'rgb' };
-                                    }
-                                }
-                                const col = Color.convertColor(spec);
-                                return { color: col, space: (col.type === 'hsv' ? 'hsv' : 'rgb') };
-                            } catch (e) {
-                                return { color: Color.fromHex('#000000FF'), space: 'rgb' };
-                            }
-                        };
-
-                        const mixColors = (infoA, infoB, t) => {
-                            t = clamp01(t);
-                            const useHsv = (infoA.space === 'hsv' || infoB.space === 'hsv');
-                            if (useHsv) {
-                                const c0 = infoA.color.toHsv();
-                                const c1 = infoB.color.toHsv();
-                                const h = c0.a + (c1.a - c0.a) * t;
-                                const s = c0.b + (c1.b - c0.b) * t;
-                                const v = c0.c + (c1.c - c0.c) * t;
-                                const a = c0.d + (c1.d - c0.d) * t;
-                                const rgb = new Color(h, s, v, a, 'hsv').toRgb();
-                                return { r: rgb.a, g: rgb.b, b: rgb.c, a: rgb.d };
-                            }
-                            const c0 = infoA.color.toRgb();
-                            const c1 = infoB.color.toRgb();
-                            const r = c0.a + (c1.a - c0.a) * t;
-                            const g = c0.b + (c1.b - c0.b) * t;
-                            const b = c0.c + (c1.c - c0.c) * t;
-                            const a = c0.d + (c1.d - c0.d) * t;
-                            return { r, g, b, a };
-                        };
-
-                        const writePixel = (x, y, col) => {
-                            if (x < 0 || y < 0 || x >= px || y >= py) return;
-                            const idx = (y * px + x) * 4;
-                            data[idx]   = Math.max(0, Math.min(255, Math.round(col.r || 0)));
-                            data[idx+1] = Math.max(0, Math.min(255, Math.round(col.g || 0)));
-                            data[idx+2] = Math.max(0, Math.min(255, Math.round(col.b || 0)));
-                            const alpha = (col.a === undefined || col.a === null) ? 1 : col.a;
-                            const a255 = Math.max(0, Math.min(255, Math.round(alpha * 255)));
-                            data[idx+3] = a255;
-                        };
-
-                        const kind = String(type || '').toLowerCase();
-
-                        if (kind === 'pointlight') {
-                            const cx = Number(normArgs[0]);
-                            const cy = Number(normArgs[1]);
-                            const startInfo = parseColorSpec(normArgs[2] !== undefined ? normArgs[2] : ['#000000']);
-                            const endInfo = parseColorSpec(normArgs[3] !== undefined ? normArgs[3] : ['#FFFFFFFF']);
-                            const bias = clamp01(normArgs[4] !== undefined ? Number(normArgs[4]) : 0);
-
-                            const centerX = Number.isFinite(cx) ? cx : (px - 1) / 2;
-                            const centerY = Number.isFinite(cy) ? cy : (py - 1) / 2;
-                            // maximum distance to any corner for radial falloff
-                            const corners = [
-                                { x: 0, y: 0 },
-                                { x: px - 1, y: 0 },
-                                { x: 0, y: py - 1 },
-                                { x: px - 1, y: py - 1 }
-                            ];
-                            let maxR = 1;
-                            for (const c of corners) {
-                                const dx = c.x - centerX;
-                                const dy = c.y - centerY;
-                                const d = Math.sqrt(dx*dx + dy*dy);
-                                if (d > maxR) maxR = d;
-                            }
-
-                            for (let y = 0; y < py; y++) {
-                                for (let x = 0; x < px; x++) {
-                                    const dx = x - centerX;
-                                    const dy = y - centerY;
-                                    const dist = Math.sqrt(dx*dx + dy*dy);
-                                    let tRaw = dist / maxR;
-                                    if (!Number.isFinite(tRaw)) tRaw = 0;
-                                    tRaw = clamp01(tRaw);
-                                    // Bias towards center: blend linear and quadratic falloff.
-                                    const t = (1 - bias) * tRaw + bias * tRaw * tRaw;
-                                    const col = mixColors(startInfo, endInfo, t);
-                                    writePixel(x, y, col);
-                                }
-                            }
-                        } else if (kind === 'points') {
-                            const count = Math.max(0, Math.floor(Number(normArgs[0]) || 0));
-                            const colorInfo = parseColorSpec(normArgs[1] !== undefined ? normArgs[1] : ['#FFFFFFFF']);
-                            let seed = normArgs[2] !== undefined ? Number(normArgs[2]) : 1;
-                            if (!Number.isFinite(seed) || seed === 0) seed = 1;
-                            const rng = () => {
-                                seed = (seed * 1664525 + 1013904223) >>> 0;
-                                return seed / 4294967296;
-                            };
-
-                            const col = mixColors(colorInfo, colorInfo, 0); // just normalize to RGBA
-                            for (let i = 0; i < count; i++) {
-                                const x = Math.floor(rng() * px);
-                                const y = Math.floor(rng() * py);
-                                writePixel(x, y, col);
-                            }
-                        } else if (kind === 'linear') {
-                            const startInfo = parseColorSpec(normArgs[0] !== undefined ? normArgs[0] : ['#000000']);
-                            const endInfo = parseColorSpec(normArgs[1] !== undefined ? normArgs[1] : ['#FFFFFFFF']);
-                            const bias = clamp01(normArgs[2] !== undefined ? Number(normArgs[2]) : 0.5);
-                            const angleDeg = normArgs[3] !== undefined ? Number(normArgs[3]) : 0;
-                            const angleRad = (Number.isFinite(angleDeg) ? angleDeg : 0) * Math.PI / 180;
-                            const dxDir = Math.cos(angleRad) || 1;
-                            const dyDir = Math.sin(angleRad) || 0;
-                            const cx = (px - 1) / 2;
-                            const cy = (py - 1) / 2;
-
-                            // Compute maximum projection length to normalize into [0,1].
-                            const corners = [
-                                { x: 0, y: 0 },
-                                { x: px - 1, y: 0 },
-                                { x: 0, y: py - 1 },
-                                { x: px - 1, y: py - 1 }
-                            ];
-                            let maxProj = 1;
-                            for (const c of corners) {
-                                const vx = c.x - cx;
-                                const vy = c.y - cy;
-                                const p = Math.abs(vx * dxDir + vy * dyDir);
-                                if (p > maxProj) maxProj = p;
-                            }
-
-                            for (let y = 0; y < py; y++) {
-                                for (let x = 0; x < px; x++) {
-                                    const vx = x - cx;
-                                    const vy = y - cy;
-                                    const proj = vx * dxDir + vy * dyDir;
-                                    let tRaw = (proj / maxProj + 1) * 0.5; // map [-maxProj,maxProj] -> [0,1]
-                                    if (!Number.isFinite(tRaw)) tRaw = 0;
-                                    tRaw = clamp01(tRaw);
-                                    const t = (1 - bias) * tRaw + bias * tRaw * tRaw;
-                                    const col = mixColors(startInfo, endInfo, t);
-                                    writePixel(x, y, col);
-                                }
-                            }
-                        } else {
-                            // unknown texture type
-                            return false;
-                        }
-
-                        // write back and update packed sheet
-                        try { ctx.putImageData(img, 0, 0); } catch (e) { return false; }
-                        if (typeof sheet._rebuildSheetCanvas === 'function') {
-                            try { sheet._rebuildSheetCanvas(); } catch (e) {}
-                        }
-                        return true;
-                    } catch (err) {
-                        window.Debug && window.Debug.error && window.Debug.error('texture signal failed: ' + err);
-                        return false;
-                    }
-                });
-            }
-        } catch (e) { console.warn('Failed to register texture debug signal', e); }
-
-        // Register debug signals for onion-skin control: layerAlpha(alpha), toggleOnion()
-        try {
-            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
-                window.Debug.createSignal('layerAlpha', (alpha) => {
-                    try {
-                        const a = Number(alpha);
-                        if (Number.isFinite(a)) {
-                            this.onionAlpha = Math.max(0, Math.min(1, a));
-                            console.log('onionAlpha set to', this.onionAlpha);
-                            return this.onionAlpha;
-                        }
-                    } catch (e) { /* ignore */ }
-                    return null;
-                });
-
-                window.Debug.createSignal('toggleOnion', () => {
-                    try {
-                        this.onionSkin = !(typeof this.onionSkin === 'boolean' ? this.onionSkin : true);
-                        console.log('onionSkin toggled to', this.onionSkin);
-                        return this.onionSkin;
-                    } catch (e) { /* ignore */ }
-                    return null;
-                });
-            }
-        } catch (e) { console.warn('Failed to register onion debug signals', e); }
-
-        // Debug: show multiplayer menu (hidden by default). Call via Debug signal to unhide.
-        try {
-            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
-                try {
-                    window.Debug.createSignal('enableColab', () => {
-                        try {
-                            const el = document.getElementById('multiplayer-menu');
-                            if (el) {
-                                el.style.display = 'flex';
-                                try { if (this.server && typeof this.server.unpause === 'function') this.server.unpause(); } catch (e) {}
-                                return true;
-                            }
-                        } catch (e) {}
-                        return false;
-                    });
-                } catch (e) { console.warn('Failed to register showMultiplayerMenu debug signal', e); }
-            }
-        } catch (e) { /* ignore debug registration errors */ }
-
-        // Debug: set player name (persisted) and send/receive simple chat messages
-        try {
-            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
-                try {
-                    window.Debug.createSignal('name', (n) => {
-                        try {
-                            const name = (typeof n === 'string') ? n.trim().slice(0, 64) : String(n || '').slice(0,64);
-                            this.playerName = name;
-                            if (this.saver && typeof this.saver.set === 'function') {
-                                try { this.saver.set('player_name', name); } catch (e) {}
-                            }
-                            console.log('name set to', name);
-                            return true;
-                        } catch (e) { return false; }
-                    });
-                } catch (e) { console.warn('Failed to register name debug signal', e); }
-
-                try {
-                    window.Debug.createSignal('msg', (text) => {
-                        try {
-                            if (!text) return false;
-                            const body = String(text);
-                            const from = this.playerName || this.clientId || 'anon';
-                            const payload = { from, text: body, time: Date.now(), client: this.clientId };
-                            const id = (payload.time || Date.now()) + '_' + Math.random().toString(36).slice(2,6);
-                            // send via server if available
-                            try {
-                                if (this.server && typeof this.server.sendDiff === 'function') {
-                                    const diff = {};
-                                    diff['messages/' + id] = payload;
-                                    this.server.sendDiff(diff);
-                                }
-                            } catch (e) {}
-                            // also locally log/display
-                            try { console.log('[msg] ' + from + ': ' + body); } catch (e) {}
-                            try { if (window.Debug && window.Debug.log) window.Debug.log('[msg] ' + from + ': ' + body); } catch (e) {}
-                            return true;
-                        } catch (e) { return false; }
-                    });
-                } catch (e) { console.warn('Failed to register msg debug signal', e); }
-            }
-        } catch (e) { /* ignore debug registration errors */ }
+        this.connectDebug()
 
         // Autosave defaults
         this._autosaveEnabled = true;
@@ -1197,13 +119,11 @@ export class SpriteScene extends Scene {
         
 
         // Start autosave timer if enabled
-        try {
-            if (this._autosaveEnabled) {
-                this._autosaveIntervalId = setInterval(() => {
-                    try { this.doSave(); } catch (e) { /* ignore autosave errors */ }
-                }, (this._autosaveIntervalSeconds || 60) * 1000);
-            }
-        } catch (e) {}
+        if (this._autosaveEnabled) {
+            this._autosaveIntervalId = setInterval(() => {
+                try { this.doSave(); } catch (e) { /* ignore autosave errors */ }
+            }, (this._autosaveIntervalSeconds || 60) * 1000);
+        }
 
         // Attempt to load previously-saved sprite frames/metdata (async). We call
         // saver.load() to make sure savedata is fresh, then restore per-frame images
@@ -1259,9 +179,16 @@ export class SpriteScene extends Scene {
                             };
                             const cols = parseDim(layout.tileCols, (this.tileCols|0) || 3);
                             const rows = parseDim(layout.tileRows, (this.tileRows|0) || cols);
-                            this.tileCols = Math.max(1, cols);
-                            this.tileRows = Math.max(1, rows);
-                            this.tilemode = !!layout.tilemode;
+                            const nextCols = Math.max(1, cols);
+                            const nextRows = Math.max(1, rows);
+                            if (this.stateController) {
+                                this.stateController.setTileGrid(nextCols, nextRows);
+                                this.stateController.setTilemode(!!layout.tilemode);
+                            } else {
+                                this.tileCols = nextCols;
+                                this.tileRows = nextRows;
+                                this.tilemode = !!layout.tilemode;
+                            }
                             if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
                             if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
                             if (!this._tileActive) this._tileActive = new Set();
@@ -1291,7 +218,7 @@ export class SpriteScene extends Scene {
                                     }
                                     if (!Number.isFinite(idx)) continue;
                                     const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
-                                    this._areaBindings[idx] = { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf : null };
+                                    this._setAreaBindingAtIndex(idx, { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf : null }, false);
                                 }
                             }
                             if (Array.isArray(layout.transforms)) {
@@ -1307,7 +234,7 @@ export class SpriteScene extends Scene {
                                         idx = i;
                                     }
                                     if (!Number.isFinite(idx)) continue;
-                                    this._areaTransforms[idx] = { rot: (t.rot || 0), flipH: !!t.flipH };
+                                    this._setAreaTransformAtIndex(idx, { rot: (t.rot || 0), flipH: !!t.flipH }, false);
                                 }
                             }
                         }
@@ -1360,124 +287,868 @@ export class SpriteScene extends Scene {
             })();
         } catch (e) {}
 
-        // Register debug signals for save/clear/autosave control
-        try {
-            if (typeof window !== 'undefined' && window.Debug && typeof window.Debug.createSignal === 'function') {
-                // save([name]) -> explicitly save current sheet and metadata
-                window.Debug.createSignal('save', (name) => { try { this.doSave(name); } catch (e) { console.warn('debug save failed', e); } });
-                // clearSave([name]) -> remove saved sheet+meta for given name
-                window.Debug.createSignal('clearSave', (name) => {
-                    try {
-                        const n = name || (this.currentSprite && this.currentSprite.name) || 'spritesheet';
-                        if (this.saver && typeof this.saver.remove === 'function') {
-                            try { this.saver.remove('sprites/' + n); } catch (e) {}
-                            try { this.saver.remove('sprites_meta/' + n); } catch (e) {}
-                        }
-                    } catch (e) { console.warn('debug clearSave failed', e); }
-                });
-                // autosave(enabled:boolean, seconds?:number) -> toggle autosave and optionally set interval
-                window.Debug.createSignal('autosave', (enabled, seconds) => {
-                    try {
-                        this._autosaveEnabled = !!enabled;
-                        if (typeof seconds === 'number' && seconds > 0) this._autosaveIntervalSeconds = Math.max(1, Math.floor(seconds));
-                        if (this._autosaveIntervalId) { try { clearInterval(this._autosaveIntervalId); } catch (e) {} this._autosaveIntervalId = null; }
-                        if (this._autosaveEnabled) {
-                            this._autosaveIntervalId = setInterval(() => { try { this.doSave(); } catch (e) {} }, (this._autosaveIntervalSeconds || 60) * 1000);
-                        }
-                    } catch (e) { console.warn('debug autosave failed', e); }
-                });
-            }
-        } catch (e) { /* ignore debug registration errors */ }
+
 
         this.isReady = true;
     }
-    // When switching away from this scene, dispose any UI-created DOM elements
-    // and free large resources so GC can reclaim them.
-    onSwitchFrom(resources){
-        try {
-            if (this.FrameSelect && typeof this.FrameSelect.dispose === 'function') {
-                try { this.FrameSelect.dispose(); } catch(e){}
-            }
-        } catch (e) { console.warn('spriteScene.onSwitchFrom cleanup failed', e); }
-        // clear autosave timer if present
-        try { if (this._autosaveIntervalId) { try { clearInterval(this._autosaveIntervalId); } catch (e) {} this._autosaveIntervalId = null; } } catch (e) {}
-        // clear any pending multiplayer send timer
-        try { if (this._sendScheduledId) { try { clearTimeout(this._sendScheduledId); } catch (e) {} this._sendScheduledId = null; } } catch (e) {}
-        // clear cursor send/cleanup timers
-        try { if (this._cursorThrottleId) { try { clearTimeout(this._cursorThrottleId); } catch (e) {} this._cursorThrottleId = null; } } catch (e) {}
-        try { if (this._cursorCleanupId) { try { clearInterval(this._cursorCleanupId); } catch (e) {} this._cursorCleanupId = null; } } catch (e) {}
-        // remove our cursor entry from server state if possible
-        try { if (this.server && typeof this.server.sendDiff === 'function') { const d = {}; d['cursors/' + this.clientId] = null; try { this.server.sendDiff(d); } catch (e) {} } } catch (e) {}
-        // clear pruning interval if present
-        try { if (this._pruneIntervalId) { try { clearInterval(this._pruneIntervalId); } catch (e) {} this._pruneIntervalId = null; } } catch (e) {}
-        // mark not ready so switching back will re-run onReady
-        this.isReady = false;
-        // call parent behaviour
-        if (super.onSwitchFrom) try { super.onSwitchFrom(resources); } catch(e){}
-        
-        // remove sync overlay if present
-        try { if (this._syncOverlay && this._syncOverlay.parentNode) this._syncOverlay.remove(); } catch (e) {}
-        this._syncOverlay = null; this._syncOverlayLabel = null;
-        this._colorInput = null; this._colorLabel = null;
-    }
 
-    // When switching to this scene, ensure it is initialized. If we were
-    // previously disposed (isReady === false), re-run onReady() to recreate
-    // UI and resources. This allows loadScene('spriteScene') followed by
-    // switchScene('spriteScene') to re-initialize cleanly.
-    onSwitchTo(resources){
-        // call parent behaviour first (reconnect any RSS etc.)
-        if (super.onSwitchTo) {
-            try { super.onSwitchTo(resources); } catch(e) { console.warn('spriteScene.onSwitchTo super failed', e); }
-        }
-        try {
-            if (!this.isReady) {
-                try { this.onReady(); } catch(e){ console.warn('spriteScene.onSwitchTo onReady failed', e); }
-            } else {
-                // if frame select was disposed, recreate it
-                if (!this.FrameSelect) {
-                    try { this.FrameSelect = new FrameSelect(this,this.currentSprite,this.mouse,this.keys,this.UIDraw,1); } catch(e) { console.warn('recreate FrameSelect failed', e); }
+    connectDebug(){
+        // Register debug signal to grayscale the current frame
+        window.Debug.createSignal('Grayscale', () => {
+            try {
+                const sheet = this.currentSprite;
+                const anim = this.selectedAnimation;
+                const frameIdx = this.selectedFrame;
+                if (!sheet) {
+                    window.Debug && window.Debug.log && window.Debug.log('No current sprite to grayscale');
+                    return;
                 }
+                const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                if (!frameCanvas) {
+                    window.Debug && window.Debug.log && window.Debug.log('No frame canvas found');
+                    return;
+                }
+                const ctx = frameCanvas.getContext('2d');
+                const w = frameCanvas.width;
+                const h = frameCanvas.height;
+                const img = ctx.getImageData(0, 0, w, h);
+                const data = img.data;
+
+                const hasPointSelection = (this.selectionPoints && this.selectionPoints.length > 0);
+                const hasRegionSelection = !!this.selectionRegion;
+
+                const applyLumAtIdx = (idx) => {
+                    const r = data[idx];
+                    const g = data[idx + 1];
+                    const b = data[idx + 2];
+                    const lum = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
+                    data[idx] = lum;
+                    data[idx + 1] = lum;
+                    data[idx + 2] = lum;
+                };
+
+                if (hasPointSelection) {
+                    for (const p of this.selectionPoints) {
+                        if (!p) continue;
+                        if (p.x < 0 || p.y < 0 || p.x >= w || p.y >= h) continue;
+                        const idx = (p.y * w + p.x) * 4;
+                        applyLumAtIdx(idx);
+                    }
+                } else if (hasRegionSelection) {
+                    const sr = this.selectionRegion;
+                    const minX = Math.max(0, Math.min(sr.start.x, sr.end.x));
+                    const minY = Math.max(0, Math.min(sr.start.y, sr.end.y));
+                    const maxX = Math.min(w - 1, Math.max(sr.start.x, sr.end.x));
+                    const maxY = Math.min(h - 1, Math.max(sr.start.y, sr.end.y));
+                    for (let yy = minY; yy <= maxY; yy++) {
+                        for (let xx = minX; xx <= maxX; xx++) {
+                            const idx = (yy * w + xx) * 4;
+                            applyLumAtIdx(idx);
+                        }
+                    }
+                } else {
+                    for (let i = 0; i < data.length; i += 4) {
+                        const r = data[i];
+                        const g = data[i + 1];
+                        const b = data[i + 2];
+                        const lum = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
+                        data[i] = lum;
+                        data[i + 1] = lum;
+                        data[i + 2] = lum;
+                    }
+                }
+
+                ctx.putImageData(img, 0, 0);
+                if (typeof sheet._rebuildSheetCanvas === 'function') {
+                    try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                }
+                window.Debug && window.Debug.log && window.Debug.log('Applied grayscale to current frame');
+            } catch (err) {
+                window.Debug && window.Debug.error && window.Debug.error('Grayscale signal failed: ' + err);
             }
-        } catch (e) { console.warn('spriteScene.onSwitchTo failed', e); }
-        // remove color picker input/label added in onReady to avoid leaving DOM/listeners behind
-        try {
-            if (this._colorInput && this._colorInput.parentNode) { try { this._colorInput.remove(); } catch(e){} }
-            if (this._colorLabel && this._colorLabel.parentNode) { try { this._colorLabel.remove(); } catch(e){} }
-        } catch (e) {}
-        try {
-            const pen = document.getElementById('pen-color'); if (pen && pen.parentNode) try { pen.remove(); } catch(e){}
-        } catch (e) {}
-        try {
-            const impBtn = document.getElementById('import-spritesheet-btn'); if (impBtn && impBtn.parentNode) try { impBtn.remove(); } catch(e){}
-        } catch (e) {}
-        try {
-            const expBtn = document.getElementById('export-spritesheet-btn'); if (expBtn && expBtn.parentNode) try { expBtn.remove(); } catch(e){}
-        } catch (e) {}
-        try {
-            const impInput = document.getElementById('import-spritesheet-input'); if (impInput && impInput.parentNode) try { impInput.remove(); } catch(e){}
-        } catch (e) {}
-        return this.packResources ? this.packResources() : null;
+        });
+        window.Debug.createSignal('copy', () => {
+            try {
+                const hex = this.penColor || '#000000';
+                // Use support helper to copy to clipboard
+                try { copyToClipboard(hex); } catch (err) {
+                    // fallback to navigator if helper unavailable
+                    try { navigator.clipboard.writeText(hex); } catch (e) {}
+                }
+                window.Debug && window.Debug.log && window.Debug.log('Copied color to clipboard: ' + hex);
+            } catch (err) {
+                window.Debug && window.Debug.error && window.Debug.error('CopyColor signal failed: ' + err);
+            }
+        });
+        window.Debug.createSignal('resize', (sliceSize,resizeContent=true) => {
+            try {
+                this.resize(sliceSize,resizeContent)
+                window.Debug && window.Debug.log && window.Debug.log('Resized canvas to:',sliceSize,'x',sliceSize,'px');
+            } catch (err) {
+                window.Debug && window.Debug.error && window.Debug.error('Failed to resize canvas' + err);
+            }
+        });
+        // Configure tile-mode grid size: tileArray(cols, rows).
+        // Example: tileArray(5,5) -> 5x5 grid of mirrored tiles.
+        window.Debug.createSignal('tileArray', (cols = 3, rows = cols) => {
+            try {
+                const toInt = (v, def) => {
+                    const n = Math.floor(Number(v));
+                    return Number.isFinite(n) && n > 0 ? n : def;
+                };
+                const c = Math.max(1, toInt(cols, this.tileCols || 3));
+                const r = Math.max(1, toInt(rows, this.tileRows || 3));
+                if (this.stateController) this.stateController.setTileGrid(c, r);
+                else {
+                    this.tileCols = c;
+                    this.tileRows = r;
+                }
+                this._seedTileActives(c, r);
+                window.Debug && window.Debug.log && window.Debug.log('Tile array size set to', c + 'x' + r);
+            } catch (err) {
+                window.Debug && window.Debug.error && window.Debug.error('tileArray signal failed: ' + err);
+            }
+        });
+
+        // Register SelectColor debug signal: select(hex, buffer=1)
+        window.Debug.createSignal('select', (hex, buffer = 1) => {
+            try {
+                if (!hex) {
+                    window.Debug && window.Debug.log && window.Debug.log('SelectColor: missing hex argument');
+                    return;
+                }
+                const tol = (typeof buffer === 'number') ? buffer : (parseFloat(buffer) || 1);
+                const colObj = Color.convertColor(hex);
+                const rgbCol = colObj.toRgb();
+                // Color.toRgb returns an object where .a/.b/.c hold r/g/b in this project
+                const tr = Math.round(rgbCol.a || 0);
+                const tg = Math.round(rgbCol.b || 0);
+                const tb = Math.round(rgbCol.c || 0);
+                // If an explicit alpha is present (e.g. 8-digit hex), treat the
+                // selection as alpha-exclusive instead of RGB distance based.
+                const hasAlpha = (rgbCol && typeof rgbCol.d === 'number');
+                const ta = hasAlpha ? Math.round((rgbCol.d || 0) * 255) : null;
+
+                const sheet = this.currentSprite;
+                const anim = this.selectedAnimation;
+                const frameIdx = this.selectedFrame;
+                if (!sheet) {
+                    window.Debug && window.Debug.log && window.Debug.log('SelectColor: no current sprite');
+                    return;
+                }
+                const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                if (!frameCanvas) {
+                    window.Debug && window.Debug.log && window.Debug.log('SelectColor: no frame canvas');
+                    return;
+                }
+
+                const ctx = frameCanvas.getContext('2d');
+                const w = frameCanvas.width;
+                const h = frameCanvas.height;
+                let img;
+                try { img = ctx.getImageData(0, 0, w, h); } catch (e) { return; }
+                const data = img.data;
+
+                const matches = [];
+                const maxDistSq = tol * tol;
+                for (let y = 0; y < h; y++) {
+                    for (let x = 0; x < w; x++) {
+                        const i = (y * w + x) * 4;
+                        const r = data[i];
+                        const g = data[i + 1];
+                        const b = data[i + 2];
+                        const a = data[i + 3];
+
+                        const dr = r - tr;
+                        const dg = g - tg;
+                        const db = b - tb;
+                        const distSq = dr * dr + dg * dg + db * db;
+                        if (distSq > maxDistSq) continue;
+
+                        // If no alpha was supplied in the target color, ignore
+                        // pixel alpha. If alpha was supplied (8-digit hex), also
+                        // require exact alpha match.
+                        if (hasAlpha && a !== ta) continue;
+
+                        matches.push({ x, y });
+                    }
+                }
+
+                // Merge color-matched points into any existing selection
+                const merged = (this.selectionPoints && this.selectionPoints.length > 0)
+                    ? this.selectionPoints.slice()
+                    : [];
+                for (const p of matches) {
+                    const exists = merged.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === undefined);
+                    if (!exists) merged.push({ x: p.x, y: p.y });
+                }
+                if (this.stateController) {
+                    this.stateController.setSelectionPoints(merged);
+                    this.stateController.clearSelectionRegion();
+                } else {
+                    this.selectionPoints = merged;
+                    this.selectionRegion = null;
+                }
+                window.Debug && window.Debug.log && window.Debug.log(`SelectColor: selected ${matches.length} pixels matching ${hex} (tol=${tol})`);
+            } catch (err) {
+                window.Debug && window.Debug.error && window.Debug.error('SelectColor failed: ' + err);
+            }
+        });
+
+        // Register ReplaceColor debug signal: replace(hex1, hex2, include='frame'|'animation'|'all', buffer=1)
+        window.Debug.createSignal('replace', (hex1, hex2, include = 'frame', buffer = 1) => {
+            try {
+                if (!hex1 || !hex2) {
+                    window.Debug && window.Debug.log && window.Debug.log('ReplaceColor: missing hex1 or hex2 argument');
+                    return;
+                }
+                const sheet = this.currentSprite;
+                if (!sheet) {
+                    window.Debug && window.Debug.log && window.Debug.log('ReplaceColor: no current sprite');
+                    return;
+                }
+
+                const tol = (typeof buffer === 'number') ? buffer : (parseFloat(buffer) || 1);
+
+                const srcCol = Color.convertColor(hex1).toRgb();
+                const dstCol = Color.convertColor(hex2).toRgb();
+                const sr = Math.round(srcCol.a || 0);
+                const sg = Math.round(srcCol.b || 0);
+                const sb = Math.round(srcCol.c || 0);
+                const hasSrcAlpha = (srcCol && typeof srcCol.d === 'number');
+                const sa = hasSrcAlpha ? Math.round((srcCol.d || 0) * 255) : null;
+
+                const dr = Math.round(dstCol.a || 0);
+                const dg = Math.round(dstCol.b || 0);
+                const db = Math.round(dstCol.c || 0);
+                const da = Math.round(((dstCol.d === undefined ? 1 : dstCol.d) || 0) * 255);
+
+                const maxDistSq = tol * tol;
+
+                // Build list of (anim, frameIdx) targets based on include mode.
+                const targets = [];
+                const currentAnim = this.selectedAnimation;
+                const currentFrameIdx = this.selectedFrame;
+
+                const safeInclude = (typeof include === 'string') ? include.toLowerCase() : 'frame';
+                if (safeInclude === 'animation') {
+                    try {
+                        const arr = (sheet._frames && sheet._frames.get(currentAnim)) || [];
+                        for (let i = 0; i < arr.length; i++) {
+                            targets.push({ anim: currentAnim, frameIdx: i });
+                        }
+                    } catch (e) { /* ignore frame enumeration errors */ }
+                } else if (safeInclude === 'all') {
+                    try {
+                        if (sheet._frames && typeof sheet._frames.entries === 'function') {
+                            for (const [animName, arr] of sheet._frames.entries()) {
+                                if (!Array.isArray(arr)) continue;
+                                for (let i = 0; i < arr.length; i++) {
+                                    targets.push({ anim: animName, frameIdx: i });
+                                }
+                            }
+                        }
+                    } catch (e) { /* ignore global frame enumeration errors */ }
+                } else {
+                    // default: only the currently selected frame
+                    targets.push({ anim: currentAnim, frameIdx: currentFrameIdx });
+                }
+
+                let replacedCount = 0;
+
+                for (const t of targets) {
+                    if (!t || t.anim === undefined || t.frameIdx === undefined) continue;
+                    let frameCanvas = null;
+                    try { frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(t.anim, t.frameIdx) : null; } catch (e) { frameCanvas = null; }
+                    if (!frameCanvas) continue;
+
+                    const ctx = frameCanvas.getContext('2d');
+                    const w = frameCanvas.width;
+                    const h = frameCanvas.height;
+                    let img;
+                    try { img = ctx.getImageData(0, 0, w, h); } catch (e) { continue; }
+                    const data = img.data;
+
+                    for (let y = 0; y < h; y++) {
+                        for (let x = 0; x < w; x++) {
+                            const i = (y * w + x) * 4;
+                            const r = data[i];
+                            const g = data[i + 1];
+                            const b = data[i + 2];
+                            const a = data[i + 3];
+
+                            const rr = r - sr;
+                            const gg = g - sg;
+                            const bb = b - sb;
+                            const distSq = rr * rr + gg * gg + bb * bb;
+                            if (distSq > maxDistSq) continue;
+
+                            // If hex1 included alpha, also require exact alpha match.
+                            if (hasSrcAlpha && a !== sa) continue;
+
+                            data[i] = dr;
+                            data[i + 1] = dg;
+                            data[i + 2] = db;
+                            data[i + 3] = da;
+                            replacedCount++;
+                        }
+                    }
+
+                    try { ctx.putImageData(img, 0, 0); } catch (e) { /* ignore putImageData errors */ }
+                }
+
+                // rebuild packed sheet so editor view updates
+                if (typeof sheet._rebuildSheetCanvas === 'function') {
+                    try { sheet._rebuildSheetCanvas(); } catch (e) { /* ignore */ }
+                }
+
+                window.Debug && window.Debug.log && window.Debug.log(`ReplaceColor: replaced ${replacedCount} pixels from ${hex1} to ${hex2} (include=${safeInclude}, tol=${tol})`);
+            } catch (err) {
+                window.Debug && window.Debug.error && window.Debug.error('ReplaceColor failed: ' + err);
+            }
+        });
+
+        window.Debug.createSignal('drawSelected', () => {
+            try {
+                const sheet = this.currentSprite;
+                if (!sheet) {
+                    window.Debug && window.Debug.log && window.Debug.log('drawSelected: no current sprite');
+                    return;
+                }
+                const colorHex = this.penColor || '#000000';
+                let applied = 0;
+
+                // helper to write a single pixel using sheet API if available, otherwise direct canvas
+                const writePixel = (anim, frameIdx, x, y) => {
+                    try {
+                        if (typeof sheet.setPixel === 'function') {
+                            sheet.setPixel(anim, frameIdx, x, y, colorHex, 'replace');
+                        } else {
+                            const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                            if (frameCanvas) {
+                                const ctx = frameCanvas.getContext('2d');
+                                try {
+                                    const col = Color.convertColor(colorHex).toRgb();
+                                    const r = Math.round(col.a || 0);
+                                    const g = Math.round(col.b || 0);
+                                    const b = Math.round(col.c || 0);
+                                    const a = (col.d === undefined) ? 1 : (col.d || 0);
+                                    ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+                                    ctx.fillRect(x, y, 1, 1);
+                                } catch (e) { /* ignore per-pixel canvas failures */ }
+                            }
+                        }
+                        applied++;
+                    } catch (e) { /* ignore write errors */ }
+                };
+
+                // If explicit point selection exists, use those points (respect areaIndex per-point)
+                if (this.selectionPoints && this.selectionPoints.length > 0) {
+                    for (const p of this.selectionPoints) {
+                        if (!p) continue;
+                        let anim = this.selectedAnimation;
+                        let frameIdx = this.selectedFrame;
+                        if (this.tilemode && p && typeof p.areaIndex === 'number') {
+                            const binding = this.getAreaBinding(p.areaIndex);
+                            if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                                anim = binding.anim;
+                                frameIdx = Number(binding.index);
+                            }
+                        }
+                        writePixel(anim, frameIdx, p.x, p.y);
+                    }
+                } else if (this.selectionRegion) {
+                    // region selection: paint every pixel inside the region
+                    const sr = this.selectionRegion;
+                    const minX = Math.min(sr.start.x, sr.end.x);
+                    const minY = Math.min(sr.start.y, sr.end.y);
+                    const maxX = Math.max(sr.start.x, sr.end.x);
+                    const maxY = Math.max(sr.start.y, sr.end.y);
+                    // prefer region's areaIndex if present
+                    let anim = this.selectedAnimation;
+                    let frameIdx = this.selectedFrame;
+                    if (this.tilemode && sr && typeof sr.areaIndex === 'number') {
+                        const binding = this.getAreaBinding(sr.areaIndex);
+                        if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                            anim = binding.anim;
+                            frameIdx = Number(binding.index);
+                        }
+                    }
+                    for (let yy = minY; yy <= maxY; yy++) {
+                        for (let xx = minX; xx <= maxX; xx++) {
+                            writePixel(anim, frameIdx, xx, yy);
+                        }
+                    }
+                } else {
+                    window.Debug && window.Debug.log && window.Debug.log('drawSelected: no selection to draw into');
+                }
+
+                if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                window.Debug && window.Debug.log && window.Debug.log('drawSelected applied to ' + applied + ' pixels');
+            } catch (err) {
+                window.Debug && window.Debug.error && window.Debug.error('drawSelected failed: ' + err);
+            }
+        });
+
+        // Debug: procedural textures on the current frame.
+        // texture(type, ...args)
+        // 1) texture("pointLight", centerX, centerY, gradStart, gradEnd, lerpCenter)
+        // 2) texture("points", count, color, seed=1)
+        // 3) texture("linear", gradStart, gradEnd, lerpCenter, angleDeg)
+        window.Debug.createSignal('texture', (type, ...args) => {
+            try {
+                const sheet = this.currentSprite;
+                const anim = this.selectedAnimation;
+                const frameIdx = this.selectedFrame;
+                if (!sheet) return false;
+                const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                if (!frameCanvas) return false;
+
+                const px = frameCanvas.width;
+                const py = frameCanvas.height;
+                const ctx = frameCanvas.getContext('2d');
+                let img;
+                try { img = ctx.getImageData(0, 0, px, py); } catch (e) { return false; }
+                const data = img.data;
+
+                const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+                // Since Debug's input parser naively splits on commas, array literals like
+                // [0,0,0,0] arrive as multiple arguments ("[0", 0, 0, "0]"). We first
+                // normalize the raw args back into array-like strings where possible.
+                const normalizeArgs = (raw) => {
+                    const out = [];
+                    for (let i = 0; i < raw.length; i++) {
+                        const v = raw[i];
+                        if (typeof v === 'string' && v.indexOf('[') !== -1 && v.indexOf(']') === -1) {
+                            let buf = String(v);
+                            while (buf.indexOf(']') === -1 && i + 1 < raw.length) {
+                                i++;
+                                buf += ',' + String(raw[i]);
+                            }
+                            out.push(buf);
+                        } else {
+                            out.push(v);
+                        }
+                    }
+                    return out;
+                };
+
+                const normArgs = normalizeArgs(args);
+
+                // Parse a color spec which may be an array [r,g,b,a, 'rgba'|'hsva'] or any
+                // Color.convertColor-compatible input.
+                const parseColorSpec = (spec) => {
+                    try {
+                        // Allow bracketed array syntax passed as a single string, e.g. "[0,0,0,0]".
+                        if (typeof spec === 'string') {
+                            const t = spec.trim();
+                            if (t[0] === '[' && t.indexOf(']') !== -1) {
+                                try {
+                                    const arr = JSON.parse(t.replace(/'/g, '"'));
+                                    spec = arr;
+                                } catch (e) {
+                                    // fall through and let other handlers try
+                                }
+                            }
+                        }
+                        if (Array.isArray(spec) && spec.length >= 3) {
+                            const v0 = Number(spec[0]) || 0;
+                            const v1 = Number(spec[1]) || 0;
+                            const v2 = Number(spec[2]) || 0;
+                            let va = (spec[3] === undefined || spec[3] === null) ? 1 : Number(spec[3]);
+                            let mode = String(spec[4] || 'rgba').toLowerCase();
+                            if (mode.indexOf('hsv') !== -1) {
+                                // Treat as HSVA. H in [0,1] or [0,360], S/V/A in [0,1] (A also accepts 0-255).
+                                let h = v0;
+                                let s = v1;
+                                let vv = v2;
+                                if (h > 1) h = h / 360;
+                                s = clamp01(s);
+                                vv = clamp01(vv);
+                                if (va > 1) va = va / 255;
+                                va = clamp01(va);
+                                return { color: new Color(h, s, vv, va, 'hsv'), space: 'hsv' };
+                            } else {
+                                // Treat as RGBA. R/G/B in 0-255, A in [0,1] or 0-255.
+                                let a = va;
+                                if (a > 1) a = a / 255;
+                                a = clamp01(a);
+                                return { color: new Color(v0, v1, v2, a, 'rgb'), space: 'rgb' };
+                            }
+                        }
+                        const col = Color.convertColor(spec);
+                        return { color: col, space: (col.type === 'hsv' ? 'hsv' : 'rgb') };
+                    } catch (e) {
+                        return { color: Color.fromHex('#000000FF'), space: 'rgb' };
+                    }
+                };
+
+                const mixColors = (infoA, infoB, t) => {
+                    t = clamp01(t);
+                    const useHsv = (infoA.space === 'hsv' || infoB.space === 'hsv');
+                    if (useHsv) {
+                        const c0 = infoA.color.toHsv();
+                        const c1 = infoB.color.toHsv();
+                        const h = c0.a + (c1.a - c0.a) * t;
+                        const s = c0.b + (c1.b - c0.b) * t;
+                        const v = c0.c + (c1.c - c0.c) * t;
+                        const a = c0.d + (c1.d - c0.d) * t;
+                        const rgb = new Color(h, s, v, a, 'hsv').toRgb();
+                        return { r: rgb.a, g: rgb.b, b: rgb.c, a: rgb.d };
+                    }
+                    const c0 = infoA.color.toRgb();
+                    const c1 = infoB.color.toRgb();
+                    const r = c0.a + (c1.a - c0.a) * t;
+                    const g = c0.b + (c1.b - c0.b) * t;
+                    const b = c0.c + (c1.c - c0.c) * t;
+                    const a = c0.d + (c1.d - c0.d) * t;
+                    return { r, g, b, a };
+                };
+
+                const writePixel = (x, y, col) => {
+                    if (x < 0 || y < 0 || x >= px || y >= py) return;
+                    const idx = (y * px + x) * 4;
+                    data[idx]   = Math.max(0, Math.min(255, Math.round(col.r || 0)));
+                    data[idx+1] = Math.max(0, Math.min(255, Math.round(col.g || 0)));
+                    data[idx+2] = Math.max(0, Math.min(255, Math.round(col.b || 0)));
+                    const alpha = (col.a === undefined || col.a === null) ? 1 : col.a;
+                    const a255 = Math.max(0, Math.min(255, Math.round(alpha * 255)));
+                    data[idx+3] = a255;
+                };
+
+                const kind = String(type || '').toLowerCase();
+
+                if (kind === 'pointlight') {
+                    const cx = Number(normArgs[0]);
+                    const cy = Number(normArgs[1]);
+                    const startInfo = parseColorSpec(normArgs[2] !== undefined ? normArgs[2] : ['#000000']);
+                    const endInfo = parseColorSpec(normArgs[3] !== undefined ? normArgs[3] : ['#FFFFFFFF']);
+                    const bias = clamp01(normArgs[4] !== undefined ? Number(normArgs[4]) : 0);
+
+                    const centerX = Number.isFinite(cx) ? cx : (px - 1) / 2;
+                    const centerY = Number.isFinite(cy) ? cy : (py - 1) / 2;
+                    // maximum distance to any corner for radial falloff
+                    const corners = [
+                        { x: 0, y: 0 },
+                        { x: px - 1, y: 0 },
+                        { x: 0, y: py - 1 },
+                        { x: px - 1, y: py - 1 }
+                    ];
+                    let maxR = 1;
+                    for (const c of corners) {
+                        const dx = c.x - centerX;
+                        const dy = c.y - centerY;
+                        const d = Math.sqrt(dx*dx + dy*dy);
+                        if (d > maxR) maxR = d;
+                    }
+
+                    for (let y = 0; y < py; y++) {
+                        for (let x = 0; x < px; x++) {
+                            const dx = x - centerX;
+                            const dy = y - centerY;
+                            const dist = Math.sqrt(dx*dx + dy*dy);
+                            let tRaw = dist / maxR;
+                            if (!Number.isFinite(tRaw)) tRaw = 0;
+                            tRaw = clamp01(tRaw);
+                            // Bias towards center: blend linear and quadratic falloff.
+                            const t = (1 - bias) * tRaw + bias * tRaw * tRaw;
+                            const col = mixColors(startInfo, endInfo, t);
+                            writePixel(x, y, col);
+                        }
+                    }
+                } else if (kind === 'points') {
+                    const count = Math.max(0, Math.floor(Number(normArgs[0]) || 0));
+                    const colorInfo = parseColorSpec(normArgs[1] !== undefined ? normArgs[1] : ['#FFFFFFFF']);
+                    let seed = normArgs[2] !== undefined ? Number(normArgs[2]) : 1;
+                    if (!Number.isFinite(seed) || seed === 0) seed = 1;
+                    const rng = () => {
+                        seed = (seed * 1664525 + 1013904223) >>> 0;
+                        return seed / 4294967296;
+                    };
+
+                    const col = mixColors(colorInfo, colorInfo, 0); // just normalize to RGBA
+                    for (let i = 0; i < count; i++) {
+                        const x = Math.floor(rng() * px);
+                        const y = Math.floor(rng() * py);
+                        writePixel(x, y, col);
+                    }
+                } else if (kind === 'linear') {
+                    const startInfo = parseColorSpec(normArgs[0] !== undefined ? normArgs[0] : ['#000000']);
+                    const endInfo = parseColorSpec(normArgs[1] !== undefined ? normArgs[1] : ['#FFFFFFFF']);
+                    const bias = clamp01(normArgs[2] !== undefined ? Number(normArgs[2]) : 0.5);
+                    const angleDeg = normArgs[3] !== undefined ? Number(normArgs[3]) : 0;
+                    const angleRad = (Number.isFinite(angleDeg) ? angleDeg : 0) * Math.PI / 180;
+                    const dxDir = Math.cos(angleRad) || 1;
+                    const dyDir = Math.sin(angleRad) || 0;
+                    const cx = (px - 1) / 2;
+                    const cy = (py - 1) / 2;
+
+                    // Compute maximum projection length to normalize into [0,1].
+                    const corners = [
+                        { x: 0, y: 0 },
+                        { x: px - 1, y: 0 },
+                        { x: 0, y: py - 1 },
+                        { x: px - 1, y: py - 1 }
+                    ];
+                    let maxProj = 1;
+                    for (const c of corners) {
+                        const vx = c.x - cx;
+                        const vy = c.y - cy;
+                        const p = Math.abs(vx * dxDir + vy * dyDir);
+                        if (p > maxProj) maxProj = p;
+                    }
+
+                    for (let y = 0; y < py; y++) {
+                        for (let x = 0; x < px; x++) {
+                            const vx = x - cx;
+                            const vy = y - cy;
+                            const proj = vx * dxDir + vy * dyDir;
+                            let tRaw = (proj / maxProj + 1) * 0.5; // map [-maxProj,maxProj] -> [0,1]
+                            if (!Number.isFinite(tRaw)) tRaw = 0;
+                            tRaw = clamp01(tRaw);
+                            const t = (1 - bias) * tRaw + bias * tRaw * tRaw;
+                            const col = mixColors(startInfo, endInfo, t);
+                            writePixel(x, y, col);
+                        }
+                    }
+                } else {
+                    // unknown texture type
+                    return false;
+                }
+
+                // write back and update packed sheet
+                try { ctx.putImageData(img, 0, 0); } catch (e) { return false; }
+                if (typeof sheet._rebuildSheetCanvas === 'function') {
+                    try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                }
+                return true;
+            } catch (err) {
+                window.Debug && window.Debug.error && window.Debug.error('texture signal failed: ' + err);
+                return false;
+            }
+        });
+
+        // Register debug signals for onion-skin control: layerAlpha(alpha), toggleOnion()
+        window.Debug.createSignal('layerAlpha', (alpha) => {
+            try {
+                const a = Number(alpha);
+                if (Number.isFinite(a)) {
+                    if (this.stateController) this.stateController.setOnionAlpha(a);
+                    else this.onionAlpha = Math.max(0, Math.min(1, a));
+                    console.log('onionAlpha set to', this.onionAlpha);
+                    return this.onionAlpha;
+                }
+            } catch (e) { /* ignore */ }
+            return null;
+        });
+        window.Debug.createSignal('toggleOnion', () => {
+            try {
+                if (this.stateController) this.stateController.toggleOnionSkin();
+                else this.onionSkin = !(typeof this.onionSkin === 'boolean' ? this.onionSkin : true);
+                console.log('onionSkin toggled to', this.onionSkin);
+                return this.onionSkin;
+            } catch (e) { /* ignore */ }
+            return null;
+        });
+
+        // Debug: show multiplayer menu (hidden by default). Call via Debug signal to unhide.
+        window.Debug.createSignal('enableColab', () => {
+            try {
+                const el = document.getElementById('multiplayer-menu');
+                if (el) {
+                    el.style.display = 'flex';
+                    try { if (this.server && typeof this.server.unpause === 'function') this.server.unpause(); } catch (e) {}
+                    return true;
+                }
+            } catch (e) {}
+            return false;
+        });
+
+        // Debug: set player name (persisted) and send/receive simple chat messages
+        window.Debug.createSignal('name', (n) => {
+            try {
+                const name = (typeof n === 'string') ? n.trim().slice(0, 64) : String(n || '').slice(0,64);
+                this.playerName = name;
+                if (this.saver && typeof this.saver.set === 'function') {
+                    try { this.saver.set('player_name', name); } catch (e) {}
+                }
+                console.log('name set to', name);
+                return true;
+            } catch (e) { return false; }
+        });
+        window.Debug.createSignal('msg', (text) => {
+            try {
+                if (!text) return false;
+                const body = String(text);
+                const from = this.playerName || this.clientId || 'anon';
+                const payload = { from, text: body, time: Date.now(), client: this.clientId };
+                const id = (payload.time || Date.now()) + '_' + Math.random().toString(36).slice(2,6);
+                // send via current collab transport if available
+                try {
+                    if (this._canSendCollab()) {
+                        const diff = {};
+                        diff['messages/' + id] = payload;
+                        this._sendCollabDiff(diff);
+                    }
+                } catch (e) {}
+                // also locally log/display
+                try { console.log('[msg] ' + from + ': ' + body); } catch (e) {}
+                try { if (window.Debug && window.Debug.log) window.Debug.log('[msg] ' + from + ': ' + body); } catch (e) {}
+                return true;
+            } catch (e) { return false; }
+        });
+
+        // collabMode('firebase-diff'|'webrtc') -> switch active transport mode.
+        window.Debug.createSignal('collabMode', (mode = 'firebase-diff') => {
+            try {
+                const normalized = String(mode || 'firebase-diff').trim().toLowerCase();
+                const nextMode = (normalized === 'webrtc') ? 'webrtc' : 'firebase-diff';
+                const ok = this.configureCollabTransport({ mode: nextMode });
+                if (ok) {
+                    try { console.log('collab mode ->', nextMode); } catch (e) {}
+                    return nextMode;
+                }
+            } catch (e) { /* ignore */ }
+            return null;
+        });
+
+        // collabHandshakeOnly(true|false) -> in webrtc mode, disable Firebase data writes.
+        window.Debug.createSignal('collabHandshakeOnly', (enabled = true) => {
+            try {
+                const next = !!enabled;
+                this.setCollabHandshakeOnly(next);
+                try { console.log('collab handshakeOnly ->', next); } catch (e) {}
+                return next;
+            } catch (e) { /* ignore */ }
+            return null;
+        });
+
+        // collabSignal(type, payload) -> send a handshake/signaling payload via signaling channel.
+        window.Debug.createSignal('collabSignal', (type, payload = {}) => {
+            try {
+                const signalType = (typeof type === 'string' && type.trim()) ? type.trim() : 'signal';
+                const data = (payload && typeof payload === 'object') ? payload : { value: payload };
+                const signal = {
+                    signal: {
+                        type: signalType,
+                        payload: data,
+                        client: this.clientId,
+                        time: Date.now()
+                    }
+                };
+                if (!this._canSendSignal()) return false;
+                return !!this._sendHandshakeSignal(signal);
+            } catch (e) {
+                return false;
+            }
+        });
+
+        // Start/stop WebRTC handshake + data-channel bridge.
+        window.Debug.createSignal('webrtcStart', async (offer = null) => {
+            try {
+                if (!this.webrtcCollab || typeof this.webrtcCollab.start !== 'function') return false;
+                return !!(await this.webrtcCollab.start({ offer: (typeof offer === 'boolean') ? offer : null }));
+            } catch (e) {
+                return false;
+            }
+        });
+        window.Debug.createSignal('webrtcStop', () => {
+            try {
+                if (!this.webrtcCollab || typeof this.webrtcCollab.stop !== 'function') return false;
+                this.webrtcCollab.stop();
+                return true;
+            } catch (e) {
+                return false;
+            }
+        });
+        window.Debug.createSignal('webrtcEnable', async () => {
+            try {
+                this.configureCollabTransport({ mode: 'webrtc', handshakeOnly: true });
+                if (!this.webrtcCollab || typeof this.webrtcCollab.start !== 'function') return false;
+                return !!(await this.webrtcCollab.start({ offer: null }));
+            } catch (e) {
+                return false;
+            }
+        });
+        window.Debug.createSignal('webrtcStatus', () => {
+            try {
+                const channel = this.webrtcCollab && this.webrtcCollab.channel ? this.webrtcCollab.channel : null;
+                const readyState = channel ? channel.readyState : 'none';
+                const transportMode = this.localState?.collab?.transportMode || this.collabTransport?.mode || 'unknown';
+                const handshakeOnly = !!this.localState?.collab?.handshakeOnly;
+                const canData = this._canSendCollab();
+                const canSignal = this._canSendSignal();
+                const status = {
+                    started: !!(this.webrtcCollab && this.webrtcCollab.started),
+                    channelReadyState: readyState,
+                    transportMode,
+                    handshakeOnly,
+                    canSendData: !!canData,
+                    canSendSignal: !!canSignal,
+                    allowFirebaseData: !!(this.collabTransport && this.collabTransport.allowFirebaseData)
+                };
+                try { console.log('webrtcStatus', status); } catch (e) {}
+                return status;
+            } catch (e) {
+                return null;
+            }
+        });
+        window.Debug.createSignal('syncReset', () => {
+            try {
+                const diff = {
+                    'sync/status': 'done',
+                    'sync/paused': false,
+                    'sync/requestId': null,
+                    'sync/requester': null,
+                    'sync/snapshot': null,
+                    'sync/acks': null,
+                    'sync/message': 'manual-reset'
+                };
+                return !!this._sendHandshakeSignal(diff);
+            } catch (e) {
+                return false;
+            }
+        });
+
+        window.Debug.createSignal('save', (name) => { try { this.doSave(name); } catch (e) { console.warn('debug save failed', e); } });
+        // clearSave([name]) -> remove saved sheet+meta for given name
+        window.Debug.createSignal('clearSave', (name) => {
+            try {
+                const n = name || (this.currentSprite && this.currentSprite.name) || 'spritesheet';
+                if (this.saver && typeof this.saver.remove === 'function') {
+                    try { this.saver.remove('sprites/' + n); } catch (e) {}
+                    try { this.saver.remove('sprites_meta/' + n); } catch (e) {}
+                }
+            } catch (e) { console.warn('debug clearSave failed', e); }
+        });
+        // autosave(enabled:boolean, seconds?:number) -> toggle autosave and optionally set interval
+        window.Debug.createSignal('autosave', (enabled, seconds) => {
+            try {
+                this._autosaveEnabled = !!enabled;
+                if (typeof seconds === 'number' && seconds > 0) this._autosaveIntervalSeconds = Math.max(1, Math.floor(seconds));
+                if (this._autosaveIntervalId) { try { clearInterval(this._autosaveIntervalId); } catch (e) {} this._autosaveIntervalId = null; }
+                if (this._autosaveEnabled) {
+                    this._autosaveIntervalId = setInterval(() => { try { this.doSave(); } catch (e) {} }, (this._autosaveIntervalSeconds || 60) * 1000);
+                }
+            } catch (e) { console.warn('debug autosave failed', e); }
+        });
     }
     
-    // Handle wheel-based panning. Reads horizontal/vertical wheel deltas from
-    // this.mouse.Wheel and this.mouse.WheelX (with fallbacks) and converts them
-    // into pan velocity impulses. If ctrl+wheel was used for zooming we skip
-    // panning (zoomScreen handles ctrl+wheel separately).
+    // Handle wheel-based panning. 
     panScreen(tickDelta){
-        if (this.keys.held('Control')) return; // prefer zoom when ctrl is pressed
-        // Read wheel deltas (robustly handle multiple mouse APIs)
+        if (this.keys.held('Control')) return;
+
+
         let wheelY = 0, wheelX = 0;
         wheelY = this.mouse.wheel();
         wheelX = this.mouse.wheelX();
         
-        // Convert wheel deltas to pan velocity impulses. We divide by zoom so
-        // panning speed feels consistent at different zoom levels.
-        // When Shift is held, interpret vertical wheel (wheelY) as horizontal
-        // scrolling (common UX: Shift + scroll -> horizontal pan).
+        // Convert wheel deltas to pan velocity impulses. We divide by zoom so panning speed feels consistent at different zoom levels.
         const zX = this.zoom.x;
         const zY = this.zoom.y;
         // combine horizontal movement: native horizontal wheel plus vertical wheel when Shift held
+
         let horiz = wheelX || 0;
         let vert = wheelY || 0;
         if (this.keys.held('Shift') || this.mouse.held('middle')) {
@@ -1485,8 +1156,8 @@ export class SpriteScene extends Scene {
             vert = 0; // suppress vertical pan while Shift is held
         }
         // invert direction so wheel down moves content up (typical UX)
-        const impulseX = -horiz * (this.panImpulse) * (1 / zX);
-        const impulseY = -vert * (this.panImpulse) * (1 / zY);
+        const impulseX = -horiz * (this.localState.camera.panImpulse) * (1 / zX);
+        const impulseY = -vert * (this.localState.camera.panImpulse) * (1 / zY);
         this.panVlos.x += impulseX;
         this.panVlos.y += impulseY;
     }
@@ -1675,6 +1346,294 @@ export class SpriteScene extends Scene {
         }
     }
 
+    getState(path, fallback = undefined, rootObj = null) {
+        try {
+            const target = rootObj || this.state;
+            const pathArr = Array.isArray(path) ? path : [path];
+            let cur = target;
+            for (const key of pathArr) {
+                if (cur == null) return fallback;
+                cur = cur[key];
+            }
+            return (cur === undefined) ? fallback : cur;
+        } catch (e) {
+            return fallback;
+        }
+    }
+
+    modifyState(newValue, syncUndo = false, syncColab = false, ...pathArgs){
+        const path = (pathArgs.length === 1 && Array.isArray(pathArgs[0])) ? pathArgs[0] : pathArgs;
+        if (!path || path.length === 0) return false;
+        let current = this.state;
+        for (let i = 0; i < path.length - 1; i++){
+            const key = path[i];
+            if (current[key] === undefined || current[key] === null || typeof current[key] !== 'object') current[key] = {};
+            current = current[key];
+        }
+        current[path[path.length-1]] = newValue;
+        return true;
+    }
+
+    _sendCollabDiff(diff) {
+        try {
+            if (this.collabTransport && typeof this.collabTransport.sendDiff === 'function') {
+                return !!this.collabTransport.sendDiff(diff);
+            }
+        } catch (e) {
+            return false;
+        }
+        return false;
+    }
+
+    configureCollabTransport(options = {}) {
+        try {
+            if (!this.collabTransport || typeof this.collabTransport.setMode !== 'function') return false;
+            const collabState = (this.localState && this.localState.collab) ? this.localState.collab : {};
+            let mode = options.mode || collabState.transportMode || 'webrtc';
+            const handshakeOnly = (typeof options.handshakeOnly === 'boolean')
+                ? options.handshakeOnly
+                : !!collabState.handshakeOnly;
+
+            if (handshakeOnly) mode = 'webrtc';
+
+            const modeOptions = {
+                allowFirebaseData: !handshakeOnly
+            };
+            if (Object.prototype.hasOwnProperty.call(options, 'sendDiff')) modeOptions.sendDiff = options.sendDiff;
+            if (Object.prototype.hasOwnProperty.call(options, 'sendSignal')) modeOptions.sendSignal = options.sendSignal;
+
+            this.collabTransport.setMode(mode, modeOptions);
+
+            if (this.localState && this.localState.collab) {
+                this.localState.collab.transportMode = mode;
+                this.localState.collab.handshakeOnly = handshakeOnly;
+                this.localState.collab.webrtcReady = !!(this.collabTransport && this.collabTransport.webrtcSender);
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    bindWebRTCCollab(sendDiff, options = {}) {
+        try {
+            if (typeof sendDiff !== 'function') return false;
+            const handshakeOnly = (typeof options.handshakeOnly === 'boolean') ? options.handshakeOnly : true;
+            return this.configureCollabTransport({ mode: 'webrtc', sendDiff, handshakeOnly });
+        } catch (e) {
+            return false;
+        }
+    }
+
+    setCollabHandshakeOnly(enabled = true) {
+        const next = !!enabled;
+        try {
+            const mode = (this.localState && this.localState.collab && this.localState.collab.transportMode)
+                ? this.localState.collab.transportMode
+                : 'firebase-diff';
+            this.configureCollabTransport({ mode, handshakeOnly: next });
+        } catch (e) {}
+        return next;
+    }
+
+    _canSendCollab() {
+        try {
+            if (this.collabTransport && typeof this.collabTransport.isAvailable === 'function') {
+                return !!this.collabTransport.isAvailable('data');
+            }
+            return false;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _canSendSignal() {
+        try {
+            if (this.collabTransport && typeof this.collabTransport.isAvailable === 'function') {
+                return !!this.collabTransport.isAvailable('signal');
+            }
+            return !!(this.server && typeof this.server.sendDiff === 'function');
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _sendHandshakeSignal(signalPayload) {
+        try {
+            if (!signalPayload || typeof signalPayload !== 'object') return false;
+            if (this.collabTransport && typeof this.collabTransport.sendSignal === 'function') {
+                return !!this.collabTransport.sendSignal(signalPayload);
+            }
+        } catch (e) {
+            return false;
+        }
+        return false;
+    }
+
+    _serializeTilemapState() {
+        try {
+            const activeTiles = (this._tileActive && typeof this._tileActive.values === 'function')
+                ? Array.from(this._tileActive.values())
+                : [];
+
+            const bindings = [];
+            if (Array.isArray(this._areaBindings) && Array.isArray(this._tileIndexToCoord)) {
+                for (let i = 0; i < this._areaBindings.length; i++) {
+                    const b = this._areaBindings[i];
+                    if (!b || typeof b !== 'object') continue;
+                    const coord = this._tileIndexToCoord[i];
+                    if (!coord || !Number.isFinite(coord.col) || !Number.isFinite(coord.row)) continue;
+                    const mf = Array.isArray(b.multiFrames)
+                        ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
+                        : null;
+                    bindings.push({
+                        col: Number(coord.col),
+                        row: Number(coord.row),
+                        anim: b.anim,
+                        index: Number(b.index),
+                        multiFrames: (mf && mf.length > 0) ? mf : null
+                    });
+                }
+            }
+
+            const transforms = [];
+            if (Array.isArray(this._areaTransforms) && Array.isArray(this._tileIndexToCoord)) {
+                for (let i = 0; i < this._areaTransforms.length; i++) {
+                    const t = this._areaTransforms[i];
+                    if (!t || typeof t !== 'object') continue;
+                    const coord = this._tileIndexToCoord[i];
+                    if (!coord || !Number.isFinite(coord.col) || !Number.isFinite(coord.row)) continue;
+                    transforms.push({
+                        col: Number(coord.col),
+                        row: Number(coord.row),
+                        rot: Number(t.rot || 0),
+                        flipH: !!t.flipH
+                    });
+                }
+            }
+
+            const payload = {
+                enabled: !!this.tilemode,
+                cols: Number(this.tileCols || 3),
+                rows: Number(this.tileRows || 3),
+                activeTiles,
+                bindings,
+                transforms
+            };
+            this.modifyState(payload.enabled, false, false, ['tilemap', 'enabled']);
+            this.modifyState(payload.cols, false, false, ['tilemap', 'cols']);
+            this.modifyState(payload.rows, false, false, ['tilemap', 'rows']);
+            this.modifyState(payload.activeTiles, false, false, ['tilemap', 'activeTiles']);
+            this.modifyState(payload.bindings, false, false, ['tilemap', 'bindings']);
+            this.modifyState(payload.transforms, false, false, ['tilemap', 'transforms']);
+            return payload;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _applyTilemapState(tilemapState) {
+        try {
+            if (!tilemapState || typeof tilemapState !== 'object') return false;
+            const cols = Math.max(1, Math.floor(Number(tilemapState.cols || this.tileCols || 3)));
+            const rows = Math.max(1, Math.floor(Number(tilemapState.rows || this.tileRows || 3)));
+
+            if (this.stateController) {
+                this.stateController.setTileGrid(cols, rows);
+                this.stateController.setTilemode(!!tilemapState.enabled);
+            } else {
+                this.tilemode = !!tilemapState.enabled;
+                this.tileCols = cols;
+                this.tileRows = rows;
+            }
+
+            this._tileActive = new Set();
+            this._tileCoordToIndex = new Map();
+            this._tileIndexToCoord = [];
+
+            const active = Array.isArray(tilemapState.activeTiles) ? tilemapState.activeTiles : [];
+            if (active.length > 0) {
+                for (const key of active) {
+                    const p = this._parseTileKey(key);
+                    if (!p) continue;
+                    this._activateTile(p.col, p.row);
+                }
+            } else {
+                this._seedTileActives(cols, rows);
+            }
+
+            this._areaBindings = [];
+            this._areaTransforms = [];
+
+            const incomingBindings = Array.isArray(tilemapState.bindings) ? tilemapState.bindings : [];
+            for (let i = 0; i < incomingBindings.length; i++) {
+                const b = incomingBindings[i];
+                if (!b || typeof b !== 'object') continue;
+
+                let idx = null;
+                if (Number.isFinite(b.col) && Number.isFinite(b.row)) {
+                    idx = this._getAreaIndexForCoord(Number(b.col), Number(b.row));
+                    this._activateTile(Number(b.col), Number(b.row));
+                } else if (Number.isFinite(b.areaIndex)) {
+                    // Legacy fallback (index-based payload)
+                    idx = Number(b.areaIndex);
+                } else if (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[i]) {
+                    idx = i;
+                }
+                if (!Number.isFinite(idx)) continue;
+
+                const mf = Array.isArray(b.multiFrames)
+                    ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
+                    : null;
+                this._setAreaBindingAtIndex(idx, {
+                    anim: b.anim,
+                    index: Number(b.index),
+                    multiFrames: (mf && mf.length > 0) ? mf : null
+                }, false);
+            }
+
+            const incomingTransforms = Array.isArray(tilemapState.transforms) ? tilemapState.transforms : [];
+            for (let i = 0; i < incomingTransforms.length; i++) {
+                const t = incomingTransforms[i];
+                if (!t || typeof t !== 'object') continue;
+
+                let idx = null;
+                if (Number.isFinite(t.col) && Number.isFinite(t.row)) {
+                    idx = this._getAreaIndexForCoord(Number(t.col), Number(t.row));
+                    this._activateTile(Number(t.col), Number(t.row));
+                } else if (Number.isFinite(t.areaIndex)) {
+                    // Legacy fallback (index-based payload)
+                    idx = Number(t.areaIndex);
+                } else if (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[i]) {
+                    idx = i;
+                }
+                if (!Number.isFinite(idx)) continue;
+
+                this._setAreaTransformAtIndex(idx, {
+                    rot: Number(t.rot || 0),
+                    flipH: !!t.flipH
+                }, false);
+            }
+
+            this.modifyState(this.tilemode, false, false, ['tilemap', 'enabled']);
+            this.modifyState(this.tileCols, false, false, ['tilemap', 'cols']);
+            this.modifyState(this.tileRows, false, false, ['tilemap', 'rows']);
+            this.modifyState(Array.from(this._tileActive.values()), false, false, ['tilemap', 'activeTiles']);
+            this.modifyState(this._areaBindings, false, false, ['tilemap', 'bindings']);
+            this.modifyState(this._areaTransforms, false, false, ['tilemap', 'transforms']);
+            return true;
+        } catch (e) {
+            console.warn('_applyTilemapState failed', e);
+            return false;
+        }
+    }
+
+    _scheduleTilemapSync() {
+        // Tile sync is operation-based now (see `_queueTileOp`) to prevent
+        // full-state overwrite races that could revert transforms/bindings.
+        return;
+    }
+
     // tick handler: called by Scene.tick() via sceneTick
     sceneTick(tickDelta){
         this.mouse.update(tickDelta)
@@ -1707,214 +1666,224 @@ export class SpriteScene extends Scene {
                 this._selectionKeyframeLastAnim = this.selectedAnimation;
             }
         } catch (e) { /* ignore selection keyframe apply errors */ }
+        const posForShortcutKeys = this.getPos(this.mouse && this.mouse.pos);
+        const renderOnlyTile = !!(this.tilemode && posForShortcutKeys && posForShortcutKeys.renderOnly);
         // handle numeric keys to change brush size (1..5). If multiple number keys are pressed simultaneously,
         // sum them for larger brushes (e.g., 2+3 => size 5, 1+2+3+4+5 => size 15). Max capped at 15.
         // Holding Shift while pressing number keys captures the current selection into the clipboard and
         // enables "clipboard brush" mode (pen pastes the selection each frame). Pressing numbers without
         // Shift disables clipboard brush and sets a numeric brush size.
-        try {
-            if (this.keys && this.keys.released) {
-                // Treat shifted number symbols as their numeric counterparts so Shift+1 ("!") still counts.
-                const numKeyMap = { '1':1, '!':1, '2':2, '@':2, '3':3, '#':3, '4':4, '$':4, '5':5, '%':5 };
-                const numKeys = Object.keys(numKeyMap);
-                const numPressedThisFrame = numKeys.some(k => this.keys.pressed(k));
-                if (this.keys.held('Shift') && numPressedThisFrame && !this._clipboardBrushFired) {
-                    // Activate clipboard brush from current selection (only if a selection exists)
-                    if (this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) {
-                        try { this.doCopy(true); } catch (e) { /* ignore copy failures */ }
-                        this._clipboardBrushActive = !!this.clipboard;
-                        this._clipboardBrushFired = true;
-                    } else {
-                        this._clipboardBrushActive = false;
-                    }
-                } else if (numPressedThisFrame && !this.keys.held('Shift')) {
-                    let total = 0;
-                    for (const k of numKeys) {
-                        if (this.keys.pressed(k) || this.keys.held(k)) total += numKeyMap[k] || 0;
-                    }
-                    this.brushSize = Math.max(1, Math.min(15, total || 1));
+        if (this.keys && this.keys.released) {
+            // Treat shifted number symbols as their numeric counterparts so Shift+1 ("!") still counts.
+            const numKeyMap = { '1':1, '!':1, '2':2, '@':2, '3':3, '#':3, '4':4, '$':4, '5':5, '%':5 };
+            const numKeys = Object.keys(numKeyMap);
+            const numPressedThisFrame = numKeys.some(k => this.keys.pressed(k));
+            if (this.keys.held('Shift') && numPressedThisFrame && !this._clipboardBrushFired) {
+                // Activate clipboard brush from current selection (only if a selection exists)
+                if (this.selectionRegion || (this.selectionPoints && this.selectionPoints.length > 0)) {
+                    try { this.doCopy(true); } catch (e) { /* ignore copy failures */ }
+                    this._clipboardBrushActive = !!this.clipboard;
+                    this._clipboardBrushFired = true;
+                } else {
                     this._clipboardBrushActive = false;
                 }
-
-                // Reset latch when Shift is not held to allow future activations
-                if (!this.keys.held('Shift')) this._clipboardBrushFired = false;
-
-                // choose which channel to adjust with h/k: 6->H, 7->S, 8->V, 9->A
-                const setAdjustChannel = (ch) => {
-                    this.adjustChannel = ch;
-                    this.adjustAmount = this._getAdjustPercent(ch);
-                };
-                if (this.keys.released('6')) setAdjustChannel('h');
-                if (this.keys.released('7')) setAdjustChannel('s');
-                if (this.keys.released('8')) setAdjustChannel('v');
-                if (this.keys.released('9')) setAdjustChannel('a');
-
-                // Arrow left/right step selected frame within the current animation.
-                const framesArr = (this.currentSprite && this.currentSprite._frames && this.selectedAnimation)
-                    ? (this.currentSprite._frames.get(this.selectedAnimation) || [])
-                    : [];
-                const frameCount = Array.isArray(framesArr) ? framesArr.length : 0;
-                if (frameCount > 0) {
-                    const wrap = (v) => (v % frameCount + frameCount) % frameCount;
-                    if (this.keys.released('ArrowLeft')) {
-                        this.selectedFrame = wrap((this.selectedFrame || 0) - 1);
-                        if (this.FrameSelect && this.FrameSelect._multiSelected) this.FrameSelect._multiSelected.clear();
-                    }
-                    if (this.keys.released('ArrowRight')) {
-                        this.selectedFrame = wrap((this.selectedFrame || 0) + 1);
-                        if (this.FrameSelect && this.FrameSelect._multiSelected) this.FrameSelect._multiSelected.clear();
-                    }
+            } else if (numPressedThisFrame && !this.keys.held('Shift')) {
+                let total = 0;
+                for (const k of numKeys) {
+                    if (this.keys.pressed(k) || this.keys.held(k)) total += numKeyMap[k] || 0;
                 }
+                if (this.stateController) this.stateController.setBrushSize(total || 1);
+                else this.brushSize = Math.max(1, Math.min(15, total || 1));
+                this._clipboardBrushActive = false;
+            }
 
-                // +/- adjust the per-channel adjustment percent (Shift = 0.1% steps, else 1%)
-                const activeChannel = this.adjustChannel || 'v';
-                const incPressed = this.keys.released('+') || this.keys.released('=');
-                const decPressed = this.keys.released('-') || this.keys.released('_');
-                if (incPressed || decPressed) {
-                    const step = this.keys.held('Shift') ? 0.001 : 0.01;
-                    const current = this._getAdjustPercent(activeChannel);
-                    const next = incPressed ? current + step : current - step;
-                    this._setAdjustPercent(activeChannel, next);
-                    this.adjustAmount = this._getAdjustPercent(activeChannel);
+            // Reset latch when Shift is not held to allow future activations
+            if (!this.keys.held('Shift')) this._clipboardBrushFired = false;
+
+            if (this.keys.released('6')) this.stateController ? this.stateController.setAdjustChannel('h') : this.modifyState('h',true,true,["brush","pixelBrush","channel"]);
+            if (this.keys.released('7')) this.stateController ? this.stateController.setAdjustChannel('s') : this.modifyState('s',true,true,["brush","pixelBrush","channel"]);
+            if (this.keys.released('8')) this.stateController ? this.stateController.setAdjustChannel('v') : this.modifyState('v',true,true,["brush","pixelBrush","channel"]);
+            if (this.keys.released('9')) this.stateController ? this.stateController.setAdjustChannel('a') : this.modifyState('a',true,true,["brush","pixelBrush","channel"]);
+
+            // Arrow left/right step selected frame within the current animation.
+            const framesArr = (this.currentSprite && this.currentSprite._frames && this.selectedAnimation)
+                ? (this.currentSprite._frames.get(this.selectedAnimation) || [])
+                : [];
+            const frameCount = Array.isArray(framesArr) ? framesArr.length : 0;
+            if (frameCount > 0) {
+                const wrap = (v) => (v % frameCount + frameCount) % frameCount;
+                if (this.keys.released('ArrowLeft')) {
+                    const nextFrame = wrap((this.selectedFrame || 0) - 1);
+                    if (this.stateController) this.stateController.setActiveFrame(nextFrame);
+                    else this.selectedFrame = nextFrame;
+                    if (this.FrameSelect && this.FrameSelect._multiSelected) this.FrameSelect._multiSelected.clear();
                 }
+                if (this.keys.released('ArrowRight')) {
+                    const nextFrame = wrap((this.selectedFrame || 0) + 1);
+                    if (this.stateController) this.stateController.setActiveFrame(nextFrame);
+                    else this.selectedFrame = nextFrame;
+                    if (this.FrameSelect && this.FrameSelect._multiSelected) this.FrameSelect._multiSelected.clear();
+                }
+            }
 
-                // Toggle onion skinning with 'u'. Shift+U prompts for alpha; Shift+Alt+U prompts for range; if multi-selecting, alpha prompt adjusts layer alpha instead.
-                if (this.keys.released('u') || this.keys.released('U')) {
-                    const shiftHeld = this.keys.held('Shift');
-                    const altHeld = this.keys.held('Alt');
-                    if (altHeld && shiftHeld) {
-                        try {
-                            const current = this.onionRange;
-                            const before = (current && typeof current.before === 'number') ? current.before : (typeof current === 'number' ? current : 1);
-                            const after = (current && typeof current.after === 'number') ? current.after : (typeof current === 'number' ? current : 1);
-                            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                            const input = window.prompt('Onion range (format "before,after", e.g. "5,2" or "-5,2")', `${before},${after}`);
-                            if (input !== null) {
-                                const parts = String(input).split(',').map(s => s.trim()).filter(s => s.length > 0);
-                                let newBefore = before;
-                                let newAfter = after;
-                                if (parts.length === 1) {
-                                    const v = Number(parts[0]);
-                                    if (Number.isFinite(v)) { newBefore = Math.max(0, Math.abs(Math.floor(v))); newAfter = newBefore; }
-                                } else if (parts.length >= 2) {
-                                    const p0 = Number(parts[0]);
-                                    const p1 = Number(parts[1]);
-                                    if (Number.isFinite(p0)) newBefore = Math.max(0, Math.abs(Math.floor(p0)));
-                                    if (Number.isFinite(p1)) newAfter = Math.max(0, Math.abs(Math.floor(p1)));
-                                }
-                                this.onionRange = { before: newBefore, after: newAfter };
-                                try { console.log('Onion range set to', this.onionRange); } catch (e) {}
+            // +/- adjust the per-channel adjustment percent (Shift = 0.1% steps, else 1%)
+            const incPressed = this.keys.released('+') || this.keys.released('=');
+            const decPressed = this.keys.released('-') || this.keys.released('_');
+            if (incPressed || decPressed) {
+                const step = this.keys.held('Shift') ? 0.001 : 0.01;
+                const current = this.state.brush.pixelBrush.adjustAmount[this.state.brush.pixelBrush.channel];
+                const next = incPressed ? current + step : current - step;
+                if (this.stateController) this.stateController.adjustCurrentChannel(incPressed ? step : -step);
+                else this.modifyState(next, true, true, "brush", "pixelBrush", "adjustAmount", this.state.brush.pixelBrush.channel);
+                this.adjustAmount = this.state.brush.pixelBrush.adjustAmount[this.state.brush.pixelBrush.channel];
+            }
+
+            // Toggle onion skinning with 'u'. Shift+U prompts for alpha; Shift+Alt+U prompts for range; if multi-selecting, alpha prompt adjusts layer alpha instead.
+            if (this.keys.released('u') || this.keys.released('U')) {
+                const shiftHeld = this.keys.held('Shift');
+                const altHeld = this.keys.held('Alt');
+                if (altHeld && shiftHeld) {
+                    try {
+                        const current = this.onionRange;
+                        const before = (current && typeof current.before === 'number') ? current.before : (typeof current === 'number' ? current : 1);
+                        const after = (current && typeof current.after === 'number') ? current.after : (typeof current === 'number' ? current : 1);
+                        try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                        const input = window.prompt('Onion range (format "before,after", e.g. "5,2" or "-5,2")', `${before},${after}`);
+                        if (input !== null) {
+                            const parts = String(input).split(',').map(s => s.trim()).filter(s => s.length > 0);
+                            let newBefore = before;
+                            let newAfter = after;
+                            if (parts.length === 1) {
+                                const v = Number(parts[0]);
+                                if (Number.isFinite(v)) { newBefore = Math.max(0, Math.abs(Math.floor(v))); newAfter = newBefore; }
+                            } else if (parts.length >= 2) {
+                                const p0 = Number(parts[0]);
+                                const p1 = Number(parts[1]);
+                                if (Number.isFinite(p0)) newBefore = Math.max(0, Math.abs(Math.floor(p0)));
+                                if (Number.isFinite(p1)) newAfter = Math.max(0, Math.abs(Math.floor(p1)));
                             }
-                        } catch (e) { /* ignore prompt failures */ }
-                        return;
-                    }
-                    if (!shiftHeld) {
-                        this.onionSkin = !(typeof this.onionSkin === 'boolean' ? this.onionSkin : false);
-                        try { console.log('Onion skin:', this.onionSkin); } catch (e) {}
-                    } else {
-                        try {
-                            const multiActive = this.FrameSelect && this.FrameSelect._multiSelected && this.FrameSelect._multiSelected.size > 0;
-                            const current = multiActive ? (this.layerAlpha ?? 1) : (this.onionAlpha ?? 1);
-                            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                            const input = window.prompt(multiActive ? 'Layer alpha (0-1)' : 'Onion alpha (0-1)', String(current));
-                            if (input !== null) {
-                                const parsed = Number(input);
-                                if (Number.isFinite(parsed)) {
-                                    const clamped = Math.max(0, Math.min(1, parsed));
-                                    if (multiActive) this.layerAlpha = clamped;
+                            if (this.stateController) this.stateController.setOnionRange(newBefore, newAfter);
+                            else this.onionRange = { before: newBefore, after: newAfter };
+                            try { console.log('Onion range set to', this.onionRange); } catch (e) {}
+                        }
+                    } catch (e) { /* ignore prompt failures */ }
+                    return;
+                }
+                if (!shiftHeld) {
+                    if (this.stateController) this.stateController.toggleOnionSkin();
+                    else this.onionSkin = !(typeof this.onionSkin === 'boolean' ? this.onionSkin : false);
+                    try { console.log('Onion skin:', this.onionSkin); } catch (e) {}
+                } else {
+                    try {
+                        const multiActive = this.FrameSelect && this.FrameSelect._multiSelected && this.FrameSelect._multiSelected.size > 0;
+                        const current = multiActive ? (this.layerAlpha ?? 1) : (this.onionAlpha ?? 1);
+                        try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                        const input = window.prompt(multiActive ? 'Layer alpha (0-1)' : 'Onion alpha (0-1)', String(current));
+                        if (input !== null) {
+                            const parsed = Number(input);
+                            if (Number.isFinite(parsed)) {
+                                const clamped = Math.max(0, Math.min(1, parsed));
+                                if (multiActive) {
+                                    if (this.stateController) this.stateController.setLayerAlpha(clamped);
+                                    else this.layerAlpha = clamped;
+                                } else {
+                                    if (this.stateController) this.stateController.setOnionAlpha(clamped);
                                     else this.onionAlpha = clamped;
                                 }
                             }
-                        } catch (e) { /* ignore prompt failures */ }
-                    }
-                }
-
-                // Toggle pixel-perfect drawing mode with 'a' (when not in tilemode).
-                // If in tilemode, toggle autotile instead.
-                if (this.keys.released('a') || this.keys.released('A')) {
-                    if (this.tilemode) {
-                        this.autotile = !this.autotile;
-                        try { console.log('Autotile mode:', this.autotile); } catch (e) {}
-                    } else {
-                        this.pixelPerfect = !this.pixelPerfect;
-                        try { console.log('Pixel-perfect mode:', this.pixelPerfect); } catch (e) {}
-                    }
-                }
-
-                // Palette swap: press 'p' to map current pen color to a target color (plus stepped variants) across all frames.
-                // Shift+P prompts for step depth (number of +/- steps per channel).
-                if (this.keys.released('p') || this.keys.released('P')) {
-                    if (this.keys.held('Shift')) {
-                        try {
-                            const current = Number(this.paletteStepMax || 3);
-                            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                            const input = window.prompt('Palette swap step range (1-6 recommended)', String(current));
-                            if (input !== null && input !== undefined) {
-                                const parsed = Math.max(0, Math.floor(Number(String(input).trim())));
-                                const clamped = Math.max(0, Math.min(6, parsed));
-                                this.paletteStepMax = clamped || 0;
-                            }
-                        } catch (e) { /* ignore prompt errors */ }
-                    } else {
-                        try { this._promptPaletteSwap(); } catch (e) { console.warn('palette swap failed', e); }
-                    }
-                }
-                if (this.keys.comboPressed(['s','Alt'])) {
-                    console.log('emmiting')
-                    window.Debug.emit('drawSelected');
-                } else if ((this.keys.pressed('s')||this.keys.pressed('S')) && !this.keys.held('Alt') && !renderOnlyTile) {
-                    const col = Color.convertColor(this.penColor || '#000000');
-                    const hex = col.toHex();
-                    let buffer = 1;
-                    // If Shift is held, prompt the user for a buffer amount (default '1')
-                    if (this.keys.held('Shift')) {
-                        this.keys.update(tickDelta)
-                        console.log('prompting')
-                        try {
-                            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                            const input = window.prompt('Buffer amount (default 1)', '1');
-                            if (input !== null) {
-                                const parsed = parseFloat(String(input).trim());
-                                if (!Number.isNaN(parsed) && isFinite(parsed)) buffer = parsed;
-                            }
-                        } catch (e) {
-                            // ignore prompt errors and fall back to default
                         }
-                    }
-                    if (window.Debug && typeof window.Debug.emit === 'function') {
-                        window.Debug.emit('select', hex, buffer);
-                    } else if (window.Debug && typeof window.Debug.createSignal === 'function') {
-                        const sig = window.Debug.signals && window.Debug.signals.get && window.Debug.signals.get('select');
-                        if (typeof sig === 'function') sig(hex, buffer);
-                    }
-                }
-
-                // Backtick (`) prompts for a square resize (single value applies to both dimensions)
-                if (this.keys.released('`')) {
-                        try {
-                            const current = Math.max(1, this.currentSprite && this.currentSprite.slicePx ? this.currentSprite.slicePx : 16);
-                            try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                            const input = window.prompt('Resize canvas (square only, px)', String(current));
-                        if (input !== null) {
-                            const parsed = Math.floor(Number(String(input).trim()));
-                            if (Number.isFinite(parsed) && parsed > 0) {
-                                let resizeContent = true;
-                                try {
-                                    try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                                    const resp = window.prompt('Resize content? (y/n, default y)', 'y');
-                                    if (resp !== null) {
-                                        const normalized = String(resp).trim().toLowerCase();
-                                        if (normalized.startsWith('n')) resizeContent = false;
-                                        else if (normalized.startsWith('y')) resizeContent = true;
-                                    }
-                                } catch (e) { /* ignore secondary prompt errors */ }
-                                this.resize(parsed, resizeContent);
-                            }
-                        }
-                    } catch (e) { /* ignore prompt errors */ }
+                    } catch (e) { /* ignore prompt failures */ }
                 }
             }
-        } catch (e) { /* ignore */ }
+
+            // Toggle pixel-perfect drawing mode with 'a' (when not in tilemode).
+            // If in tilemode, toggle autotile instead.
+            if (this.keys.released('a') || this.keys.released('A')) {
+                if (this.tilemode) {
+                    if (this.stateController) this.stateController.toggleAutotile();
+                    else this.autotile = !this.autotile;
+                    try { console.log('Autotile mode:', this.autotile); } catch (e) {}
+                } else {
+                    if (this.stateController) this.stateController.togglePixelPerfect();
+                    else this.pixelPerfect = !this.pixelPerfect;
+                    try { console.log('Pixel-perfect mode:', this.pixelPerfect); } catch (e) {}
+                }
+            }
+
+            // Palette swap: press 'p' to map current pen color to a target color (plus stepped variants) across all frames.
+            // Shift+P prompts for step depth (number of +/- steps per channel).
+            if (this.keys.released('p') || this.keys.released('P')) {
+                if (this.keys.held('Shift')) {
+                    try {
+                        const current = Number(this.paletteStepMax || 3);
+                        try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                        const input = window.prompt('Palette swap step range (1-6 recommended)', String(current));
+                        if (input !== null && input !== undefined) {
+                            const parsed = Math.max(0, Math.floor(Number(String(input).trim())));
+                            const clamped = Math.max(0, Math.min(6, parsed));
+                            if (this.stateController) this.stateController.setPaletteStepMax(clamped || 0);
+                            else this.paletteStepMax = clamped || 0;
+                        }
+                    } catch (e) { /* ignore prompt errors */ }
+                } else {
+                    try { this._promptPaletteSwap(); } catch (e) { console.warn('palette swap failed', e); }
+                }
+            }
+            if (this.keys.comboPressed(['s','Alt'])) {
+                console.log('emmiting')
+                window.Debug.emit('drawSelected');
+            } else if ((this.keys.pressed('s')||this.keys.pressed('S')) && !this.keys.held('Alt') && !renderOnlyTile) {
+                const col = Color.convertColor(this.penColor || '#000000');
+                const hex = col.toHex();
+                let buffer = 1;
+                // If Shift is held, prompt the user for a buffer amount (default '1')
+                if (this.keys.held('Shift')) {
+                    this.keys.update(tickDelta)
+                    console.log('prompting')
+                    try {
+                        try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                        const input = window.prompt('Buffer amount (default 1)', '1');
+                        if (input !== null) {
+                            const parsed = parseFloat(String(input).trim());
+                            if (!Number.isNaN(parsed) && isFinite(parsed)) buffer = parsed;
+                        }
+                    } catch (e) {
+                        // ignore prompt errors and fall back to default
+                    }
+                }
+                if (window.Debug && typeof window.Debug.emit === 'function') {
+                    window.Debug.emit('select', hex, buffer);
+                } else if (window.Debug && typeof window.Debug.createSignal === 'function') {
+                    const sig = window.Debug.signals && window.Debug.signals.get && window.Debug.signals.get('select');
+                    if (typeof sig === 'function') sig(hex, buffer);
+                }
+            }
+
+            // Backtick (`) prompts for a square resize (single value applies to both dimensions)
+            if (this.keys.released('`')) {
+                    try {
+                        const current = Math.max(1, this.currentSprite && this.currentSprite.slicePx ? this.currentSprite.slicePx : 16);
+                        try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                        const input = window.prompt('Resize canvas (square only, px)', String(current));
+                    if (input !== null) {
+                        const parsed = Math.floor(Number(String(input).trim()));
+                        if (Number.isFinite(parsed) && parsed > 0) {
+                            let resizeContent = true;
+                            try {
+                                try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
+                                const resp = window.prompt('Resize content? (y/n, default y)', 'y');
+                                if (resp !== null) {
+                                    const normalized = String(resp).trim().toLowerCase();
+                                    if (normalized.startsWith('n')) resizeContent = false;
+                                    else if (normalized.startsWith('y')) resizeContent = true;
+                                }
+                            } catch (e) { /* ignore secondary prompt errors */ }
+                            this.resize(parsed, resizeContent);
+                        }
+                    }
+                } catch (e) { /* ignore prompt errors */ }
+            }
+        }
 
         // Undo / Redo shortcuts
         try {
@@ -1935,7 +1904,8 @@ export class SpriteScene extends Scene {
         if (this.keys.released('t') || this.keys.released('T')) {
             const shiftHeld = !!(this.keys && this.keys.held && this.keys.held('Shift'));
             if (!shiftHeld) {
-                this.tilemode = !this.tilemode;
+                if (this.stateController) this.stateController.toggleTilemode();
+                else this.tilemode = !this.tilemode;
             } else {
                 try {
                     const defCols = Math.max(1, (this.tileCols|0) || 3);
@@ -1954,9 +1924,16 @@ export class SpriteScene extends Scene {
                             };
                             const rows = parseDim(parts[0], defRows);
                             const cols = parseDim(parts[1] !== undefined ? parts[1] : rows, defCols);
-                            this.tileRows = Math.max(1, rows);
-                            this.tileCols = Math.max(1, cols);
-                            this.tilemode = true;
+                            const nextRows = Math.max(1, rows);
+                            const nextCols = Math.max(1, cols);
+                            if (this.stateController) {
+                                this.stateController.setTileGrid(nextCols, nextRows);
+                                this.stateController.setTilemode(true);
+                            } else {
+                                this.tileRows = nextRows;
+                                this.tileCols = nextCols;
+                                this.tilemode = true;
+                            }
                             this._seedTileActives(this.tileCols, this.tileRows);
                         }
                     }
@@ -2111,9 +2088,9 @@ export class SpriteScene extends Scene {
                                             dctx.restore();
                                         }
                                         if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
-                                        if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
-                                        this._areaBindings[areaIdx] = { anim, index: insertAt };
-                                        this.selectedFrame = insertAt;
+                                        this._setAreaBindingAtIndex(areaIdx, { anim, index: insertAt }, true);
+                                        if (this.stateController) this.stateController.setActiveFrame(insertAt);
+                                        else this.selectedFrame = insertAt;
                                     } catch (e) { /* ignore mirror copy errors */ }
                                 }
                             } else {
@@ -2184,12 +2161,14 @@ export class SpriteScene extends Scene {
                 try {
                     if (this.keys && typeof this.keys.pressed === 'function') {
                         if (this.keys.pressed('[')) {
-                            this.penMirrorH = !this.penMirrorH;
+                            if (this.stateController) this.stateController.setMirror('h', !this.penMirrorH);
+                            else this.penMirrorH = !this.penMirrorH;
                             this._pixelPerfectStrokeActive = false;
                             this._applyInitialMirror('h');
                         }
                         if (this.keys.pressed(']')) {
-                            this.penMirrorV = !this.penMirrorV;
+                            if (this.stateController) this.stateController.setMirror('v', !this.penMirrorV);
+                            else this.penMirrorV = !this.penMirrorV;
                             this._pixelPerfectStrokeActive = false;
                             this._applyInitialMirror('v');
                         }
@@ -2213,6 +2192,9 @@ export class SpriteScene extends Scene {
                     }
                 }
             } catch (e) {}
+
+            // Keep tile layout state synced even when no pixel ops are generated.
+            try { this._scheduleTilemapSync(); } catch (e) {}
         } catch (e) {
             console.warn('sceneTick failed', e);
         }
@@ -2405,14 +2387,13 @@ export class SpriteScene extends Scene {
                             }
                         } catch (e) {}
                     }
-                    this._areaBindings[idx] = entry;
+                    this._setAreaBindingAtIndex(idx, entry, true);
                     try {
                         const frameKey = (this.selectedAnimation || '') + '::' + (Number.isFinite(this.selectedFrame) ? this.selectedFrame : 0);
                         const connKey = this.selectedTileConnection || ((this._tileConnMap && this._tileConnMap[frameKey]) ? this._tileConnMap[frameKey] : null);
-                        console.log('Placed tile connection:', connKey, 'at', t.col, t.row, entry);
+                        //console.log('Placed tile connection:', connKey, 'at', t.col, t.row, entry);
                     } catch (e) {}
-                    if (!this._areaTransforms) this._areaTransforms = [];
-                    this._areaTransforms[idx] = baseTransform ? { ...baseTransform } : this._areaTransforms[idx];
+                    if (baseTransform) this._setAreaTransformAtIndex(idx, { ...baseTransform }, true);
                     // update neighbors if autotile enabled
                     try { if (this.autotile) this._updateAutotileNeighbors(t.col, t.row, entry.anim || this.selectedAnimation); } catch(e){}
                 }
@@ -2432,8 +2413,8 @@ export class SpriteScene extends Scene {
                         try {
                             if (Array.isArray(this._areaBindings) && this._areaBindings[idx] && this._areaBindings[idx].anim) oldAnim = this._areaBindings[idx].anim;
                         } catch(e){}
-                        if (Array.isArray(this._areaBindings)) this._areaBindings[idx] = null;
-                        if (Array.isArray(this._areaTransforms)) this._areaTransforms[idx] = null;
+                        this._setAreaBindingAtIndex(idx, null, true);
+                        this._setAreaTransformAtIndex(idx, null, true);
                         // update neighbors if autotile enabled
                         try { if (this.autotile) this._updateAutotileNeighbors(t.col, t.row, oldAnim || this.selectedAnimation); } catch(e){}
                     }
@@ -2555,12 +2536,10 @@ export class SpriteScene extends Scene {
         const key = this._computeConnectionKey(col, row, anim);
         const chosen = this._chooseBestTileIndex(key, anim);
         if (chosen === null || chosen === undefined) return;
-        if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
         const old = this._areaBindings[areaIdx];
         const entry = (old && typeof old === 'object') ? { ...old } : { anim: anim, index: chosen };
         entry.index = chosen;
-        this._areaBindings[areaIdx] = entry;
-        return true;
+        return this._setAreaBindingAtIndex(areaIdx, entry, true);
     }
 
     // Update neighboring tiles around (col,row) for autotile (4-way and diagonals)
@@ -2679,8 +2658,8 @@ export class SpriteScene extends Scene {
 
             // resolve target anim/frame similar to pen tool
             const areaBinding = (pos && typeof pos.areaIndex === 'number' && Array.isArray(this._areaBindings)) ? this._areaBindings[pos.areaIndex] : null;
-            const anim = (areaBinding && areaBinding.anim) ? areaBinding.anim : this.selectedAnimation;
-            const frameIdx = (areaBinding && typeof areaBinding.index === 'number') ? areaBinding.index : this.selectedFrame;
+            const anim = (this.tilemode && areaBinding && areaBinding.anim) ? areaBinding.anim : this.selectedAnimation;
+            const frameIdx = (this.tilemode && areaBinding && typeof areaBinding.index === 'number') ? areaBinding.index : this.selectedFrame;
 
             const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
             if (!frameCanvas || !frameCanvas.getContext) return;
@@ -2851,25 +2830,7 @@ export class SpriteScene extends Scene {
         return pattern1 || pattern2;
     }
 
-    _getAdjustPercent(channel) {
-        const table = this.adjustPercents || {};
-        const fallback = (typeof this.adjustAmount === 'number') ? this.adjustAmount : 0.05;
-        const key = channel || this.adjustChannel || 'v';
-        const val = table[key];
-        return (typeof val === 'number' && Number.isFinite(val)) ? val : fallback;
-    }
 
-    _setAdjustPercent(channel, value) {
-        const key = channel || this.adjustChannel || 'v';
-        const num = Number(value);
-        if (!Number.isFinite(num)) return;
-        const clamped = Math.max(0, Math.min(1, num));
-        if (!this.adjustPercents) this.adjustPercents = {};
-        this.adjustPercents[key] = clamped;
-        if (key === (this.adjustChannel || 'v')) {
-            this.adjustAmount = clamped;
-        }
-    }
 
     // Build palette swap variant arrays between the current pen color and a target color.
     // Returns { sources: [{r,g,b,a}], targets: [{r,g,b,a}] } with base color plus
@@ -2915,6 +2876,7 @@ export class SpriteScene extends Scene {
                     a: Math.round((rgb.d === undefined ? 1 : rgb.d) * 255)
                 };
             };
+
             const pushPair = (hsvSrc, hsvDst) => {
                 srcVariants.push(toRgba(hsvSrc));
                 dstVariants.push(toRgba(hsvDst));
@@ -3117,9 +3079,12 @@ export class SpriteScene extends Scene {
                 const hadPixelSelection = (this.selectionPoints && this.selectionPoints.length) || this.selectionRegion;
                 const hadTileSelection = renderOnlyTile && this._tileSelection && this._tileSelection.size > 0;
                 if (hadPixelSelection || hadTileSelection) {
-                    this.selectionPoints = [];
-                    this.currentTool = null;
-                    this.selectionRegion = null;
+                    if (this.stateController) this.stateController.clearPixelSelection();
+                    else {
+                        this.selectionPoints = [];
+                        this.currentTool = null;
+                        this.selectionRegion = null;
+                    }
                     if (hadTileSelection) this._tileSelection.clear();
                     this.mouse.pause(0.2);
                     return true;
@@ -3156,8 +3121,11 @@ export class SpriteScene extends Scene {
                             const binding = this.getAreaBinding(pos.areaIndex);
                             const transform = (Array.isArray(this._areaTransforms) && this._areaTransforms[pos.areaIndex]) ? this._areaTransforms[pos.areaIndex] : null;
                             if (binding && binding.anim !== undefined && binding.index !== undefined) {
-                                this.selectedAnimation = binding.anim;
-                                this.selectedFrame = Number(binding.index);
+                                if (this.stateController) this.stateController.setActiveSelection(binding.anim, Number(binding.index));
+                                else {
+                                    this.selectedAnimation = binding.anim;
+                                    this.selectedFrame = Number(binding.index);
+                                }
                             }
                             this._tileBrushBinding = binding ? { ...binding } : { anim: this.selectedAnimation, index: this.selectedFrame };
                             this._tileBrushTransform = transform ? { rot: transform.rot || 0, flipH: !!transform.flipH } : null;
@@ -3177,7 +3145,8 @@ export class SpriteScene extends Scene {
                     if (!this._eyedropperCancelled && (wheelY_check || wheelX_check)) {
                         try {
                             if (this._eyedropperOriginalColor !== undefined) {
-                                this.penColor = this._eyedropperOriginalColor;
+                                if (this.stateController) this.stateController.setPenColor(this._eyedropperOriginalColor);
+                                else this.penColor = this._eyedropperOriginalColor;
                                 if (this._colorInput) {
                                     // sync HTML color input (drop alpha)
                                     const col = this.penColor || '#000000';
@@ -3196,10 +3165,10 @@ export class SpriteScene extends Scene {
                         const posPrev = this.getPos(this.mouse.prevPos);
                         if (posPrev && posPrev.inside && this.currentSprite && (ctrlHeld<0.05 || ctrlHeld > 0.3)) {
                             const sheet = this.currentSprite;
-                            // Prefer the frame bound to the area under the mouse. Fall back to selected frame.
+                            // Prefer area binding only in tilemode; otherwise sample selected frame.
                             let anim = this.selectedAnimation;
                             let frameIdx = this.selectedFrame;
-                            if (typeof posPrev.areaIndex === 'number') {
+                            if (this.tilemode && typeof posPrev.areaIndex === 'number') {
                                 const binding = this.getAreaBinding(posPrev.areaIndex);
                                 if (binding && binding.anim !== undefined && binding.index !== undefined) {
                                     anim = binding.anim;
@@ -3213,7 +3182,8 @@ export class SpriteScene extends Scene {
                                     const d = ctx.getImageData(posPrev.x, posPrev.y, 1, 1).data;
                                     // set internal pen color including alpha
                                     const hex8 = this.rgbaToHex(d[0], d[1], d[2], d[3]);
-                                    this.penColor = hex8;
+                                    if (this.stateController) this.stateController.setPenColor(hex8);
+                                    else this.penColor = hex8;
                                     // update HTML color input (6-digit, drop alpha)
                                     if (this._colorInput) {
                                         const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
@@ -3247,7 +3217,7 @@ export class SpriteScene extends Scene {
                         const sheet = this.currentSprite;
                         let anim = this.selectedAnimation;
                         let frameIdx = this.selectedFrame;
-                        if (typeof posMid.areaIndex === 'number') {
+                        if (this.tilemode && typeof posMid.areaIndex === 'number') {
                             const binding = this.getAreaBinding(posMid.areaIndex);
                             if (binding && binding.anim !== undefined && binding.index !== undefined) {
                                 anim = binding.anim;
@@ -3260,7 +3230,8 @@ export class SpriteScene extends Scene {
                             try {
                                 const d = ctx.getImageData(posMid.x, posMid.y, 1, 1).data;
                                 const hex8 = this.rgbaToHex(d[0], d[1], d[2], d[3]);
-                                this.penColor = hex8;
+                                if (this.stateController) this.stateController.setPenColor(hex8);
+                                else this.penColor = hex8;
                                 if (this._colorInput) {
                                     const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
                                     this._colorInput.value = '#' + toHex(d[0]) + toHex(d[1]) + toHex(d[2]);
@@ -3324,7 +3295,8 @@ export class SpriteScene extends Scene {
                                     // record the area index where this point was added so copy/cut can use the originating frame
                                     this.selectionPoints.push({ x: mapped.x, y: mapped.y, areaIndex: tgtArea });
                                     // adding a new anchor invalidates any previous region selection
-                                    this.selectionRegion = null;
+                                    if (this.stateController) this.stateController.clearSelectionRegion();
+                                    else this.selectionRegion = null;
                                 }
                             }
                         }
@@ -3444,16 +3416,14 @@ export class SpriteScene extends Scene {
                         // Apply fill/outline to tiles
                         const binding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
                         const transform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
-                        if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
-                        if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
                         for (const key of fillTiles) {
                             const tile = this._parseTileKey(key);
                             if (!tile) continue;
                             const idx = this._getAreaIndexForCoord(tile.col, tile.row);
                             if (!Number.isFinite(idx)) continue;
                             this._activateTile(tile.col, tile.row);
-                            this._areaBindings[idx] = binding ? { ...binding } : null;
-                            this._areaTransforms[idx] = transform ? { ...transform } : this._areaTransforms[idx];
+                            this._setAreaBindingAtIndex(idx, binding ? { ...binding } : null, true);
+                            if (transform) this._setAreaTransformAtIndex(idx, { ...transform }, true);
                         }
                         return;
                     }
@@ -3523,13 +3493,16 @@ export class SpriteScene extends Scene {
             const tileHasSingle = (this.tilemode && this._tileSelection && this._tileSelection.size === 1);
             if (hasSingleAnchor || hasEvenCenterAnchor || tileHasSingle) {
                 if (hasSingleAnchor && this.keys.pressed('l')) {
-                    this.currentTool = 'line';
+                    if (this.stateController) this.stateController.setCurrentTool('line');
+                    else this.currentTool = 'line';
                 }
                 if (hasSingleAnchor && this.keys.pressed('b')) {
-                    this.currentTool = 'box';
+                    if (this.stateController) this.stateController.setCurrentTool('box');
+                    else this.currentTool = 'box';
                 }
                 if (this.keys.pressed('o')) {
-                    this.currentTool = 'circle';
+                    if (this.stateController) this.stateController.setCurrentTool('circle');
+                    else this.currentTool = 'circle';
                 }
 
                 // Tile-mode: support tile shape tools using a single tile anchor
@@ -3555,7 +3528,8 @@ export class SpriteScene extends Scene {
                         const end = { x: target.x, y: target.y };
                         this.commitSelection(start, end);
                         try { if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.1); } catch (e) {}
-                        this.currentTool = null;
+                        if (this.stateController) this.stateController.clearCurrentTool();
+                        else this.currentTool = null;
                     }
                 }
 
@@ -3621,13 +3595,11 @@ export class SpriteScene extends Scene {
                                 // apply current tile brush binding to tiles
                                 const binding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
                                 const transform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
-                                if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
-                                if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
                                 for (const t of applyTiles) {
                                     const idx = this._getAreaIndexForCoord(t.col, t.row);
                                     this._activateTile(t.col, t.row);
-                                    this._areaBindings[idx] = binding ? { ...binding } : null;
-                                    this._areaTransforms[idx] = transform ? { ...transform } : this._areaTransforms[idx];
+                                    this._setAreaBindingAtIndex(idx, binding ? { ...binding } : null, true);
+                                    if (transform) this._setAreaTransformAtIndex(idx, { ...transform }, true);
                                 }
                             }
                         }
@@ -3704,12 +3676,18 @@ export class SpriteScene extends Scene {
                         }
                     }
 
-                    this.selectionPoints = merged;
+                    if (this.stateController) this.stateController.setSelectionPoints(merged);
+                    else this.selectionPoints = merged;
 
                     // Clear any previous rectangular region state so all tools
                     // operate purely on pixel selections.
-                    this.selectionRegion = null;
-                    this.currentTool = null;
+                    if (this.stateController) {
+                        this.stateController.clearSelectionRegion();
+                        this.stateController.clearCurrentTool();
+                    } else {
+                        this.selectionRegion = null;
+                        this.currentTool = null;
+                    }
                 }
             }
 
@@ -3912,16 +3890,14 @@ export class SpriteScene extends Scene {
                             if (this._tileSelection && this._tileSelection.size > 0 && !this.keys.held('Shift')) {
                                 const binding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
                                 const transform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
-                                if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
-                                if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
                                 for (const key of this._tileSelection) {
                                     const tile = this._parseTileKey(key);
                                     if (!tile) continue;
                                     const idx = this._getAreaIndexForCoord(tile.col, tile.row);
                                     if (!Number.isFinite(idx)) continue;
                                     this._activateTile(tile.col, tile.row);
-                                    this._areaBindings[idx] = binding ? { ...binding } : null;
-                                    this._areaTransforms[idx] = transform ? { ...transform } : this._areaTransforms[idx];
+                                    this._setAreaBindingAtIndex(idx, binding ? { ...binding } : null, true);
+                                    if (transform) this._setAreaTransformAtIndex(idx, { ...transform }, true);
                                 }
                                 return;
                             }
@@ -3981,12 +3957,10 @@ export class SpriteScene extends Scene {
                                 // apply fill binding to region
                                 const binding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
                                 const transform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
-                                if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
-                                if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
                                 for (const t of results) {
                                     this._activateTile(t.col, t.row);
-                                    this._areaBindings[t.idx] = binding ? { ...binding } : null;
-                                    this._areaTransforms[t.idx] = transform ? { ...transform } : this._areaTransforms[t.idx];
+                                    this._setAreaBindingAtIndex(t.idx, binding ? { ...binding } : null, true);
+                                    if (transform) this._setAreaTransformAtIndex(t.idx, { ...transform }, true);
                                 }
                                 return;
                             }
@@ -4040,8 +4014,13 @@ export class SpriteScene extends Scene {
                                 const exists = merged.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === p.areaIndex);
                                 if (!exists) merged.push(p);
                             }
-                            this.selectionPoints = merged;
-                            this.selectionRegion = null;
+                            if (this.stateController) {
+                                this.stateController.setSelectionPoints(merged);
+                                this.stateController.clearSelectionRegion();
+                            } else {
+                                this.selectionPoints = merged;
+                                this.selectionRegion = null;
+                            }
                             return;
                         }
 
@@ -4158,7 +4137,8 @@ export class SpriteScene extends Scene {
                         const n = samples.length;
                         r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n); a = Math.round(a / n);
                         const hex8 = this.rgbaToHex(r, g, b, a);
-                        this.penColor = hex8;
+                        if (this.stateController) this.stateController.setPenColor(hex8);
+                        else this.penColor = hex8;
                         // update HTML color input (drop alpha)
                         if (this._colorInput) {
                             const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
@@ -4173,19 +4153,15 @@ export class SpriteScene extends Scene {
             // deltas (this.adjustAmount) instead of multiplicative scaling.
             try {
                 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-                const getAdjust = (channel) => {
-                    if (typeof this._getAdjustPercent === 'function') return this._getAdjustPercent(channel);
-                    return (typeof this.adjustAmount === 'number') ? this.adjustAmount : 0.05;
-                };
                 const applyAdjust = (direction) => {
                     const sheet = this.currentSprite;
                     const anim = this.selectedAnimation;
                     const frameIdx = this.selectedFrame;
                     if (!sheet) return;
-                    const channel = this.adjustChannel || 'v';
+                    const channel = this.state.brush.pixelBrush.channel;
                     // Reduce hue adjustments to a smaller fraction so keys change hue more finely
                     const channelMultiplier = (channel === 'h') ? 0.2 : 1.0;
-                    const appliedDelta = direction * getAdjust(channel) * channelMultiplier;
+                    const appliedDelta = direction * this.state.brush.pixelBrush.adjustAmount[channel] * channelMultiplier;
 
                     // point selection
                     if (this.selectionPoints && this.selectionPoints.length > 0) {
@@ -4284,7 +4260,8 @@ export class SpriteScene extends Scene {
                             }
                             const rgb = hsv.toRgb();
                             const newHex8 = this.rgbaToHex(Math.round(rgb.a), Math.round(rgb.b), Math.round(rgb.c), Math.round((rgb.d ?? 1) * 255));
-                            this.penColor = newHex8;
+                            if (this.stateController) this.stateController.setPenColor(newHex8);
+                            else this.penColor = newHex8;
                             // sync HTML color input (drop alpha component)
                             if (this._colorInput) {
                                 const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
@@ -4304,158 +4281,149 @@ export class SpriteScene extends Scene {
             } catch (e) { console.warn('lighten/darken (h/k) failed', e); }
 
             // Add subtle noise/randomness to the current frame on 'n' release
-            try {
-                const noisePressed = this.keys && typeof this.keys.released === 'function' && (this.keys.released('n') || this.keys.released('N'));
-                if (noisePressed) {
-                    const sheet = this.currentSprite;
-                    // Prefer selection-origin area/frame when applying noise
-                    let sourceAreaIndex = null;
-                    if (this.selectionPoints && this.selectionPoints.length > 0 && typeof this.selectionPoints[0].areaIndex === 'number') {
-                        sourceAreaIndex = this.selectionPoints[0].areaIndex;
-                    } else if (this.selectionRegion && typeof this.selectionRegion.areaIndex === 'number') {
-                        sourceAreaIndex = this.selectionRegion.areaIndex;
-                    } else {
-                        const posInfo = this.getPos(this.mouse && this.mouse.pos) || {};
-                        if (posInfo && typeof posInfo.areaIndex === 'number') sourceAreaIndex = posInfo.areaIndex;
-                    }
-                    let anim = this.selectedAnimation;
-                    let frameIdx = this.selectedFrame;
-                    if (typeof sourceAreaIndex === 'number') {
-                        const binding = this.getAreaBinding(sourceAreaIndex);
-                        if (binding && binding.anim !== undefined && binding.index !== undefined) {
-                            anim = binding.anim;
-                            frameIdx = Number(binding.index);
-                        }
-                    }
-                    if (!sheet) return;
-                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
-                    if (!frameCanvas) return;
-                    try {
-                        const w = frameCanvas.width;
-                        const h = frameCanvas.height;
-                        const ctx = frameCanvas.getContext('2d');
-                        const img = ctx.getImageData(0, 0, w, h);
-                        const data = img.data;
-                        const noiseChanges = [];
-                        const channel = this.adjustChannel || 'v';
-                        const baseAdjust = (typeof this._getAdjustPercent === 'function') ? this._getAdjustPercent(channel) : ((typeof this.adjustAmount === 'number') ? this.adjustAmount : 0.05);
-                        const channelMultiplier = (channel === 'h') ? 0.2 : 1.0;
-                        const hsvDelta = baseAdjust * channelMultiplier;
-                        const ratioRange = Math.max(0, Math.round(baseAdjust * 100));
-                        const spliceMode = !!(this.keys && this.keys.held && this.keys.held('Shift'));
-                        const clamp01 = (v) => Math.max(0, Math.min(1, v));
-                        const clamp255 = (v) => Math.max(0, Math.min(255, v));
-                        const randFloat = (range) => (Math.random() * 2 - 1) * range;
-                        const randIntRange = (range) => Math.floor(Math.random() * (range * 2 + 1)) - range;
-
-                        // Helper to apply noise to a pixel index using the current adjust channel/amount.
-                        const applyNoiseAtIdx = (idx) => {
-                            const r = data[idx];
-                            const g = data[idx + 1];
-                            const b = data[idx + 2];
-                            const a = data[idx + 3];
-
-                            const hex = this.rgbaToHex(r, g, b, a);
-                            const col = Color.convertColor(hex);
-                            const hsv = col.toHsv(); // {a:h, b:s, c:v, d:alpha}
-
-                            let nr = r, ng = g, nb = b, na = a;
-
-                            if (spliceMode && channel === 'v') {
-                                const deltaV = randIntRange(ratioRange);
-                                nr = clamp255(r + deltaV);
-                                ng = clamp255(g + deltaV);
-                                nb = clamp255(b + deltaV);
-                            } else {
-                                switch (channel) {
-                                    case 'h': {
-                                        hsv.a = (hsv.a + randFloat(hsvDelta)) % 1; if (hsv.a < 0) hsv.a += 1;
-                                        break;
-                                    }
-                                    case 's': {
-                                        const deltaS = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
-                                        hsv.b = clamp01(hsv.b + deltaS);
-                                        break;
-                                    }
-                                    case 'a': {
-                                        const deltaA = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
-                                        hsv.d = clamp01(hsv.d + deltaA);
-                                        break;
-                                    }
-                                    case 'v':
-                                    default: {
-                                        const deltaV = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
-                                        hsv.c = clamp01(hsv.c + deltaV);
-                                        break;
-                                    }
-                                }
-
-                                const rgb = hsv.toRgb(); // returns Color with rgb in a,b,c
-                                nr = Math.round(rgb.a);
-                                ng = Math.round(rgb.b);
-                                nb = Math.round(rgb.c);
-                                if (channel === 'a') {
-                                    const alphaComponent = rgb.d ?? hsv.d ?? 1;
-                                    na = Math.round(clamp255(alphaComponent * 255));
-                                }
-                            }
-
-                            data[idx] = nr;
-                            data[idx + 1] = ng;
-                            data[idx + 2] = nb;
-                            data[idx + 3] = na;
-
-                            if (nr !== r || ng !== g || nb !== b || na !== a) {
-                                const px = (idx / 4) % w;
-                                const py = Math.floor((idx / 4) / w);
-                                noiseChanges.push({ x: px, y: py, next: this.rgbaToHex(nr, ng, nb, na) });
-                            }
-                        };
-
-                        // If there is any active selection (points or region), only affect those pixels.
-                        const hasPointSelection = (this.selectionPoints && this.selectionPoints.length > 0);
-                        const hasRegionSelection = !!this.selectionRegion;
-                        if (hasPointSelection) {
-                            for (const p of this.selectionPoints) {
-                                if (!p) continue;
-                                if (p.x < 0 || p.y < 0 || p.x >= w || p.y >= h) continue;
-                                const idx = (p.y * w + p.x) * 4;
-                                applyNoiseAtIdx(idx);
-                            }
-                        } else if (hasRegionSelection) {
-                            const sr = this.selectionRegion;
-                            const minX = Math.max(0, Math.min(sr.start.x, sr.end.x));
-                            const minY = Math.max(0, Math.min(sr.start.y, sr.end.y));
-                            const maxX = Math.min(w - 1, Math.max(sr.start.x, sr.end.x));
-                            const maxY = Math.min(h - 1, Math.max(sr.start.y, sr.end.y));
-                            for (let yy = minX ? minY : minY; yy <= maxY; yy++) {
-                                for (let xx = minX; xx <= maxX; xx++) {
-                                    const idx = (yy * w + xx) * 4;
-                                    applyNoiseAtIdx(idx);
-                                }
-                            }
-                        } else {
-                            // No selection -> apply full-frame subtle noise: affect a fraction of pixels
-                            const prob = 0.18; // ~18% of pixels
-                            for (let p = 0; p < w * h; p++) {
-                                if (Math.random() < prob) applyNoiseAtIdx(p * 4);
-                            }
-                        }
-
-                        if (noiseChanges.length && typeof this._recordUndoPixels === 'function') {
-                            try { this._recordUndoPixels(anim, frameIdx, noiseChanges); } catch (e) { /* ignore undo capture errors */ }
-                        }
-
-                        ctx.putImageData(img, 0, 0);
-                        if (typeof sheet._rebuildSheetCanvas === 'function') {
-                            try { sheet._rebuildSheetCanvas(); } catch (e) { }
-                        }
-                    } catch (e) {
-                        // ignore image ops errors
+            const noisePressed = (this.keys.released('n') || this.keys.released('N'));
+            if (noisePressed) {
+                const sheet = this.currentSprite;
+                // Prefer selection-origin area/frame when applying noise
+                let sourceAreaIndex = null;
+                if (this.selectionPoints && this.selectionPoints.length > 0 && typeof this.selectionPoints[0].areaIndex === 'number') {
+                    sourceAreaIndex = this.selectionPoints[0].areaIndex;
+                } else if (this.selectionRegion && typeof this.selectionRegion.areaIndex === 'number') {
+                    sourceAreaIndex = this.selectionRegion.areaIndex;
+                } else {
+                    const posInfo = this.getPos(this.mouse && this.mouse.pos) || {};
+                    if (posInfo && typeof posInfo.areaIndex === 'number') sourceAreaIndex = posInfo.areaIndex;
+                }
+                let anim = this.selectedAnimation;
+                let frameIdx = this.selectedFrame;
+                if (this.tilemode && typeof sourceAreaIndex === 'number') {
+                    const binding = this.getAreaBinding(sourceAreaIndex);
+                    if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                        anim = binding.anim;
+                        frameIdx = Number(binding.index);
                     }
                 }
-            } catch (e) {
-                console.warn('noise (n) failed', e);
+                const frameCanvas = sheet.getFrame(anim, frameIdx);
+
+                const w = frameCanvas.width;
+                const h = frameCanvas.height;
+                const ctx = frameCanvas.getContext('2d');
+                const img = ctx.getImageData(0, 0, w, h);
+                const data = img.data;
+                const noiseChanges = [];
+                const channel = this.state.brush.pixelBrush.channel;
+                const baseAdjust = this.state.brush.pixelBrush.adjustAmount[channel];
+                const channelMultiplier = (channel === 'h') ? 0.2 : 1.0;
+                const hsvDelta = baseAdjust * channelMultiplier;
+                const ratioRange = Math.max(0, Math.round(baseAdjust * 100));
+                const spliceMode = !!(this.keys && this.keys.held && this.keys.held('Shift'));
+                const clamp01 = (v) => Math.max(0, Math.min(1, v));
+                const clamp255 = (v) => Math.max(0, Math.min(255, v));
+                const randFloat = (range) => (Math.random() * 2 - 1) * range;
+                const randIntRange = (range) => Math.floor(Math.random() * (range * 2 + 1)) - range;
+
+                // Helper to apply noise to a pixel index using the current adjust channel/amount.
+                const applyNoiseAtIdx = (idx) => {
+                    const r = data[idx];
+                    const g = data[idx + 1];
+                    const b = data[idx + 2];
+                    const a = data[idx + 3];
+
+                    const hex = this.rgbaToHex(r, g, b, a);
+                    const col = Color.convertColor(hex);
+                    const hsv = col.toHsv(); // {a:h, b:s, c:v, d:alpha}
+
+                    let nr = r, ng = g, nb = b, na = a;
+
+                    if (spliceMode && channel === 'v') {
+                        const deltaV = randIntRange(ratioRange);
+                        nr = clamp255(r + deltaV);
+                        ng = clamp255(g + deltaV);
+                        nb = clamp255(b + deltaV);
+                    } else {
+                        switch (channel) {
+                            case 'h': {
+                                hsv.a = (hsv.a + randFloat(hsvDelta)) % 1; if (hsv.a < 0) hsv.a += 1;
+                                break;
+                            }
+                            case 's': {
+                                const deltaS = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
+                                hsv.b = clamp01(hsv.b + deltaS);
+                                break;
+                            }
+                            case 'a': {
+                                const deltaA = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
+                                hsv.d = clamp01(hsv.d + deltaA);
+                                break;
+                            }
+                            case 'v':
+                            default: {
+                                const deltaV = spliceMode ? randIntRange(ratioRange) / 100 : randFloat(hsvDelta);
+                                hsv.c = clamp01(hsv.c + deltaV);
+                                break;
+                            }
+                        }
+
+                        const rgb = hsv.toRgb(); // returns Color with rgb in a,b,c
+                        nr = Math.round(rgb.a);
+                        ng = Math.round(rgb.b);
+                        nb = Math.round(rgb.c);
+                        if (channel === 'a') {
+                            const alphaComponent = rgb.d ?? hsv.d ?? 1;
+                            na = Math.round(clamp255(alphaComponent * 255));
+                        }
+                    }
+
+                    data[idx] = nr;
+                    data[idx + 1] = ng;
+                    data[idx + 2] = nb;
+                    data[idx + 3] = na;
+
+                    if (nr !== r || ng !== g || nb !== b || na !== a) {
+                        const px = (idx / 4) % w;
+                        const py = Math.floor((idx / 4) / w);
+                        noiseChanges.push({ x: px, y: py, next: this.rgbaToHex(nr, ng, nb, na) });
+                    }
+                };
+
+                // If there is any active selection (points or region), only affect those pixels.
+                const hasPointSelection = (this.selectionPoints && this.selectionPoints.length > 0);
+                const hasRegionSelection = !!this.selectionRegion;
+                if (hasPointSelection) {
+                    for (const p of this.selectionPoints) {
+                        if (!p) continue;
+                        if (p.x < 0 || p.y < 0 || p.x >= w || p.y >= h) continue;
+                        const idx = (p.y * w + p.x) * 4;
+                        applyNoiseAtIdx(idx);
+                    }
+                } else if (hasRegionSelection) {
+                    const sr = this.selectionRegion;
+                    const minX = Math.max(0, Math.min(sr.start.x, sr.end.x));
+                    const minY = Math.max(0, Math.min(sr.start.y, sr.end.y));
+                    const maxX = Math.min(w - 1, Math.max(sr.start.x, sr.end.x));
+                    const maxY = Math.min(h - 1, Math.max(sr.start.y, sr.end.y));
+                    for (let yy = minX ? minY : minY; yy <= maxY; yy++) {
+                        for (let xx = minX; xx <= maxX; xx++) {
+                            const idx = (yy * w + xx) * 4;
+                            applyNoiseAtIdx(idx);
+                        }
+                    }
+                } else {
+                    // No selection -> apply full-frame subtle noise: affect a fraction of pixels
+                    const prob = 0.18; // ~18% of pixels
+                    for (let p = 0; p < w * h; p++) {
+                        if (Math.random() < prob) applyNoiseAtIdx(p * 4);
+                    }
+                }
+
+                if (noiseChanges.length && typeof this._recordUndoPixels === 'function') {
+                    try { this._recordUndoPixels(anim, frameIdx, noiseChanges); } catch (e) { /* ignore undo capture errors */ }
+                }
+
+                ctx.putImageData(img, 0, 0);
+                if (typeof sheet._rebuildSheetCanvas === 'function') {
+                    try { sheet._rebuildSheetCanvas(); } catch (e) { }
+                }
             }
 
             // If clipboard preview is active, allow left-click (press+hold) inside the preview
@@ -4583,15 +4551,27 @@ export class SpriteScene extends Scene {
     _applySelectionSnapshot(snapshot) {
         if (!snapshot) return;
         if (snapshot.type === 'region') {
-            this.selectionRegion = {
+            const nextRegion = {
                 start: { x: snapshot.start.x, y: snapshot.start.y },
                 end: { x: snapshot.end.x, y: snapshot.end.y },
                 areaIndex: (typeof snapshot.areaIndex === 'number') ? snapshot.areaIndex : null
             };
-            this.selectionPoints = [];
+            if (this.stateController) {
+                this.stateController.setSelectionRegion(nextRegion);
+                this.stateController.clearSelectionPoints();
+            } else {
+                this.selectionRegion = nextRegion;
+                this.selectionPoints = [];
+            }
         } else if (snapshot.type === 'points') {
-            this.selectionPoints = (snapshot.points || []).map(p => ({ x: p.x, y: p.y, areaIndex: (typeof p.areaIndex === 'number') ? p.areaIndex : null }));
-            this.selectionRegion = null;
+            const nextPoints = (snapshot.points || []).map(p => ({ x: p.x, y: p.y, areaIndex: (typeof p.areaIndex === 'number') ? p.areaIndex : null }));
+            if (this.stateController) {
+                this.stateController.setSelectionPoints(nextPoints);
+                this.stateController.clearSelectionRegion();
+            } else {
+                this.selectionPoints = nextPoints;
+                this.selectionRegion = null;
+            }
         }
     }
 
@@ -5521,8 +5501,13 @@ export class SpriteScene extends Scene {
             }
             this._paintWorldPixels(worldPixels, color);
             // keep selection points so user can continue editing; exit polygon tool
-            this.selectionRegion = null;
-            this.currentTool = null;
+            if (this.stateController) {
+                this.stateController.clearSelectionRegion();
+                this.stateController.clearCurrentTool();
+            } else {
+                this.selectionRegion = null;
+                this.currentTool = null;
+            }
         } catch (e) {
             console.warn('_commitPolygonFromSelection failed', e);
         }
@@ -5567,9 +5552,15 @@ export class SpriteScene extends Scene {
                 nextSel.push({ x: target.localX, y: target.localY, areaIndex });
             }
 
-            this.selectionPoints = nextSel;
-            this.selectionRegion = null;
-            this.currentTool = null;
+            if (this.stateController) {
+                this.stateController.setSelectionPoints(nextSel);
+                this.stateController.clearSelectionRegion();
+                this.stateController.clearCurrentTool();
+            } else {
+                this.selectionPoints = nextSel;
+                this.selectionRegion = null;
+                this.currentTool = null;
+            }
         } catch (e) {
             console.warn('_selectPolygonFromSelection failed', e);
         }
@@ -5656,8 +5647,13 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            this.selectionPoints = nextSel;
-            this.selectionRegion = null;
+            if (this.stateController) {
+                this.stateController.setSelectionPoints(nextSel);
+                this.stateController.clearSelectionRegion();
+            } else {
+                this.selectionPoints = nextSel;
+                this.selectionRegion = null;
+            }
         } catch (e) {
             console.warn('_growSelection failed', e);
         }
@@ -5742,8 +5738,13 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            this.selectionPoints = nextSel;
-            this.selectionRegion = null;
+            if (this.stateController) {
+                this.stateController.setSelectionPoints(nextSel);
+                this.stateController.clearSelectionRegion();
+            } else {
+                this.selectionPoints = nextSel;
+                this.selectionRegion = null;
+            }
         } catch (e) {
             console.warn('_shrinkSelection failed', e);
         }
@@ -6015,7 +6016,7 @@ export class SpriteScene extends Scene {
 
             let anim = this.selectedAnimation;
             let frameIdx = this.selectedFrame;
-            if (typeof sourceAreaIndex === 'number') {
+            if (this.tilemode && typeof sourceAreaIndex === 'number') {
                 const binding = this.getAreaBinding(sourceAreaIndex);
                 if (binding && binding.anim !== undefined && binding.index !== undefined) {
                     anim = binding.anim;
@@ -6137,9 +6138,7 @@ export class SpriteScene extends Scene {
                     const binding = this.getAreaBinding(idx);
                     const transform = (Array.isArray(this._areaTransforms) && this._areaTransforms[idx]) ? this._areaTransforms[idx] : null;
                     entries.push({ col: c.col, row: c.row, binding: binding ? { ...binding } : null, transform: transform ? { rot: transform.rot || 0, flipH: !!transform.flipH } : null });
-                    // clear tile binding/transform and deactivate tile so it no longer renders
-                    if (Array.isArray(this._areaBindings)) this._areaBindings[idx] = null;
-                    if (Array.isArray(this._areaTransforms)) this._areaTransforms[idx] = null;
+                    // deactivate also clears binding/transform and emits synced tile op
                     this._deactivateTile(c.col, c.row);
                 }
                 if (entries.length > 0) {
@@ -6185,7 +6184,8 @@ export class SpriteScene extends Scene {
                 if (typeof sheet._rebuildSheetCanvas === 'function') {
                     try { sheet._rebuildSheetCanvas(); } catch (e) { }
                 }
-                this.selectionPoints = [];
+                if (this.stateController) this.stateController.clearSelectionPoints();
+                else this.selectionPoints = [];
                 return;
             }
 
@@ -6213,7 +6213,8 @@ export class SpriteScene extends Scene {
                 try { sheet._rebuildSheetCanvas(); } catch (e) { }
             }
             // clear the selection region after cutting
-            this.selectionRegion = null;
+            if (this.stateController) this.stateController.clearSelectionRegion();
+            else this.selectionRegion = null;
         } catch (e) {
             console.warn('doCut failed', e);
         }
@@ -6238,7 +6239,7 @@ export class SpriteScene extends Scene {
                 const cr = this._tileIndexToCoord[areaIndex];
                 if (cr) { col = cr.col|0; row = cr.row|0; }
             }
-            if (typeof areaIndex === 'number') {
+            if (this.tilemode && typeof areaIndex === 'number') {
                 const binding = this.getAreaBinding(areaIndex);
                 if (binding && binding.anim !== undefined && binding.index !== undefined) {
                     anim = binding.anim;
@@ -6261,10 +6262,8 @@ export class SpriteScene extends Scene {
                     const tRow = baseRow + (t.dr|0);
                     const idx = this._getAreaIndexForCoord(tCol, tRow);
                     this._activateTile(tCol, tRow);
-                    if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
-                    if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
-                    this._areaBindings[idx] = t.binding ? { ...t.binding } : { anim, index: frameIdx };
-                    this._areaTransforms[idx] = t.transform ? { ...t.transform } : this._areaTransforms[idx];
+                    this._setAreaBindingAtIndex(idx, t.binding ? { ...t.binding } : { anim, index: frameIdx }, true);
+                    if (t.transform) this._setAreaTransformAtIndex(idx, { ...t.transform }, true);
                 }
                 return;
             }
@@ -6359,7 +6358,7 @@ export class SpriteScene extends Scene {
                 const cr = this._tileIndexToCoord[areaIndex];
                 if (cr) { col = cr.col|0; row = cr.row|0; }
             }
-            if (typeof areaIndex === 'number') {
+            if (this.tilemode && typeof areaIndex === 'number') {
                 const binding = this.getAreaBinding(areaIndex);
                 if (binding && binding.anim !== undefined && binding.index !== undefined) {
                     anim = binding.anim;
@@ -6442,28 +6441,105 @@ export class SpriteScene extends Scene {
         } catch (e) { /* ignore */ }
     }
 
+    _flushPendingTileOpsToBuffer() {
+        try {
+            if (!this._tileOpPending || this._tileOpPending.size === 0) return 0;
+            if (!this._opBuffer) this._opBuffer = [];
+
+            const chunkSize = 96;
+            const now = Date.now();
+            const entries = [];
+
+            for (const [key, pending] of this._tileOpPending.entries()) {
+                if (!pending || typeof pending !== 'object') continue;
+                const parts = String(key).split(',');
+                if (parts.length !== 2) continue;
+                const col = Number(parts[0]);
+                const row = Number(parts[1]);
+                if (!Number.isFinite(col) || !Number.isFinite(row)) continue;
+
+                const compact = { c: col|0, r: row|0 };
+
+                if (pending.active !== undefined) compact.a = pending.active ? 1 : 0;
+
+                if (pending.binding !== undefined) {
+                    if (pending.binding === null) compact.b = 0;
+                    else {
+                        const b = pending.binding || {};
+                        const mf = Array.isArray(b.multiFrames)
+                            ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
+                            : null;
+                        compact.b = {
+                            a: b.anim || this.selectedAnimation,
+                            i: Number(b.index) || 0,
+                            m: (mf && mf.length > 0) ? mf : null
+                        };
+                    }
+                }
+
+                if (pending.transform !== undefined) {
+                    if (pending.transform === null) compact.t = 0;
+                    else {
+                        const t = pending.transform || {};
+                        compact.t = {
+                            r: Number(t.rot || 0),
+                            f: !!t.flipH ? 1 : 0
+                        };
+                    }
+                }
+
+                entries.push(compact);
+            }
+
+            for (let i = 0; i < entries.length; i += chunkSize) {
+                const slice = entries.slice(i, i + chunkSize);
+                this._opBuffer.push({
+                    type: 'tileBlob',
+                    client: this.clientId,
+                    time: now,
+                    tiles: slice
+                });
+            }
+
+            this._tileOpPending.clear();
+            return entries.length;
+        } catch (e) {
+            return 0;
+        }
+    }
+
     // Override Scene.sendState: send buffered pixel edit ops to server using per-op keys
     sendState() {
         try {
-            if (!this.server || !this._opBuffer || this._opBuffer.length === 0) return;
-            if (!this.server.sendDiff) {
-                // fallback to parent behaviour
-                if (super.sendState) return super.sendState();
+            if (!this._canSendCollab()) {
+                // In SpriteScene we do not fall back to Scene.sendState().
+                // This prevents per-tick Firebase writes when running
+                // WebRTC with handshake-only signaling.
                 return;
             }
 
+            // Coalesce queued per-tile mutations into compact tileBlob ops.
+            this._flushPendingTileOpsToBuffer();
+
             // Build an update object mapping nested keys to op payloads so firebase update() creates distinct children
             const diff = {};
-            // limit how many ops we send in one batch to avoid huge updates
-            const batch = this._opBuffer.splice(0, 256);
-            for (const op of batch) {
-                const id = (op.time || Date.now()) + '_' + Math.random().toString(36).slice(2,6);
-                // store under edits/<id>
-                diff['edits/' + id] = op;
+            if (this._opBuffer && this._opBuffer.length > 0) {
+                // limit how many ops we send in one batch to avoid huge updates
+                const batch = this._opBuffer.splice(0, 512);
+                for (const op of batch) {
+                    const id = (op.time || Date.now()) + '_' + Math.random().toString(36).slice(2,6);
+                    // store under edits/<id>
+                    diff['edits/' + id] = op;
+                }
             }
 
             if (Object.keys(diff).length > 0) {
-                try { this.server.sendDiff(diff); } catch (e) { console.warn('sendState sendDiff failed', e); }
+                try { this._sendCollabDiff(diff); } catch (e) { console.warn('sendState sendDiff failed', e); }
+            }
+
+            // If backlog remains, keep draining without waiting for new edits.
+            if ((this._opBuffer && this._opBuffer.length > 0) || (this._tileOpPending && this._tileOpPending.size > 0)) {
+                this._scheduleSend();
             }
         } catch (e) { console.warn('sendState failed', e); }
     }
@@ -6472,6 +6548,11 @@ export class SpriteScene extends Scene {
     applyRemoteState(state) {
         try {
             if (!state) return;
+            try {
+                if (this.webrtcCollab && typeof this.webrtcCollab.handleRemoteState === 'function') {
+                    this.webrtcCollab.handleRemoteState(state);
+                }
+            } catch (e) { /* ignore webrtc signal parsing failures */ }
             // Handle sync handshake (pause + full snapshot) before applying incremental edits
             try {
                 const blocking = this._handleSyncState(state.sync || null);
@@ -6559,7 +6640,22 @@ export class SpriteScene extends Scene {
                             if (!c) { try { this._remoteCursors && this._remoteCursors.delete(cid); } catch(e){}; continue; }
                             // skip own cursor (we already send our own)
                             if (cid === this.clientId) continue;
-                            const entry = { x: Number(c.x || 0), y: Number(c.y || 0), time: Number(c.time || Date.now()), client: cid };
+                            const entry = {
+                                x: Number(c.x || 0),
+                                y: Number(c.y || 0),
+                                time: Number(c.time || Date.now()),
+                                client: cid,
+                                tm: Number(c.tm || 0),
+                                inside: Number(c.in || 0),
+                                renderOnly: Number(c.ro || 0),
+                                px: Number.isFinite(Number(c.px)) ? Number(c.px) : null,
+                                py: Number.isFinite(Number(c.py)) ? Number(c.py) : null,
+                                tc: Number.isFinite(Number(c.tc)) ? Number(c.tc) : null,
+                                tr: Number.isFinite(Number(c.tr)) ? Number(c.tr) : null,
+                                ai: Number.isFinite(Number(c.ai)) ? Number(c.ai) : null,
+                                bs: Math.max(1, Math.min(64, Number(c.bs) || 1)),
+                                sel: (c.sel && typeof c.sel === 'object') ? c.sel : null
+                            };
                             if (c.name) entry.name = c.name;
                             try { this._remoteCursors && this._remoteCursors.set(cid, entry); } catch(e){}
                         } catch (e) { continue; }
@@ -6592,6 +6688,94 @@ export class SpriteScene extends Scene {
                                 applied++;
                             }
                         } catch (e) { /* ignore struct op errors */ }
+                    } else if (op.type === 'tile') {
+                        try {
+                            const col = Number(op.col);
+                            const row = Number(op.row);
+                            if (!Number.isFinite(col) || !Number.isFinite(row)) {
+                                if (this._seenOpIds) this._seenOpIds.add(id);
+                                continue;
+                            }
+                            this._suppressOutgoing = true;
+                            const c = col|0;
+                            const r = row|0;
+                            if (op.action === 'activate') {
+                                this._activateTile(c, r, false);
+                            } else if (op.action === 'deactivate') {
+                                this._deactivateTile(c, r, false);
+                            } else if (op.action === 'bind') {
+                                const idx = this._getAreaIndexForCoord(c, r);
+                                this._activateTile(c, r, false);
+                                const mf = Array.isArray(op.multiFrames)
+                                    ? op.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
+                                    : null;
+                                this._setAreaBindingAtIndex(idx, {
+                                    anim: op.anim || this.selectedAnimation,
+                                    index: Number(op.index) || 0,
+                                    multiFrames: (mf && mf.length > 0) ? mf : null
+                                }, false);
+                            } else if (op.action === 'clearBinding') {
+                                const idx = this._getAreaIndexForCoord(c, r);
+                                this._setAreaBindingAtIndex(idx, null, false);
+                            } else if (op.action === 'setTransform') {
+                                const idx = this._getAreaIndexForCoord(c, r);
+                                this._activateTile(c, r, false);
+                                this._setAreaTransformAtIndex(idx, { rot: Number(op.rot || 0), flipH: !!op.flipH }, false);
+                            } else if (op.action === 'clearTransform') {
+                                const idx = this._getAreaIndexForCoord(c, r);
+                                this._setAreaTransformAtIndex(idx, null, false);
+                            }
+                            applied++;
+                        } catch (e) { /* ignore tile op errors */ }
+                        finally { this._suppressOutgoing = false; }
+                    } else if (op.type === 'tileBlob' && Array.isArray(op.tiles)) {
+                        try {
+                            this._suppressOutgoing = true;
+                            for (const tile of op.tiles) {
+                                if (!tile) continue;
+                                const c = Number(tile.c !== undefined ? tile.c : tile.col);
+                                const r = Number(tile.r !== undefined ? tile.r : tile.row);
+                                if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
+                                const col = c | 0;
+                                const row = r | 0;
+                                const idx = this._getAreaIndexForCoord(col, row);
+
+                                if (tile.a !== undefined) {
+                                    if (Number(tile.a) === 1) this._activateTile(col, row, false);
+                                    else if (Number(tile.a) === 0) this._deactivateTile(col, row, false);
+                                }
+
+                                if (tile.b !== undefined) {
+                                    if (tile.b === 0) this._setAreaBindingAtIndex(idx, null, false);
+                                    else {
+                                        const b = tile.b || {};
+                                        const mf = Array.isArray(b.m)
+                                            ? b.m.filter(v => Number.isFinite(v)).map(v => Number(v))
+                                            : (Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null);
+                                        this._activateTile(col, row, false);
+                                        this._setAreaBindingAtIndex(idx, {
+                                            anim: b.a || b.anim || this.selectedAnimation,
+                                            index: Number(b.i !== undefined ? b.i : b.index) || 0,
+                                            multiFrames: (mf && mf.length > 0) ? mf : null
+                                        }, false);
+                                    }
+                                }
+
+                                if (tile.t !== undefined) {
+                                    if (tile.t === 0) this._setAreaTransformAtIndex(idx, null, false);
+                                    else {
+                                        const t = tile.t || {};
+                                        this._activateTile(col, row, false);
+                                        this._setAreaTransformAtIndex(idx, {
+                                            rot: Number(t.r !== undefined ? t.r : t.rot) || 0,
+                                            flipH: !!(t.f !== undefined ? Number(t.f) : t.flipH)
+                                        }, false);
+                                    }
+                                }
+                            }
+                            applied++;
+                        } catch (e) { /* ignore tile blob errors */ }
+                        finally { this._suppressOutgoing = false; }
                     } else if (op.type === 'draw' && Array.isArray(op.pixels)) {
                         // Apply incoming draw ops as-is and rely on server/update
                         // ordering, instead of comparing client-local timestamps.
@@ -6662,7 +6846,7 @@ export class SpriteScene extends Scene {
                     diff['sync/message'] = 'snapshot-ready';
                     diff['sync/acks'] = null;
                     if (sync.requester) diff['sync/requester'] = sync.requester;
-                    try { if (this.server && this.server.sendDiff) this.server.sendDiff(diff); } catch (e) { console.warn('sync snapshot send failed', e); }
+                    try { this._sendHandshakeSignal(diff); } catch (e) { console.warn('sync snapshot send failed', e); }
                     this._lastSyncRequestId = requestId;
                 }
             } finally {
@@ -6706,7 +6890,7 @@ export class SpriteScene extends Scene {
                 'sync/acks': null,
                 'sync/message': null
             };
-            try { if (this.server && this.server.sendDiff) this.server.sendDiff(diff); } catch (e) { console.warn('sync completion send failed', e); }
+            try { this._sendHandshakeSignal(diff); } catch (e) { console.warn('sync completion send failed', e); }
         }
 
         if (status === 'done' && this._syncPaused) this._exitSyncPause();
@@ -6865,15 +7049,25 @@ export class SpriteScene extends Scene {
                 row++;
             }
             try { sheet._rebuildSheetCanvas(); } catch (e) {}
-            this.selectedAnimation = animNames[0] || this.selectedAnimation || 'idle';
-            this.selectedFrame = 0;
+            if (this.stateController) this.stateController.setActiveSelection(animNames[0] || this.selectedAnimation || 'idle', 0);
+            else {
+                this.selectedAnimation = animNames[0] || this.selectedAnimation || 'idle';
+                this.selectedFrame = 0;
+            }
             if (this.FrameSelect) {
                 this.FrameSelect.sprite = sheet;
                 try { if (this.FrameSelect._multiSelected) this.FrameSelect._multiSelected.clear(); } catch (e) {}
                 try { if (typeof this.FrameSelect.rebuild === 'function') this.FrameSelect.rebuild(); } catch (e) {}
             }
-            if (Number.isFinite(snapshot.tileCols)) this.tileCols = snapshot.tileCols;
-            if (Number.isFinite(snapshot.tileRows)) this.tileRows = snapshot.tileRows;
+            if (Number.isFinite(snapshot.tileCols) || Number.isFinite(snapshot.tileRows)) {
+                const cols = Number.isFinite(snapshot.tileCols) ? snapshot.tileCols : this.tileCols;
+                const rows = Number.isFinite(snapshot.tileRows) ? snapshot.tileRows : this.tileRows;
+                if (this.stateController) this.stateController.setTileGrid(cols, rows);
+                else {
+                    if (Number.isFinite(snapshot.tileCols)) this.tileCols = snapshot.tileCols;
+                    if (Number.isFinite(snapshot.tileRows)) this.tileRows = snapshot.tileRows;
+                }
+            }
             if (!this._tileActive) this._tileActive = new Set();
             if (Array.isArray(snapshot.activeTiles)) {
                 for (const t of snapshot.activeTiles) {
@@ -6886,20 +7080,32 @@ export class SpriteScene extends Scene {
                 this._seedTileActives(this.tileCols, this.tileRows);
             }
             if (Array.isArray(snapshot.bindings)) {
-                this._areaBindings = snapshot.bindings.map((b, i) => {
-                    if (!b) return null;
+                this._areaBindings = [];
+                for (let i = 0; i < snapshot.bindings.length; i++) {
+                    const b = snapshot.bindings[i];
+                    if (!b) continue;
                     let idx = i;
                     if (Number.isFinite(b.col) && Number.isFinite(b.row)) {
                         idx = this._getAreaIndexForCoord(Number(b.col), Number(b.row));
                         this._activateTile(Number(b.col), Number(b.row));
                     }
                     const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
-                    const entry = { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf.slice() : null };
-                    this._areaBindings[idx] = entry;
-                    return entry;
-                });
+                    this._setAreaBindingAtIndex(idx, { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf.slice() : null }, false);
+                }
             }
-            if (Array.isArray(snapshot.transforms)) this._areaTransforms = snapshot.transforms;
+            if (Array.isArray(snapshot.transforms)) {
+                this._areaTransforms = [];
+                for (let i = 0; i < snapshot.transforms.length; i++) {
+                    const t = snapshot.transforms[i];
+                    if (!t) continue;
+                    let idx = i;
+                    if (Number.isFinite(t.col) && Number.isFinite(t.row)) {
+                        idx = this._getAreaIndexForCoord(Number(t.col), Number(t.row));
+                        this._activateTile(Number(t.col), Number(t.row));
+                    }
+                    this._setAreaTransformAtIndex(idx, { rot: Number(t.rot || 0), flipH: !!t.flipH }, false);
+                }
+            }
             return true;
         } catch (e) {
             console.warn('_applySnapshot failed', e);
@@ -6923,11 +7129,11 @@ export class SpriteScene extends Scene {
     }
 
     _sendSyncAck(requestId) {
-        if (!requestId || !this.server || !this.server.sendDiff) return;
+        if (!requestId || !this._canSendSignal()) return;
         const diff = {};
         const ackId = (this.playerId) ? this.playerId : (this.clientId || 'client');
         diff['sync/acks/' + ackId] = requestId;
-        try { this.server.sendDiff(diff); } catch (e) { console.warn('sync ack send failed', e); }
+        try { this._sendHandshakeSignal(diff); } catch (e) { console.warn('sync ack send failed', e); }
     }
 
     // --- Undo / Redo helpers ---
@@ -7092,8 +7298,11 @@ export class SpriteScene extends Scene {
             img.src = entry.dataUrl;
         }
         // restore selection to the reinstated frame
-        this.selectedAnimation = entry.anim;
-        this.selectedFrame = entry.index;
+        if (this.stateController) this.stateController.setActiveSelection(entry.anim, entry.index);
+        else {
+            this.selectedAnimation = entry.anim;
+            this.selectedFrame = entry.index;
+        }
     }
 
     // Helper: mark a pixel as modified locally at given timestamp (ms)
@@ -7135,7 +7344,7 @@ export class SpriteScene extends Scene {
     // Deletes `edits/<id>` entries older than `_pruneThresholdMs` (default 30000ms).
     _pruneOldEdits() {
         try {
-            if (!this.server || !this.server.sendDiff) return;
+            if (!this._canSendCollab()) return;
             if (!this._remoteEdits || this._remoteEdits.size === 0) return;
             const now = Date.now();
             const cutoff = now - (this._pruneThresholdMs || 30000);
@@ -7152,7 +7361,7 @@ export class SpriteScene extends Scene {
                 } catch (e) { continue; }
             }
             if (Object.keys(diff).length > 0) {
-                try { this.server.sendDiff(diff); } catch (e) { console.warn('pruneOldEdits sendDiff failed', e); }
+                try { this._sendCollabDiff(diff); } catch (e) { console.warn('pruneOldEdits sendDiff failed', e); }
                 for (const id of removed) try { this._remoteEdits.delete(id); } catch (e) {}
             }
         } catch (e) { console.warn('pruneOldEdits failed', e); }
@@ -7173,15 +7382,188 @@ export class SpriteScene extends Scene {
     // Send current cursor position to server under cursors/<clientId>
     _sendCursor() {
         try {
-            if (!this.server || !this.server.sendDiff) return;
+            if (!this._canSendCollab()) return;
             if (!this.mouse || !this.mouse.pos) return;
             const pos = this.mouse.pos;
             const payload = { x: Number(pos.x || 0), y: Number(pos.y || 0), time: Date.now(), client: this.clientId };
+            const p = this.getPos(pos);
+            payload.tm = this.tilemode ? 1 : 0;
+            payload.in = (p && p.inside) ? 1 : 0;
+            payload.ro = (p && p.renderOnly) ? 1 : 0;
+            payload.bs = Math.max(1, Math.min(64, Number(this.brushSize) || 1));
+            if (p && Number.isFinite(p.x)) payload.px = Number(p.x);
+            if (p && Number.isFinite(p.y)) payload.py = Number(p.y);
+            if (p && Number.isFinite(p.tileCol)) payload.tc = Number(p.tileCol);
+            if (p && Number.isFinite(p.tileRow)) payload.tr = Number(p.tileRow);
+            if (p && Number.isFinite(p.areaIndex)) payload.ai = Number(p.areaIndex);
+            const sel = this._buildCursorSelectionPayload();
+            if (sel) payload.sel = sel;
             if (this.playerName) payload.name = this.playerName;
             const diff = {};
             diff['cursors/' + this.clientId] = payload;
-            try { this.server.sendDiff(diff); } catch (e) {}
+            try { this._sendCollabDiff(diff); } catch (e) {}
         } catch (e) { /* ignore */ }
+    }
+
+    _buildCursorSelectionPayload() {
+        try {
+            if (this.selectionRegion && this.selectionRegion.start && this.selectionRegion.end) {
+                const sr = this.selectionRegion;
+                return {
+                    t: 'r',
+                    x0: Math.min(Number(sr.start.x) || 0, Number(sr.end.x) || 0),
+                    y0: Math.min(Number(sr.start.y) || 0, Number(sr.end.y) || 0),
+                    x1: Math.max(Number(sr.start.x) || 0, Number(sr.end.x) || 0),
+                    y1: Math.max(Number(sr.start.y) || 0, Number(sr.end.y) || 0),
+                    ai: (this.tilemode && Number.isFinite(sr.areaIndex)) ? Number(sr.areaIndex) : null
+                };
+            }
+            if (Array.isArray(this.selectionPoints) && this.selectionPoints.length > 0) {
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                let areaIdx = null;
+                for (const p of this.selectionPoints) {
+                    if (!p) continue;
+                    const x = Number(p.x);
+                    const y = Number(p.y);
+                    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                    if (x < minX) minX = x;
+                    if (y < minY) minY = y;
+                    if (x > maxX) maxX = x;
+                    if (y > maxY) maxY = y;
+                    if (this.tilemode && Number.isFinite(p.areaIndex)) {
+                        if (areaIdx === null) areaIdx = Number(p.areaIndex);
+                        else if (areaIdx !== Number(p.areaIndex)) { areaIdx = null; }
+                    }
+                }
+                if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY)) {
+                    return {
+                        t: 'p',
+                        x0: minX|0,
+                        y0: minY|0,
+                        x1: maxX|0,
+                        y1: maxY|0,
+                        ai: (this.tilemode && areaIdx !== null) ? Number(areaIdx) : null
+                    };
+                }
+            }
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getRemoteCursorTargetScreen(entry) {
+        try {
+            if (!entry || !this.currentSprite) return null;
+            const base = this.computeDrawArea();
+            if (!base || !base.topLeft || !base.size) return null;
+            const slice = Math.max(1, Number(this.currentSprite.slicePx || 1));
+
+            let col = Number.isFinite(entry.tc) ? Number(entry.tc) : 0;
+            let row = Number.isFinite(entry.tr) ? Number(entry.tr) : 0;
+            if (!Number.isFinite(col)) col = 0;
+            if (!Number.isFinite(row)) row = 0;
+
+            const hasPixel = Number.isFinite(entry.px) && Number.isFinite(entry.py);
+            let relX = 0.5;
+            let relY = 0.5;
+            if (hasPixel) {
+                relX = (Number(entry.px) + 0.5) / slice;
+                relY = (Number(entry.py) + 0.5) / slice;
+                const ai = this._getAreaIndexForCoord(col, row);
+                const tr = (Array.isArray(this._areaTransforms) && Number.isFinite(ai)) ? this._areaTransforms[ai] : null;
+                if (tr) {
+                    const mapped = this._sourceToDisplayPixel(relX, relY, tr, slice);
+                    if (mapped) {
+                        relX = mapped.relX;
+                        relY = mapped.relY;
+                    }
+                }
+            }
+
+            const zoomX = (this.zoom?.x || 1);
+            const zoomY = (this.zoom?.y || 1);
+            const offX = (this.offset?.x || 0);
+            const offY = (this.offset?.y || 0);
+            const tileWorldX = base.topLeft.x + col * base.size.x;
+            const tileWorldY = base.topLeft.y + row * base.size.y;
+            const cellWorldW = base.size.x / slice;
+            const cellWorldH = base.size.y / slice;
+
+            let worldX = tileWorldX;
+            let worldY = tileWorldY;
+            let worldW = base.size.x;
+            let worldH = base.size.y;
+            if (hasPixel) {
+                const brush = Math.max(1, Math.min(64, Number(entry.bs) || 1));
+                const px = Number(entry.px) || 0;
+                const py = Number(entry.py) || 0;
+                const half = Math.floor((brush - 1) / 2);
+                const startPx = px - half;
+                const startPy = py - half;
+                worldX = tileWorldX + startPx * cellWorldW;
+                worldY = tileWorldY + startPy * cellWorldH;
+                worldW = cellWorldW * brush;
+                worldH = cellWorldH * brush;
+            }
+
+            const screenX = (worldX + offX) * zoomX;
+            const screenY = (worldY + offY) * zoomY;
+            const screenW = Math.max(2, worldW * zoomX);
+            const screenH = Math.max(2, worldH * zoomY);
+
+            let label = '';
+            if (Number(entry.tm) === 1 && Number.isFinite(entry.tc) && Number.isFinite(entry.tr)) {
+                if (hasPixel) label = `t:${entry.tc|0},${entry.tr|0} p:${entry.px|0},${entry.py|0}`;
+                else label = `t:${entry.tc|0},${entry.tr|0}`;
+            } else if (hasPixel) {
+                label = `p:${entry.px|0},${entry.py|0}`;
+            }
+
+            return { x: screenX, y: screenY, w: screenW, h: screenH, label };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getRemoteSelectionOverlay(entry) {
+        try {
+            if (!entry || !entry.sel || !this.currentSprite) return null;
+            const s = entry.sel;
+            const x0 = Number(s.x0), y0 = Number(s.y0), x1 = Number(s.x1), y1 = Number(s.y1);
+            if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) return null;
+            const base = this.computeDrawArea();
+            if (!base || !base.topLeft || !base.size) return null;
+            const slice = Math.max(1, Number(this.currentSprite.slicePx || 1));
+            const cellWorldW = base.size.x / slice;
+            const cellWorldH = base.size.y / slice;
+
+            let col = Number.isFinite(entry.tc) ? Number(entry.tc) : 0;
+            let row = Number.isFinite(entry.tr) ? Number(entry.tr) : 0;
+            if (Number.isFinite(s.ai) && Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[Number(s.ai)]) {
+                const cr = this._tileIndexToCoord[Number(s.ai)];
+                col = Number(cr.col) || 0;
+                row = Number(cr.row) || 0;
+            }
+
+            const minX = Math.min(x0, x1);
+            const minY = Math.min(y0, y1);
+            const maxX = Math.max(x0, x1);
+            const maxY = Math.max(y0, y1);
+
+            const worldX = base.topLeft.x + col * base.size.x + minX * cellWorldW;
+            const worldY = base.topLeft.y + row * base.size.y + minY * cellWorldH;
+            const worldW = (maxX - minX + 1) * cellWorldW;
+            const worldH = (maxY - minY + 1) * cellWorldH;
+
+            const screenX = (worldX + (this.offset?.x || 0)) * (this.zoom?.x || 1);
+            const screenY = (worldY + (this.offset?.y || 0)) * (this.zoom?.y || 1);
+            const screenW = Math.max(2, worldW * (this.zoom?.x || 1));
+            const screenH = Math.max(2, worldH * (this.zoom?.y || 1));
+            return { x: screenX, y: screenY, w: screenW, h: screenH };
+        } catch (e) {
+            return null;
+        }
     }
 
     // Remove stale remote cursors from local map
@@ -7422,24 +7804,74 @@ export class SpriteScene extends Scene {
         return this._tileActive && this._tileActive.has(this._tileKey(col, row));
     }
 
-    _activateTile(col, row) {
+    _activateTile(col, row, syncOp = true) {
         try {
             if (!this._tileActive) this._tileActive = new Set();
             this._tileActive.add(this._tileKey(col, row));
             this._getAreaIndexForCoord(col, row);
+            if (syncOp) this._queueTileOp('activate', { col: col|0, row: row|0 });
         } catch (e) { /* ignore */ }
     }
 
-    _deactivateTile(col, row) {
+    _deactivateTile(col, row, syncOp = true) {
         try {
             const key = this._tileKey(col, row);
             if (this._tileActive) this._tileActive.delete(key);
             const idx = this._tileCoordToIndex ? this._tileCoordToIndex.get(key) : null;
             if (Number.isFinite(idx)) {
-                if (Array.isArray(this._areaBindings)) this._areaBindings[idx] = null;
-                if (Array.isArray(this._areaTransforms)) this._areaTransforms[idx] = null;
+                this._setAreaBindingAtIndex(idx, null, false);
+                this._setAreaTransformAtIndex(idx, null, false);
             }
+            if (syncOp) this._queueTileOp('deactivate', { col: col|0, row: row|0 });
         } catch (e) { /* ignore */ }
+    }
+
+    _queueTileOp(action, payload = {}) {
+        try {
+            if (this._suppressOutgoing) return false;
+            const col = Number(payload.col);
+            const row = Number(payload.row);
+            if (!Number.isFinite(col) || !Number.isFinite(row)) return false;
+            if (!this._tileOpPending) this._tileOpPending = new Map();
+
+            const key = this._tileKey(col, row);
+            const pending = this._tileOpPending.get(key) || {};
+
+            if (action === 'activate') {
+                pending.active = true;
+            } else if (action === 'deactivate') {
+                pending.active = false;
+                pending.binding = null;
+                pending.transform = null;
+            } else if (action === 'bind') {
+                pending.active = true;
+                pending.binding = {
+                    anim: payload.anim || this.selectedAnimation,
+                    index: Number(payload.index) || 0,
+                    multiFrames: Array.isArray(payload.multiFrames)
+                        ? payload.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
+                        : null
+                };
+            } else if (action === 'clearBinding') {
+                pending.binding = null;
+            } else if (action === 'setTransform') {
+                pending.active = true;
+                pending.transform = {
+                    rot: Number(payload.rot || 0),
+                    flipH: !!payload.flipH
+                };
+            } else if (action === 'clearTransform') {
+                pending.transform = null;
+            } else {
+                return false;
+            }
+
+            this._tileOpPending.set(key, pending);
+            this._scheduleSend && this._scheduleSend();
+            return true;
+        } catch (e) {
+            return false;
+        }
     }
 
     _seedTileActives(cols = null, rows = null) {
@@ -7591,35 +8023,75 @@ export class SpriteScene extends Scene {
         return { relX: relDx, relY: relDy };
     }
 
+    _setAreaBindingAtIndex(areaIndex, bindingEntry, syncOp = true) {
+        try {
+            if (!Number.isFinite(areaIndex) || areaIndex < 0) return false;
+            areaIndex = areaIndex | 0;
+            if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
+            this._areaBindings[areaIndex] = bindingEntry;
+            if (!syncOp) return true;
+            const coord = (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[areaIndex]) ? this._tileIndexToCoord[areaIndex] : null;
+            if (!coord) return true;
+            if (!bindingEntry) return this._queueTileOp('clearBinding', { col: coord.col|0, row: coord.row|0 });
+            const mf = Array.isArray(bindingEntry.multiFrames)
+                ? bindingEntry.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
+                : null;
+            return this._queueTileOp('bind', {
+                col: coord.col|0,
+                row: coord.row|0,
+                anim: bindingEntry.anim || this.selectedAnimation,
+                index: Number(bindingEntry.index) || 0,
+                multiFrames: (mf && mf.length > 0) ? mf : null
+            });
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _setAreaTransformAtIndex(areaIndex, transformEntry, syncOp = true) {
+        try {
+            if (!Number.isFinite(areaIndex) || areaIndex < 0) return false;
+            areaIndex = areaIndex | 0;
+            if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
+            this._areaTransforms[areaIndex] = transformEntry;
+            if (!syncOp) return true;
+            const coord = (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[areaIndex]) ? this._tileIndexToCoord[areaIndex] : null;
+            if (!coord) return true;
+            if (!transformEntry) return this._queueTileOp('clearTransform', { col: coord.col|0, row: coord.row|0 });
+            return this._queueTileOp('setTransform', {
+                col: coord.col|0,
+                row: coord.row|0,
+                rot: Number(transformEntry.rot || 0),
+                flipH: !!transformEntry.flipH
+            });
+        } catch (e) {
+            return false;
+        }
+    }
+
     // Bind a specific animation/frame to a rendered area index
     bindArea(areaIndex, anim, frameIdx, multiFrames = null) {
         try {
             if (typeof areaIndex !== 'number' || areaIndex < 0) return false;
-            if (!this._areaBindings) this._areaBindings = [];
             const stack = Array.isArray(multiFrames) ? multiFrames.filter(i => Number.isFinite(i)).map(i => Number(i)) : null;
-            this._areaBindings[areaIndex] = { anim: anim || this.selectedAnimation, index: Number(frameIdx) || 0, multiFrames: (stack && stack.length > 0) ? stack : null };
-            return true;
+            return this._setAreaBindingAtIndex(areaIndex, { anim: anim || this.selectedAnimation, index: Number(frameIdx) || 0, multiFrames: (stack && stack.length > 0) ? stack : null }, true);
         } catch (e) { return false; }
     }
 
     // Toggle preview rotation (90deg CW) for an area
     toggleAreaPreviewRotate(areaIndex) {
         if (typeof areaIndex !== 'number' || areaIndex < 0) return false;
-        if (!this._areaTransforms) this._areaTransforms = [];
         const t = this._areaTransforms[areaIndex] || { rot: 0, flipH: false };
         t.rot = ((t.rot || 0) + 90) % 360;
-        this._areaTransforms[areaIndex] = t;
-        return true;
+        return this._setAreaTransformAtIndex(areaIndex, t, true);
     }
 
     // Toggle preview horizontal flip for an area
     toggleAreaPreviewFlip(areaIndex) {
         if (typeof areaIndex !== 'number' || areaIndex < 0) return false;
-        if (!this._areaTransforms) this._areaTransforms = [];
         const t = this._areaTransforms[areaIndex] || { rot: 0, flipH: false };
         t.flipH = !t.flipH;
-        this._areaTransforms[areaIndex] = t;
-        return true;
+        return this._setAreaTransformAtIndex(areaIndex, t, true);
     }
 
     // Apply a 90deg CW rotation to the actual frame data for the bound frame at areaIndex
@@ -7731,97 +8203,84 @@ export class SpriteScene extends Scene {
     }
 
     clearAreaBinding(areaIndex) {
-        if (!Array.isArray(this._areaBindings)) return false;
-        this._areaBindings[areaIndex] = null;
-        return true;
+        return this._setAreaBindingAtIndex(areaIndex, null, true);
     }
 
     draw() {
         if (!this.isReady) return;
-        // Clear and draw a simple background + text
         this.Draw.background('#222')
-        // Create a transform container.
         this.Draw.pushMatrix()
-        // scale first
         this.Draw.scale(this.zoom)
-        // then transform
         this.Draw.translate(this.offset)
         
         // display the editable frame centered on the screen
-        const drawCtx = this.Draw.ctx;
-        if (drawCtx && drawCtx.canvas) {
-            const uiW = drawCtx.canvas.width / this.Draw.Scale.x;
-            const uiH = drawCtx.canvas.height / this.Draw.Scale.y;
-            const size = new Vector(384, 384);
-            const center = new Vector((uiW - size.x) / 2, (uiH - size.y) / 2);
+        const size = new Vector(384, 384);
+        const center = new Vector((1920 - size.x) / 2, (1080 - size.y) / 2);
 
-            // Build all displayed tile positions.
-            // When tilemode is off, show a single central area.
-            // When tilemode is on, draw all active tiles (infinite grid), plus the hovered tile even if inactive.
-            const areas = [];
-            const basePos = center.clone(); // tile (0,0) top-left
+        // Build all displayed tile positions.
+        // When tilemode is off, show a single central area.
+        // When tilemode is on, draw all active tiles (infinite grid), plus the hovered tile even if inactive.
+        const areas = [];
+        const basePos = center.clone(); // tile (0,0) top-left
 
-            if (!this.tilemode) {
-                const info = this.computeAreaInfo(basePos, size);
-                if (info) {
-                    info.areaIndex = 0;
-                    info.tileCol = 0;
-                    info.tileRow = 0;
-                    info.active = true;
-                    info.renderOnly = this._isSimTooSmall(info);
-                    if (!this._shouldCullArea(info)) areas.push(info);
-                }
-            } else {
-                if (!this._tileActive || this._tileActive.size === 0) this._seedTileActives();
-                const seen = new Set();
-                const addTileArea = (col, row, active=true) => {
-                    const key = this._tileKey(col, row);
-                    if (seen.has(key)) return;
-                    seen.add(key);
-                    const pos = this._tileCoordToPos(col, row, basePos, size);
-                    const info = this.computeAreaInfo(pos, size);
-                    if (!info || this._shouldCullArea(info)) return;
-                    info.renderOnly = this._isSimTooSmall(info);
-                    const idx = this._getAreaIndexForCoord(col, row);
-                    info.areaIndex = idx;
-                    info.tileCol = col;
-                    info.tileRow = row;
-                    info.active = !!active;
-                    areas.push(info);
-                };
+        if (!this.tilemode) {
+            const info = this.computeAreaInfo(basePos, size);
+            if (info) {
+                info.areaIndex = 0;
+                info.tileCol = 0;
+                info.tileRow = 0;
+                info.active = true;
+                info.renderOnly = this._isSimTooSmall(info);
+                if (!this._shouldCullArea(info)) areas.push(info);
+            }
+        } else {
+            if (!this._tileActive || this._tileActive.size === 0) this._seedTileActives();
+            const seen = new Set();
+            const addTileArea = (col, row, active=true) => {
+                const key = this._tileKey(col, row);
+                if (seen.has(key)) return;
+                seen.add(key);
+                const pos = this._tileCoordToPos(col, row, basePos, size);
+                const info = this.computeAreaInfo(pos, size);
+                if (!info || this._shouldCullArea(info)) return;
+                info.renderOnly = this._isSimTooSmall(info);
+                const idx = this._getAreaIndexForCoord(col, row);
+                info.areaIndex = idx;
+                info.tileCol = col;
+                info.tileRow = row;
+                info.active = !!active;
+                areas.push(info);
+            };
 
-                // draw all active tiles
-                for (const key of this._tileActive.values()) {
-                    const c = this._parseTileKey(key);
-                    if (c) addTileArea(c.col, c.row, true);
-                }
-
-                // include hovered tile even if inactive
-                try {
-                    const mp = this.mouse && this.mouse.pos ? this.mouse.pos : new Vector(0,0);
-                    let mx = mp.x || 0;
-                    let my = mp.y || 0;
-                    mx = mx / this.zoom.x - this.offset.x;
-                    my = my / this.zoom.y - this.offset.y;
-                    const hover = this._worldToTileCoord(mx, my, basePos, size);
-                    if (hover) addTileArea(hover.col, hover.row, this._isTileActive(hover.col, hover.row));
-                } catch (e) { /* ignore hover add errors */ }
+            // draw all active tiles
+            for (const key of this._tileActive.values()) {
+                const c = this._parseTileKey(key);
+                if (c) addTileArea(c.col, c.row, true);
             }
 
-            this._drawAreas = areas;
-
-            // First pass: base layer (frame, checkerboard, labels)
-            for (const area of areas) {
-                this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'base');
-            }
-
-            // Second pass: overlays (cursor, selections, previews) to avoid being occluded by later tiles
-            for (const area of areas) {
-                this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'overlay');
-            }
-            // Draw the global tile cursor / selection / paste preview once (not per-area)
-            try { if (typeof this._drawTileCursorOverlay === 'function') this._drawTileCursorOverlay(); } catch (e) {}
+            // include hovered tile even if inactive
+            const mp = this.mouse && this.mouse.pos ? this.mouse.pos : new Vector(0,0);
+            let mx = mp.x || 0;
+            let my = mp.y || 0;
+            mx = mx / this.zoom.x - this.offset.x;
+            my = my / this.zoom.y - this.offset.y;
+            const hover = this._worldToTileCoord(mx, my, basePos, size);
+            if (hover) addTileArea(hover.col, hover.row, this._isTileActive(hover.col, hover.row));
         }
+
+        this._drawAreas = areas;
+
+        // First pass: base layer (frame, checkerboard, labels)
+        for (const area of areas) {
+            this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'base');
+        }
+
+        // Second pass: overlays (cursor, selections, previews) to avoid being occluded by later tiles
+        for (const area of areas) {
+            this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'overlay');
+        }
+        // Draw the global tile cursor / selection / paste preview once (not per-area)
+        this._drawTileCursorOverlay();
 
         // Remove previous transform container to prevent transform stacking
         this.Draw.popMatrix()
@@ -7829,58 +8288,53 @@ export class SpriteScene extends Scene {
         this.UIDraw.clear()
         this.FrameSelect.draw()
         // Draw remote cursors from other clients
-        try {
-            if (this._remoteCursors && this._remoteCursors.size > 0) {
-                const colors = ['#FF5555FF','#55FF55FF','#5555FFFF','#FFFF55FF','#FF55FFFF','#55FFFFFF','#FFA500FF','#FFFFFF88'];
-                for (const [cid, entry] of this._remoteCursors.entries()) {
-                    try {
-                        if (!entry) continue;
-                        if (cid === this.clientId) continue;
-                        const age = Date.now() - (Number(entry.time) || 0);
-                        if (age > (this._cursorTTLms || 5000)) { this._remoteCursors.delete(cid); continue; }
-                        const hash = (cid || '').split('').reduce((s,c)=>s + c.charCodeAt(0),0) || 0;
-                        const col = colors[hash % colors.length] || '#FFFFFF88';
-                        const pos = new Vector(Number(entry.x || 0), Number(entry.y || 0));
-                        // small 5px diameter circle (radius 2.5)
-                        try { this.UIDraw.circle(pos, 2.5, col, true); } catch (e) { /* fallback ignore */ }
-                        // optional name label a little offset to the right
-                        if (entry.name) {
-                            try { this.UIDraw.text(entry.name, new Vector(pos.x + 6, pos.y + 2), '#FFFFFFFF', 0, 12, { align: 'left', baseline: 'middle', font: 'monospace' }); } catch (e) {}
-                        }
-                    } catch (e) { continue; }
-                }
+        if (this._remoteCursors && this._remoteCursors.size > 0) {
+            const colors = ['#FF5555FF','#55FF55FF','#5555FFFF','#FFFF55FF','#FF55FFFF','#55FFFFFF','#FFA500FF','#FFFFFF88'];
+            for (const [cid, entry] of this._remoteCursors.entries()) {
+                if (!entry) continue;
+                if (cid === this.clientId) continue;
+                const age = Date.now() - (Number(entry.time) || 0);
+                if (age > (this._cursorTTLms || 5000)) { this._remoteCursors.delete(cid); continue; }
+                const hash = (cid || '').split('').reduce((s,c)=>s + c.charCodeAt(0),0) || 0;
+                const col = colors[hash % colors.length] || '#FFFFFF88';
+                try {
+                    const rgb = (typeof col === 'string' && col.length >= 7 && col[0] === '#') ? col.slice(1, 7) : 'FFFFFF';
+                    const selFill = `#${rgb}22`;
+                    const selStroke = `#${rgb}66`;
+                    const curStroke = `#${rgb}CC`;
+                    const sel = this._getRemoteSelectionOverlay(entry);
+                    if (sel) {
+                        const selPos = new Vector(sel.x, sel.y);
+                        const selSize = new Vector(sel.w, sel.h);
+                        this.UIDraw.rect(selPos, selSize, selFill, true);
+                        this.UIDraw.rect(selPos, selSize, selStroke, false, true, 1, selStroke);
+                    }
+                    const target = this._getRemoteCursorTargetScreen(entry);
+                    if (target) {
+                        const rectPos = new Vector(target.x, target.y);
+                        const rectSize = new Vector(target.w, target.h);
+                        this.UIDraw.rect(rectPos, rectSize, curStroke, false, true, 2, curStroke);
+                        if (entry.name) this.UIDraw.text(entry.name, new Vector(rectPos.x + rectSize.x + 5, rectPos.y - 4), '#FFFFFFFF', 0, 12, { align: 'left', baseline: 'middle', font: 'monospace' });
+                        if (target.label) this.UIDraw.text(target.label, new Vector(rectPos.x + rectSize.x + 5, rectPos.y + rectSize.y + 10), '#FFFFFFFF', 0, 11, { align: 'left', baseline: 'middle', font: 'monospace' });
+                    }
+                } catch (e) { /* ignore remote cursor target draw errors */ }
             }
-        } catch (e) {}
+        }
         // Prompt for selection keyframing
-        try {
-            const uctx = this.UIDraw && this.UIDraw.ctx;
-            if (uctx && uctx.canvas && this._selectionKeyframePrompt) {
-                const uiW = uctx.canvas.width / (this.Draw ? this.Draw.Scale.x : 1);
-                this.UIDraw.text(this._selectionKeyframePrompt, new Vector(uiW / 2, 8), '#FFE066FF', 0, 14, { align: 'center', baseline: 'top', font: 'monospace' });
-            }
-        } catch (e) {}
+        if (this._selectionKeyframePrompt) {
+            this.UIDraw.text(this._selectionKeyframePrompt, new Vector(1920 / 2, 8), '#FFE066FF', 0, 14, { align: 'center', baseline: 'top', font: 'monospace' });
+        }
         // Prompt for frame keyframing
-        try {
-            const uctx = this.UIDraw && this.UIDraw.ctx;
-            if (uctx && uctx.canvas && this._frameKeyframePrompt) {
-                const uiW = uctx.canvas.width / (this.Draw ? this.Draw.Scale.x : 1);
-                this.UIDraw.text(this._frameKeyframePrompt, new Vector(uiW / 2, 26), '#66CCFFFF', 0, 14, { align: 'center', baseline: 'top', font: 'monospace' });
-            }
-        } catch (e) {}
+        if (this._frameKeyframePrompt) {
+            this.UIDraw.text(this._frameKeyframePrompt, new Vector(1920 / 2, 26), '#66CCFFFF', 0, 14, { align: 'center', baseline: 'top', font: 'monospace' });
+        }
+
         // Draw a small bottom-right label showing the current adjust channel
-        try {
-            const uctx = this.UIDraw && this.UIDraw.ctx;
-            if (uctx && uctx.canvas) {
-                const uiW = uctx.canvas.width / (this.Draw ? this.Draw.Scale.x : 1);
-                const uiH = uctx.canvas.height / (this.Draw ? this.Draw.Scale.y : 1);
-                const key = this.adjustChannel || 'v';
-                const ch = key.toUpperCase();
-                const effMult = (key === 'h') ? 0.2 : 1.0;
-                const pct = Math.round(((typeof this._getAdjustPercent === 'function' ? this._getAdjustPercent(key) : (this.adjustAmount || 0.05))) * 100 * effMult);
-                const label = `Adjust: ${ch}  ${pct}%`;
-                this.UIDraw.text(label, new Vector(uiW - 12, uiH - 8), '#FFFFFFFF', 1, 14, { align: 'right', baseline: 'bottom', font: 'monospace' });
-            }
-        } catch (e) {}
+        const key = this.state.brush.pixelBrush.channel;
+        const ch = key.toUpperCase();
+        const pct = Math.round(this.state.brush.pixelBrush.adjustAmount[key] * 100);
+        const label = `Adjust: ${ch}  ${pct}%`;
+        this.UIDraw.text(label, new Vector(1920 - 12, 1080 - 8), '#FFFFFFFF', 1, 14, { align: 'right', baseline: 'bottom', font: 'monospace' });
     }
 
     /**
@@ -7890,7 +8344,7 @@ export class SpriteScene extends Scene {
      */
     displayDrawArea(pos, size, sheet, animation = 'idle', frame = 0, areaIndex = null, areaInfo = null, drawMode = 'both') {
         try {
-            if (!this.Draw || !pos || !size) return;
+            if (!pos || !size) return;
             this.Draw.useCtx('base');
             const renderOnly = !!(areaInfo && areaInfo.renderOnly);
             const modeBase = drawMode === 'both' || drawMode === 'base';

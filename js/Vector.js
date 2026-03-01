@@ -199,3 +199,6 @@ export default class Vector {
         return this;
     }
 }
+export function v(x,y){
+    return new Vector(x,y)
+}
