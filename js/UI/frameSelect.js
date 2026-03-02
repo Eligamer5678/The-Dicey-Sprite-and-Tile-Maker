@@ -9,7 +9,6 @@ import UITextInput from './UITextInput.js';
 import SpriteSheet from '../Spritesheet.js';
 import createHButton from '../htmlElements/createHButton.js';
 import createHInput from '../htmlElements/createHInput.js';
-import TileConnPicker from './TileConnPicker.js';
 
 export default class FrameSelect {
     constructor(scene,sprite, mouse, keys, UIDraw, layer = 1) {
@@ -49,31 +48,6 @@ export default class FrameSelect {
         this._importBtn = null;
         this._exportBtn = null;
         this._createImportExportUI();
-
-        // Tile connection picker sidebar (to the right of the frame sidebar)
-        try {
-            // shift down to avoid scene header and tighten width, increase height
-            const sidePos = new Vector(this.menu.pos.x + this.menu.size.x + 8, this.menu.pos.y + 8 + 75);
-            // scale container up by ~50% to reduce compression on small screens
-            const sideSize = new Vector(Math.round(140 * 1.5), Math.round(600 * 1.5));
-            this.tileConnMenu = new Menu(this.mouse, this.keys, sidePos, sideSize, this.layer, '#FFFFFF11');
-            this.tileConnPicker = new TileConnPicker(this.mouse, this.keys, new Vector(sidePos.x + 4, sidePos.y + 4), new Vector(sideSize.x - 8, sideSize.y - 8), this.layer+1, { sheetPath: 'Assets/tiles.png', jsonPath: 'tiles.json', slice: 16, cellSize: 32, onSelect: (k,i)=>{} });
-            // when user selects a connection type, store per-frame on scene for placement logging
-            try {
-                this.tileConnPicker.onSelect = (key, index) => {
-                    try {
-                        if (!this.scene) return;
-                        if (!this.scene._tileConnMap) this.scene._tileConnMap = {};
-                        const anim = (this.scene.selectedAnimation || '');
-                        const frame = Number.isFinite(this.scene.selectedFrame) ? this.scene.selectedFrame : 0;
-                        const k = anim + '::' + frame;
-                        this.scene._tileConnMap[k] = key;
-                        // also store a scene-level recent selection for immediate placement fallback
-                        this.scene.selectedTileConnection = key;
-                    } catch (e) {}
-                };
-            } catch (e) {}
-        } catch (e) { console.warn('TileConnPicker init failed', e); }
     }
 
     // Rebuild palette entries from scene.tileTypes (array of {sheetId,row,col})
@@ -99,6 +73,116 @@ export default class FrameSelect {
         let i = 1;
         while(names.has(base + i)) i++;
         return base + i;
+    }
+
+    _normalizeOpenConnKey(key){
+        let bits = String(key || '00000000').replace(/[^01]/g, '');
+        while (bits.length < 8) bits += '0';
+        bits = bits.slice(0, 8);
+        const arr = bits.split('');
+        const edgeTop = arr[0] === '1';
+        const edgeRight = arr[1] === '1';
+        const edgeBottom = arr[2] === '1';
+        const edgeLeft = arr[3] === '1';
+
+        if (edgeTop) { arr[4] = '1'; arr[5] = '1'; }
+        if (edgeRight) { arr[5] = '1'; arr[6] = '1'; }
+        if (edgeBottom) { arr[6] = '1'; arr[7] = '1'; }
+        if (edgeLeft) { arr[4] = '1'; arr[7] = '1'; }
+        return arr.join('');
+    }
+
+    _getFrameConnKey(anim, frame){
+        try {
+            if (!this.scene) return '00000000';
+            if (!this.scene._tileConnMap) this.scene._tileConnMap = {};
+            const k = String(anim || '') + '::' + Number(frame || 0);
+            return this._normalizeOpenConnKey(this.scene._tileConnMap[k] || '00000000');
+        } catch (e) {
+            return '00000000';
+        }
+    }
+
+    _setFrameConnKey(anim, frame, key){
+        try {
+            if (!this.scene) return;
+            if (!this.scene._tileConnMap) this.scene._tileConnMap = {};
+            const k = String(anim || '') + '::' + Number(frame || 0);
+            this.scene._tileConnMap[k] = this._normalizeOpenConnKey(key);
+        } catch (e) {}
+    }
+
+    _getFrameConnHitRects(slotPos){
+        const frame = {
+            x: slotPos.x,
+            y: slotPos.y,
+            w: 190,
+            h: 190
+        };
+        const edge = Math.round(frame.w / 8); // ~1/8th of frame
+        const corner = edge;
+        const outside = 6; // extend hit area outside frame for easier clicking
+        const cornerOutside = 12; // extra generosity for corner hitboxes
+        return [
+            { index: 0, x: frame.x + corner, y: frame.y - outside, w: frame.w - corner * 2, h: edge + outside }, // top
+            { index: 1, x: frame.x + frame.w - edge, y: frame.y + corner, w: edge + outside, h: frame.h - corner * 2 }, // right
+            { index: 2, x: frame.x + corner, y: frame.y + frame.h - edge, w: frame.w - corner * 2, h: edge + outside }, // bottom
+            { index: 3, x: frame.x - outside, y: frame.y + corner, w: edge + outside, h: frame.h - corner * 2 }, // left
+            { index: 4, x: frame.x - cornerOutside, y: frame.y - cornerOutside, w: corner + cornerOutside, h: corner + cornerOutside }, // top-left
+            { index: 5, x: frame.x + frame.w - corner, y: frame.y - cornerOutside, w: corner + cornerOutside, h: corner + cornerOutside }, // top-right
+            { index: 6, x: frame.x + frame.w - corner, y: frame.y + frame.h - corner, w: corner + cornerOutside, h: corner + cornerOutside }, // bottom-right
+            { index: 7, x: frame.x - cornerOutside, y: frame.y + frame.h - corner, w: corner + cornerOutside, h: corner + cornerOutside } // bottom-left
+        ];
+    }
+
+    _hitFrameConnection(slotPos, point){
+        const rects = this._getFrameConnHitRects(slotPos);
+        for (const r of rects){
+            if (point.x >= r.x && point.y >= r.y && point.x <= r.x + r.w && point.y <= r.y + r.h) return r.index;
+        }
+        return -1;
+    }
+
+    _toggleFrameConnection(anim, frame, partIndex){
+        const current = this._getFrameConnKey(anim, frame).split('');
+        if (partIndex < 0 || partIndex > 7) return;
+        current[partIndex] = (current[partIndex] === '1') ? '0' : '1';
+        this._setFrameConnKey(anim, frame, current.join(''));
+    }
+
+    _drawFrameConnectionOverlay(slotPos, openConnKey){
+        const bits = this._normalizeOpenConnKey(openConnKey).split('');
+        const t = 4; // match selected-frame yellow outline thickness
+        const x = slotPos.x+2;
+        const y = slotPos.y+2;
+        const w = 186;
+        const h = 186;
+        const c = 24; // corner segment length
+        const color = '#00FFFF';
+
+        // edges (top, right, bottom, left)
+        if (bits[0] === '1') this.UIDraw.rect(new Vector(x + c, y), new Vector(w - c * 2, t), color, true);
+        if (bits[1] === '1') this.UIDraw.rect(new Vector(x + w - t, y + c), new Vector(t, h - c * 2), color, true);
+        if (bits[2] === '1') this.UIDraw.rect(new Vector(x + c, y + h - t), new Vector(w - c * 2, t), color, true);
+        if (bits[3] === '1') this.UIDraw.rect(new Vector(x, y + c), new Vector(t, h - c * 2), color, true);
+
+        // corners (tl, tr, br, bl)
+        if (bits[4] === '1') {
+            this.UIDraw.rect(new Vector(x, y), new Vector(c, t), color, true);
+            this.UIDraw.rect(new Vector(x, y), new Vector(t, c), color, true);
+        }
+        if (bits[5] === '1') {
+            this.UIDraw.rect(new Vector(x + w - c, y), new Vector(c, t), color, true);
+            this.UIDraw.rect(new Vector(x + w - t, y), new Vector(t, c), color, true);
+        }
+        if (bits[6] === '1') {
+            this.UIDraw.rect(new Vector(x + w - c, y + h - t), new Vector(c, t), color, true);
+            this.UIDraw.rect(new Vector(x + w - t, y + h - c), new Vector(t, c), color, true);
+        }
+        if (bits[7] === '1') {
+            this.UIDraw.rect(new Vector(x, y + h - t), new Vector(c, t), color, true);
+            this.UIDraw.rect(new Vector(x, y + h - c), new Vector(t, c), color, true);
+        }
     }
 
     // --- frame group helpers (groups are stored per-animation on the sprite)
@@ -822,24 +906,47 @@ export default class FrameSelect {
 
     update(delta) {
         this.menu.update(delta);
-        try { if (this.tileConnMenu) this.tileConnMenu.update(delta); } catch(e){}
-        try { if (this.tileConnPicker) this.tileConnPicker.update(delta); } catch(e){}
-        // keep picker selection in sync with current animation/frame (per-frame selection)
-        try {
-            if (this.tileConnPicker && this.scene) {
-                const anim = (this.scene.selectedAnimation || '');
-                const frame = Number.isFinite(this.scene.selectedFrame) ? this.scene.selectedFrame : 0;
-                const k = (this.scene._tileConnMap && this.scene._tileConnMap[anim + '::' + frame]) ? this.scene._tileConnMap[anim + '::' + frame] : null;
-                this.tileConnPicker.selected = k;
-            }
-        } catch (e) {}
         // active group (id of last-clicked group slot)
         if (typeof this._activeGroup === 'undefined') this._activeGroup = null;
+
+        // clamp sidebar frame-slot scrolling to content bounds
+        const animForScroll = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+        const framesForScroll = (this.sprite && this.sprite._frames && animForScroll) ? (this.sprite._frames.get(animForScroll) || []) : [];
+        let slotCount = 1; // keep at least the trailing "add" slot
+        try {
+            const groupsForScroll = this._getFrameGroups(animForScroll);
+            for (const g of groupsForScroll){ g.firstIndex = Math.min.apply(null, g.indices); }
+            slotCount = 0;
+            for (let i = 0; i < framesForScroll.length; i++){
+                const groupAtFirst = groupsForScroll.find(g => g.firstIndex === i);
+                if (groupAtFirst){
+                    slotCount++; // group slot row
+                    if (groupAtFirst.collapsed){
+                        i = Math.max.apply(null, groupAtFirst.indices);
+                        continue;
+                    }
+                }
+                slotCount++; // frame slot row
+            }
+            slotCount++; // add slot row
+        } catch (e) {
+            slotCount = Math.max(1, (framesForScroll.length || 0) + 1);
+        }
+
+        const slotStartY = 100;
+        const slotStepY = 200; // 180 + 20
+        const slotHeight = 190;
+        const viewportTop = (this.menu && this.menu.pos) ? this.menu.pos.y : 0;
+        const viewportBottom = viewportTop + ((this.menu && this.menu.size) ? this.menu.size.y : 1080);
+        const contentBottom = slotStartY + Math.max(0, slotCount - 1) * slotStepY + slotHeight;
+        const minScroll = Math.min(0, viewportBottom - contentBottom);
+
         if(this.mouse.pos.x <= 200){
             let scrollDelta = this.mouse.wheel()
             this.scrollPos -= scrollDelta
-            if(this.scrollPos > 0) this.scrollPos = 0
         }
+        if(this.scrollPos > 0) this.scrollPos = 0
+        if(this.scrollPos < minScroll) this.scrollPos = minScroll
         // Advance preview animation timer
         try {
             const dt = (typeof delta === 'number' && delta > 0) ? delta : (1 / 60);
@@ -932,12 +1039,34 @@ export default class FrameSelect {
                     if (item.type === 'frame'){
                         try {
                             const i = item.index;
-                            if (this.keys.held('Shift')&& !this.mouse.held('right')) {
-                                if (this._multiSelected.has(i)) this._multiSelected.delete(i);
-                                else this._multiSelected.add(i);
-                            } else {
-                                if (this._multiSelected && this._multiSelected.size > 0 && !this.mouse.held('right')) this._multiSelected.clear();
+                            let handledConnectionToggle = false;
+                            const currentSel = (this.scene && typeof this.scene.selectedFrame === 'number') ? this.scene.selectedFrame : null;
+
+                            // When switching to a different frame with a normal left click,
+                            // pause mouse input so this same press doesn't also toggle connections.
+                            if (this.mouse.released('left') && !this.keys.held('Shift') && !this.mouse.held('right') && currentSel !== i) {
+                                if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
                                 if (this.scene) this.scene.selectedFrame = i;
+                                try { if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch (e) {}
+                                handledConnectionToggle = true;
+                            }
+
+                            if (!handledConnectionToggle && this.mouse.released('left')) {
+                                const part = this._hitFrameConnection(pos, this.mouse.pos);
+                                if (part !== -1) {
+                                    this._toggleFrameConnection(anim, i, part);
+                                    if (this.scene) this.scene.selectedFrame = i;
+                                    handledConnectionToggle = true;
+                                }
+                            }
+                            if (!handledConnectionToggle) {
+                                if (this.keys.held('Shift')&& !this.mouse.held('right')) {
+                                    if (this._multiSelected.has(i)) this._multiSelected.delete(i);
+                                    else this._multiSelected.add(i);
+                                } else {
+                                    if (this._multiSelected && this._multiSelected.size > 0 && !this.mouse.held('right')) this._multiSelected.clear();
+                                    if (this.scene) this.scene.selectedFrame = i;
+                                }
                             }
                         } catch (e) { if (this.scene) this.scene.selectedFrame = item.index; }
                     } else if (item.type === 'group'){
@@ -1705,8 +1834,6 @@ export default class FrameSelect {
 
         // draw the menu and its children
         this.menu.draw(this.UIDraw);
-        try { if (this.tileConnMenu) this.tileConnMenu.draw(this.UIDraw); } catch(e){}
-        try { if (this.tileConnPicker) this.tileConnPicker.draw(this.UIDraw); } catch(e){}
         // draw animation list under preview
         try{
             const outerPos = new Vector(1920-this._previewBuffer*3-this._previewSize, this._previewBuffer);
@@ -1780,6 +1907,8 @@ export default class FrameSelect {
                 if (item.type === 'frame'){
                     const i = item.index;
                     if (anim) this.UIDraw.sheet(this.sprite, new Vector(slotPos.x + 5, slotPos.y + 5), new Vector(180,180), anim, i);
+                    const connKey = this._getFrameConnKey(anim, i);
+                    this._drawFrameConnectionOverlay(slotPos, connKey);
                 } else if (item.type === 'group'){
                     // group pseudo-frame: show a composited preview when layered, otherwise center a label
                     const gp = item.group;
@@ -1833,18 +1962,6 @@ export default class FrameSelect {
                         } catch (e) {}
                         if (isPrimary) this.UIDraw.rect(slotPos, slotSize, '#00000000', false, true, 4, '#FFFF00FF');
                         if (isMulti) this.UIDraw.rect(slotPos, slotSize, '#00000000', false, true, 4, '#00FF00FF');
-                        // draw per-frame tile selection indicator: check scene._tileConnMap for this frame
-                        try {
-                            if (this.scene) {
-                                const frameKey = (anim || '') + '::' + i;
-                                const val = (this.scene._tileConnMap && typeof this.scene._tileConnMap[frameKey] !== 'undefined') ? this.scene._tileConnMap[frameKey] : null;
-                                if (val !== null && typeof val !== 'undefined') {
-                                    // draw a cyan bar touching left edge of screen
-                                    const barW = 4; // px
-                                    this.UIDraw.rect(new Vector(0, slotPos.y), new Vector(barW, slotSize.y), '#00FFFFFF', true);
-                                }
-                            }
-                        } catch (e) {}
                     } else if (item.type === 'group'){
                         // if all indices in group are selected, draw group multi outline
                         const gp2 = item.group;

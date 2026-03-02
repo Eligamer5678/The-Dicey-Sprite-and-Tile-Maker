@@ -169,6 +169,22 @@ export class SpriteScene extends Scene {
                         }
                     } catch (e) { /* non-fatal */ }
 
+                    // Restore per-frame tile connection settings used by frame-side toggles/autotile.
+                    try {
+                        this._tileConnMap = {};
+                        const conn = (meta && meta.tileConnections && typeof meta.tileConnections === 'object') ? meta.tileConnections : null;
+                        if (conn) {
+                            for (const k of Object.keys(conn)) {
+                                const v = conn[k];
+                                if (typeof v !== 'string') continue;
+                                const norm = (typeof this._normalizeOpenConnectionKey === 'function')
+                                    ? this._normalizeOpenConnectionKey(v)
+                                    : String(v).replace(/[^01]/g, '').padEnd(8, '0').slice(0, 8);
+                                this._tileConnMap[k] = norm;
+                            }
+                        }
+                    } catch (e) { /* ignore tile connection restore errors */ }
+
                     // Restore tile-mode layout (grid size, bindings, preview transforms) if present
                     try {
                         const layout = meta && meta.tileLayout ? meta.tileLayout : null;
@@ -2484,8 +2500,83 @@ export class SpriteScene extends Scene {
         return '' + eTop + eRight + eBottom + eLeft + cTL + cTR + cBR + cBL;
     }
 
+    _normalizeOpenConnectionKey(key) {
+        let bits = String(key || '00000000').replace(/[^01]/g, '');
+        while (bits.length < 8) bits += '0';
+        bits = bits.slice(0, 8);
+        const arr = bits.split('');
+        const edgeTop = arr[0] === '1';
+        const edgeRight = arr[1] === '1';
+        const edgeBottom = arr[2] === '1';
+        const edgeLeft = arr[3] === '1';
+        if (edgeTop) { arr[4] = '1'; arr[5] = '1'; }
+        if (edgeRight) { arr[5] = '1'; arr[6] = '1'; }
+        if (edgeBottom) { arr[6] = '1'; arr[7] = '1'; }
+        if (edgeLeft) { arr[4] = '1'; arr[7] = '1'; }
+        return arr.join('');
+    }
+
+    _openConnectionToClosedKey(openKey) {
+        const norm = this._normalizeOpenConnectionKey(openKey);
+        return norm;
+    }
+
+    _chooseBestFrameByConnections(desiredClosedKey, anim) {
+        try {
+            if (!anim || !this.currentSprite || !this.currentSprite._frames) return null;
+            const frames = this.currentSprite._frames.get(anim) || [];
+            if (!Array.isArray(frames) || frames.length === 0) return null;
+            if (!this._tileConnMap || typeof this._tileConnMap !== 'object') return null;
+
+            const scoreFor = (candClosedKey) => {
+                let scClosedEdges = 0, scOpenEdges = 0, scOpenCorners = 0, scClosedCorners = 0;
+                for (let i = 0; i < 4; i++) {
+                    const d = desiredClosedKey[i];
+                    const c = candClosedKey[i];
+                    if (d === '1' && c === '1') scClosedEdges++;
+                    if (d === '0' && c === '0') scOpenEdges++;
+                }
+                for (let i = 4; i < 8; i++) {
+                    const d = desiredClosedKey[i];
+                    const c = candClosedKey[i];
+                    if (d === '0' && c === '0') scOpenCorners++;
+                    if (d === '1' && c === '1') scClosedCorners++;
+                }
+                return [scClosedEdges, scOpenEdges, scOpenCorners, scClosedCorners];
+            };
+
+            const compareScore = (a, b) => {
+                for (let i = 0; i < a.length; i++) {
+                    if (a[i] > b[i]) return 1;
+                    if (a[i] < b[i]) return -1;
+                }
+                return 0;
+            };
+
+            let bestIndex = null;
+            let bestScore = null;
+            for (let i = 0; i < frames.length; i++) {
+                const key = String(anim) + '::' + i;
+                const openBits = this._tileConnMap[key];
+                if (typeof openBits !== 'string' || !/^[01]{8}$/.test(openBits)) continue;
+                const candClosed = this._openConnectionToClosedKey(openBits);
+                const score = scoreFor(candClosed);
+                if (!bestScore || compareScore(score, bestScore) > 0) {
+                    bestScore = score;
+                    bestIndex = i;
+                }
+            }
+            return bestIndex;
+        } catch (e) {
+            return null;
+        }
+    }
+
     // Choose best matching available tile index for a desired key and animation.
     _chooseBestTileIndex(desiredKey, anim) {
+        const fromFrameConnections = this._chooseBestFrameByConnections(desiredKey, anim);
+        if (fromFrameConnections !== null && fromFrameConnections !== undefined) return fromFrameConnections;
+
         if (!this._availableTileConn) return null;
         const candidates = this._availableTileKeys || Object.keys(this._availableTileConn || {});
         if (candidates.includes(desiredKey)) return this._availableTileConn[desiredKey];
@@ -5906,6 +5997,20 @@ export class SpriteScene extends Scene {
                     }
                 } catch (e) {}
 
+                // Persist per-frame connection toggles (anim::frame -> 8-bit open-connection key)
+                try {
+                    meta.tileConnections = {};
+                    if (this._tileConnMap && typeof this._tileConnMap === 'object') {
+                        for (const k of Object.keys(this._tileConnMap)) {
+                            const v = this._tileConnMap[k];
+                            if (typeof v !== 'string') continue;
+                            meta.tileConnections[k] = (typeof this._normalizeOpenConnectionKey === 'function')
+                                ? this._normalizeOpenConnectionKey(v)
+                                : String(v).replace(/[^01]/g, '').padEnd(8, '0').slice(0, 8);
+                        }
+                    }
+                } catch (e) { /* ignore tile connection save errors */ }
+
                 // Persist tile-mode layout (grid size, bindings, preview transforms)
                 try {
                     const layout = {};
@@ -7804,11 +7909,65 @@ export class SpriteScene extends Scene {
         return this._tileActive && this._tileActive.has(this._tileKey(col, row));
     }
 
+    _getActiveTileCoords() {
+        try {
+            if (!this._tileActive || this._tileActive.size === 0) return [];
+            const refChanged = this._tileActiveCoordCacheRef !== this._tileActive;
+            const version = Number.isFinite(this._tileActiveVersion) ? this._tileActiveVersion : 0;
+            const versionChanged = this._tileActiveCoordCacheVersion !== version;
+            if (!refChanged && !versionChanged && Array.isArray(this._tileActiveCoordCache)) return this._tileActiveCoordCache;
+
+            const parsed = [];
+            for (const key of this._tileActive.values()) {
+                const c = this._parseTileKey(key);
+                if (c) parsed.push(c);
+            }
+            this._tileActiveCoordCache = parsed;
+            this._tileActiveCoordCacheRef = this._tileActive;
+            this._tileActiveCoordCacheVersion = version;
+            return parsed;
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _getVisibleTileBounds(basePos, size, marginTiles = 1) {
+        try {
+            const zx = (this.zoom && this.zoom.x) ? this.zoom.x : 1;
+            const zy = (this.zoom && this.zoom.y) ? this.zoom.y : 1;
+            const ox = (this.offset && this.offset.x) ? this.offset.x : 0;
+            const oy = (this.offset && this.offset.y) ? this.offset.y : 0;
+            const w = 1920;
+            const h = 1080;
+
+            // Inverse of screen = (world + offset) * zoom
+            const worldLeft = (0 / zx) - ox;
+            const worldTop = (0 / zy) - oy;
+            const worldRight = (w / zx) - ox;
+            const worldBottom = (h / zy) - oy;
+
+            const sx = size && size.x ? size.x : 1;
+            const sy = size && size.y ? size.y : 1;
+            const bx = basePos && basePos.x ? basePos.x : 0;
+            const by = basePos && basePos.y ? basePos.y : 0;
+
+            return {
+                minCol: Math.floor((worldLeft - bx) / sx) - marginTiles,
+                maxCol: Math.floor((worldRight - bx) / sx) + marginTiles,
+                minRow: Math.floor((worldTop - by) / sy) - marginTiles,
+                maxRow: Math.floor((worldBottom - by) / sy) + marginTiles
+            };
+        } catch (e) {
+            return { minCol: -Infinity, maxCol: Infinity, minRow: -Infinity, maxRow: Infinity };
+        }
+    }
+
     _activateTile(col, row, syncOp = true) {
         try {
             if (!this._tileActive) this._tileActive = new Set();
             this._tileActive.add(this._tileKey(col, row));
             this._getAreaIndexForCoord(col, row);
+            this._tileActiveVersion = (Number.isFinite(this._tileActiveVersion) ? this._tileActiveVersion : 0) + 1;
             if (syncOp) this._queueTileOp('activate', { col: col|0, row: row|0 });
         } catch (e) { /* ignore */ }
     }
@@ -7817,6 +7976,7 @@ export class SpriteScene extends Scene {
         try {
             const key = this._tileKey(col, row);
             if (this._tileActive) this._tileActive.delete(key);
+            this._tileActiveVersion = (Number.isFinite(this._tileActiveVersion) ? this._tileActiveVersion : 0) + 1;
             const idx = this._tileCoordToIndex ? this._tileCoordToIndex.get(key) : null;
             if (Number.isFinite(idx)) {
                 this._setAreaBindingAtIndex(idx, null, false);
@@ -8236,13 +8396,16 @@ export class SpriteScene extends Scene {
         } else {
             if (!this._tileActive || this._tileActive.size === 0) this._seedTileActives();
             const seen = new Set();
+            const visible = this._getVisibleTileBounds(basePos, size, 1);
             const addTileArea = (col, row, active=true) => {
+                if (col < visible.minCol || col > visible.maxCol || row < visible.minRow || row > visible.maxRow) return;
                 const key = this._tileKey(col, row);
                 if (seen.has(key)) return;
                 seen.add(key);
-                const pos = this._tileCoordToPos(col, row, basePos, size);
-                const info = this.computeAreaInfo(pos, size);
-                if (!info || this._shouldCullArea(info)) return;
+                const x = basePos.x + col * size.x;
+                const y = basePos.y + row * size.y;
+                const topLeft = new Vector(x, y);
+                const info = { topLeft, size, padding: 0, dstW: size.x, dstH: size.y, dstPos: topLeft };
                 info.renderOnly = this._isSimTooSmall(info);
                 const idx = this._getAreaIndexForCoord(col, row);
                 info.areaIndex = idx;
@@ -8253,9 +8416,10 @@ export class SpriteScene extends Scene {
             };
 
             // draw all active tiles
-            for (const key of this._tileActive.values()) {
-                const c = this._parseTileKey(key);
-                if (c) addTileArea(c.col, c.row, true);
+            const activeCoords = this._getActiveTileCoords();
+            for (let i = 0; i < activeCoords.length; i++) {
+                const c = activeCoords[i];
+                addTileArea(c.col, c.row, true);
             }
 
             // include hovered tile even if inactive
@@ -8277,7 +8441,7 @@ export class SpriteScene extends Scene {
 
         // Second pass: overlays (cursor, selections, previews) to avoid being occluded by later tiles
         for (const area of areas) {
-            this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'overlay');
+            if (area && !area.renderOnly) this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'overlay');
         }
         // Draw the global tile cursor / selection / paste preview once (not per-area)
         this._drawTileCursorOverlay();
@@ -8414,6 +8578,46 @@ export class SpriteScene extends Scene {
                     effFrame = this.selectedFrame;
                     isMirrored = !!this.tilemode;
                 }
+
+                // Fast path for tiny on-screen tiles: skip expensive compositing/transforms.
+                if (renderOnly && modeBase && effAnim !== null && sheet && typeof this.Draw.sheet === 'function') {
+                    try {
+                        const simpleFrame = (typeof sheet.getFrame === 'function') ? sheet.getFrame(effAnim, effFrame) : null;
+                        if (simpleFrame && typeof this.Draw.image === 'function') {
+                            // Snap tile bounds to outward screen-pixel edges so neighboring tiles
+                            // can't round in opposite directions and leave seams.
+                            const zx = (this.zoom && this.zoom.x) ? this.zoom.x : 1;
+                            const zy = (this.zoom && this.zoom.y) ? this.zoom.y : 1;
+                            const ox = (this.offset && this.offset.x) ? this.offset.x : 0;
+                            const oy = (this.offset && this.offset.y) ? this.offset.y : 0;
+
+                            const sx0 = (pos.x + ox) * zx;
+                            const sy0 = (pos.y + oy) * zy;
+                            const sx1 = (pos.x + size.x + ox) * zx;
+                            const sy1 = (pos.y + size.y + oy) * zy;
+
+                            // Expand by 1px on each side to guarantee overlap after rasterization.
+                            const ssx0 = Math.floor(sx0) - 1;
+                            const ssy0 = Math.floor(sy0) - 1;
+                            const ssx1 = Math.ceil(sx1) + 1;
+                            const ssy1 = Math.ceil(sy1) + 1;
+
+                            const drawPos = new Vector((ssx0 / zx) - ox, (ssy0 / zy) - oy);
+                            const drawSize = new Vector(Math.max(1, (ssx1 - ssx0) / zx), Math.max(1, (ssy1 - ssy0) / zy));
+                            this.Draw.image(simpleFrame, drawPos, drawSize, null, 0, 1, false);
+                        } else {
+                            // fallback: atlas draw
+                            this.Draw.sheet(sheet, pos, size, effAnim, effFrame, null, 1, false);
+                        }
+                    } catch (e) {
+                        try {
+                            const simpleFrame = (typeof sheet.getFrame === 'function') ? sheet.getFrame(effAnim, effFrame) : null;
+                            if (simpleFrame) this.Draw.image(simpleFrame, pos, size, null, 0, 1, false);
+                        } catch (e2) { /* ignore simplified render fallback errors */ }
+                    }
+                    return;
+                }
+
                 const frameCanvas = (effAnim !== null && typeof sheet.getFrame === 'function') ? sheet.getFrame(effAnim, effFrame) : null;
                 const padding = 0;
                 const dstW = Math.max(1, size.x - padding * 2);

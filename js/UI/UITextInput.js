@@ -25,7 +25,12 @@ export default class UITextInput extends UIButton {
         this._lockKeys();
         try{ if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(this.layer); } catch(e){}
     }
-    blur(){
+    // accept: when true, treat the blur as an accept/submit (e.g., click-away)
+    blur(accept = false){
+        // only emit submit when we were focused and caller intends to accept
+        if (this.focused && accept){
+            try{ this.onSubmit.emit(this.text); } catch(e){}
+        }
         this.focused = false;
         this._unlockKeys();
     }
@@ -82,8 +87,8 @@ export default class UITextInput extends UIButton {
             if (isInside){
                 this.focus();
             } else {
-                // click outside blurs
-                this.blur();
+                // click outside blurs and should accept the current text
+                this.blur(true);
             }
         }
 
@@ -111,10 +116,11 @@ export default class UITextInput extends UIButton {
             }
             if (consumeKey('Enter')){
                 this.onSubmit.emit(this.text);
-                this.blur();
+                this.blur(false);
             }
             if (consumeKey('Escape')){
-                this.blur();
+                // Escape should simply blur without accepting
+                this.blur(false);
             }
         } catch(e){}
 
