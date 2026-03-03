@@ -18,10 +18,20 @@ export class SpriteScene extends Scene {
         super('spriteScene', ...args);
         this.loaded = 0;
         this.isReady = false;
+        this._checkerboardCache = new Map();
+        this._checkerboardTileSize = 16;
+        this._checkerboardLight = '#3a3a3aff';
+        this._checkerboardDark = '#2e2e2eff';
+        this._renderOnlyAllVisible = false;
+        this._lastVisibleTileBounds = null;
     }
 
     onReady() {
         this.maskShapesWithSelection = false;
+
+        try {
+            this._getCheckerboardCanvas(384, 384);
+        } catch (e) {}
 
 
         this.currentSprite = SpriteSheet.createNew(16, 'idle');
@@ -1260,6 +1270,18 @@ export class SpriteScene extends Scene {
             mx = mx / this.zoom.x - this.offset.x;
             my = my / this.zoom.y - this.offset.y;
 
+            // Fast path for ultra-zoom tilemode: avoid scanning `_drawAreas` entirely.
+            if (this.tilemode && this._renderOnlyAllVisible) {
+                const baseArea = this.computeDrawArea();
+                if (!baseArea) return null;
+                const coord = this._worldToTileCoord(mx, my, baseArea.topLeft, baseArea.size);
+                if (!coord) return null;
+                const idx = this._getAreaIndexForCoord(coord.col, coord.row);
+                const tileActive = this._isTileActive(coord.col, coord.row);
+                this._activeDrawAreaIndex = null;
+                return { inside: false, renderOnly: true, areaIndex: idx, tileCol: coord.col, tileRow: coord.row, tileActive };
+            }
+
             // determine which rendered area (if any) contains this world point
             let area = null;
             let areaCoord = null;
@@ -1363,6 +1385,16 @@ export class SpriteScene extends Scene {
                 }
             }
             if (!area) area = this.computeDrawArea();
+            if (!area && this.tilemode && typeof this._activeDrawAreaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) {
+                const coord = this._tileIndexToCoord[this._activeDrawAreaIndex] || null;
+                if (coord) {
+                    const baseArea = this.computeDrawArea();
+                    if (baseArea) {
+                        const pos = this._tileCoordToPos(coord.col, coord.row, baseArea.topLeft, baseArea.size);
+                        area = this.computeAreaInfo(pos, baseArea.size);
+                    }
+                }
+            }
             if (!area) return null;
             // compute source fractional center (0..1) for the pixel center
             let srcRelX = (x + 0.5) / this.currentSprite.slicePx;
@@ -8138,6 +8170,117 @@ export class SpriteScene extends Scene {
         return { col: col - midC, row: row - midR };
     }
 
+    _drawRenderOnlyTileBatch(basePos, size, visible, hoverCoord = null) {
+        try {
+            const ctx = this.Draw && this.Draw.ctx;
+            const sheet = this.currentSprite;
+            if (!ctx || !sheet || !visible || !size || !basePos) return [];
+
+            const activeSet = this._tileActive || new Set();
+            const activeCount = activeSet.size || 0;
+            const minCol = visible.minCol | 0;
+            const maxCol = visible.maxCol | 0;
+            const minRow = visible.minRow | 0;
+            const maxRow = visible.maxRow | 0;
+            const visibleCols = Math.max(0, maxCol - minCol + 1);
+            const visibleRows = Math.max(0, maxRow - minRow + 1);
+            const visibleCount = visibleCols * visibleRows;
+            const iterateVisibleWindow = visibleCount > 0 && (activeCount === 0 || activeCount > (visibleCount * 2));
+
+            const frameCache = new Map();
+            const frameFor = (anim, frameIdx) => {
+                const k = `${anim || ''}::${Number(frameIdx) || 0}`;
+                if (frameCache.has(k)) return frameCache.get(k);
+                let fr = null;
+                try { fr = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null; } catch (e) { fr = null; }
+                frameCache.set(k, fr || null);
+                return fr;
+            };
+
+            const sx = size.x;
+            const sy = size.y;
+            const bx = basePos.x;
+            const by = basePos.y;
+            const scaleX = (this.Draw && this.Draw.Scale && Number.isFinite(this.Draw.Scale.x)) ? this.Draw.Scale.x : 1;
+            const scaleY = (this.Draw && this.Draw.Scale && Number.isFinite(this.Draw.Scale.y)) ? this.Draw.Scale.y : 1;
+            const bindings = Array.isArray(this._areaBindings) ? this._areaBindings : [];
+
+            const prevSmooth = ctx.imageSmoothingEnabled;
+            try { ctx.imageSmoothingEnabled = false; } catch (e) {}
+
+            const drawTileAt = (col, row, isActive) => {
+                const x = bx + col * sx;
+                const y = by + row * sy;
+                const dx = x * scaleX;
+                const dy = y * scaleY;
+                const dw = sx * scaleX;
+                const dh = sy * scaleY;
+                if (!isActive) {
+                    if (hoverCoord && col === hoverCoord.col && row === hoverCoord.row) {
+                        ctx.fillStyle = '#222222DD';
+                        ctx.fillRect(dx, dy, dw, dh);
+                        ctx.strokeStyle = '#000000AA';
+                        ctx.lineWidth = Math.max(1, Math.round(scaleX));
+                        ctx.strokeRect(dx + 0.5, dy + 0.5, Math.max(1, dw - 1), Math.max(1, dh - 1));
+                    }
+                    return;
+                }
+
+                const idx = this._getAreaIndexForCoord(col, row);
+                const binding = bindings[idx] || null;
+                const effAnim = (binding && binding.anim !== undefined) ? binding.anim : this.selectedAnimation;
+                const effFrame = (binding && binding.index !== undefined) ? binding.index : this.selectedFrame;
+                const fr = frameFor(effAnim, effFrame);
+                if (!fr) return;
+                ctx.drawImage(fr, dx, dy, dw, dh);
+            };
+
+            if (iterateVisibleWindow) {
+                for (let row = minRow; row <= maxRow; row++) {
+                    for (let col = minCol; col <= maxCol; col++) {
+                        const isActive = activeSet.has(`${col},${row}`);
+                        if (!isActive && !(hoverCoord && col === hoverCoord.col && row === hoverCoord.row)) continue;
+                        drawTileAt(col, row, isActive);
+                    }
+                }
+            } else {
+                const activeCoords = this._getActiveTileCoords();
+                for (let i = 0; i < activeCoords.length; i++) {
+                    const c = activeCoords[i];
+                    const col = c.col | 0;
+                    const row = c.row | 0;
+                    if (col < minCol || col > maxCol || row < minRow || row > maxRow) continue;
+                    drawTileAt(col, row, true);
+                }
+                if (hoverCoord) {
+                    const hk = `${hoverCoord.col|0},${hoverCoord.row|0}`;
+                    if (!activeSet.has(hk) && hoverCoord.col >= minCol && hoverCoord.col <= maxCol && hoverCoord.row >= minRow && hoverCoord.row <= maxRow) {
+                        drawTileAt(hoverCoord.col|0, hoverCoord.row|0, false);
+                    }
+                }
+            }
+
+            try { ctx.imageSmoothingEnabled = prevSmooth; } catch (e) {}
+
+            // Keep minimal draw-area metadata for hit resolution and UI overlays.
+            const areas = [];
+            if (hoverCoord && Number.isFinite(hoverCoord.col) && Number.isFinite(hoverCoord.row)) {
+                const hx = bx + hoverCoord.col * sx;
+                const hy = by + hoverCoord.row * sy;
+                const info = { topLeft: new Vector(hx, hy), size, padding: 0, dstW: sx, dstH: sy, dstPos: new Vector(hx, hy) };
+                info.renderOnly = true;
+                info.areaIndex = this._getAreaIndexForCoord(hoverCoord.col|0, hoverCoord.row|0);
+                info.tileCol = hoverCoord.col|0;
+                info.tileRow = hoverCoord.row|0;
+                info.active = !!this._isTileActive(info.tileCol, info.tileRow);
+                areas.push(info);
+            }
+            return areas;
+        } catch (e) {
+            return [];
+        }
+    }
+
     _shouldCullArea(area) {
         // Use fixed 1920x1080 screen for culling; skip render only when fully off-screen.
         const SCREEN_W = 1920;
@@ -8185,6 +8328,46 @@ export class SpriteScene extends Scene {
         const dstH = Math.max(1, size.y - padding * 2);
         const dstPos = new Vector(pos.x + (size.x - dstW) / 2, pos.y + (size.y - dstH) / 2);
         return { topLeft: pos, size, padding, dstW, dstH, dstPos };
+    }
+
+    _getCheckerboardCanvas(width, height, tileSize = null) {
+        try {
+            const w = Math.max(1, Math.ceil(Number(width) || 1));
+            const h = Math.max(1, Math.ceil(Number(height) || 1));
+            const ts = Math.max(1, Math.floor(Number(tileSize || this._checkerboardTileSize || 16)));
+            const light = this._checkerboardLight || '#3a3a3aff';
+            const dark = this._checkerboardDark || '#2e2e2eff';
+            const key = `${w}x${h}@${ts}:${light}:${dark}`;
+            if (this._checkerboardCache && this._checkerboardCache.has(key)) return this._checkerboardCache.get(key);
+
+            const base = document.createElement('canvas');
+            base.width = ts * 2;
+            base.height = ts * 2;
+            const bctx = base.getContext('2d');
+            if (!bctx) return null;
+            bctx.fillStyle = light;
+            bctx.fillRect(0, 0, ts, ts);
+            bctx.fillRect(ts, ts, ts, ts);
+            bctx.fillStyle = dark;
+            bctx.fillRect(ts, 0, ts, ts);
+            bctx.fillRect(0, ts, ts, ts);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return null;
+            const pattern = ctx.createPattern(base, 'repeat');
+            if (!pattern) return null;
+            ctx.fillStyle = pattern;
+            ctx.fillRect(0, 0, w, h);
+
+            if (!this._checkerboardCache) this._checkerboardCache = new Map();
+            this._checkerboardCache.set(key, canvas);
+            return canvas;
+        } catch (e) {
+            return null;
+        }
     }
 
     // Helpers to map between displayed (transformed) pixel coords and source pixel coords
@@ -8491,8 +8674,11 @@ export class SpriteScene extends Scene {
         // Build all displayed tile positions.
         // When tilemode is off, show a single central area.
         // When tilemode is on, draw all active tiles (infinite grid), plus the hovered tile even if inactive.
-        const areas = [];
+        let areas = [];
         const basePos = center.clone(); // tile (0,0) top-left
+        let usedFastRenderOnly = false;
+        let hover = null;
+        let visible = null;
 
         if (!this.tilemode) {
             const info = this.computeAreaInfo(basePos, size);
@@ -8507,7 +8693,9 @@ export class SpriteScene extends Scene {
         } else {
             if (!this._tileActive || this._tileActive.size === 0) this._seedTileActives();
             const seen = new Set();
-            const visible = this._getVisibleTileBounds(basePos, size, 1);
+            visible = this._getVisibleTileBounds(basePos, size, 1);
+            this._lastVisibleTileBounds = visible;
+            this._renderOnlyAllVisible = !!this._isSimTooSmall({ dstW: size.x, dstH: size.y });
             const addTileArea = (col, row, active=true) => {
                 if (col < visible.minCol || col > visible.maxCol || row < visible.minRow || row > visible.maxRow) return;
                 const key = this._tileKey(col, row);
@@ -8526,33 +8714,46 @@ export class SpriteScene extends Scene {
                 areas.push(info);
             };
 
-            // draw all active tiles
-            const activeCoords = this._getActiveTileCoords();
-            for (let i = 0; i < activeCoords.length; i++) {
-                const c = activeCoords[i];
-                addTileArea(c.col, c.row, true);
-            }
-
             // include hovered tile even if inactive
             const mp = this.mouse && this.mouse.pos ? this.mouse.pos : new Vector(0,0);
             let mx = mp.x || 0;
             let my = mp.y || 0;
             mx = mx / this.zoom.x - this.offset.x;
             my = my / this.zoom.y - this.offset.y;
-            const hover = this._worldToTileCoord(mx, my, basePos, size);
-            if (hover) addTileArea(hover.col, hover.row, this._isTileActive(hover.col, hover.row));
+            hover = this._worldToTileCoord(mx, my, basePos, size);
+
+            if (this._renderOnlyAllVisible) {
+                areas = this._drawRenderOnlyTileBatch(basePos, size, visible, hover);
+                usedFastRenderOnly = true;
+            } else {
+                // draw all active tiles
+                const activeCoords = this._getActiveTileCoords();
+                for (let i = 0; i < activeCoords.length; i++) {
+                    const c = activeCoords[i];
+                    addTileArea(c.col, c.row, true);
+                }
+
+                // include hovered tile even if inactive
+                if (hover) addTileArea(hover.col, hover.row, this._isTileActive(hover.col, hover.row));
+            }
         }
 
         this._drawAreas = areas;
 
+        if (!this.tilemode) this._renderOnlyAllVisible = false;
+
         // First pass: base layer (frame, checkerboard, labels)
-        for (const area of areas) {
-            this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'base');
+        if (!usedFastRenderOnly) {
+            for (const area of areas) {
+                this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'base');
+            }
         }
 
         // Second pass: overlays (cursor, selections, previews) to avoid being occluded by later tiles
-        for (const area of areas) {
-            if (area && !area.renderOnly) this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'overlay');
+        if (!usedFastRenderOnly) {
+            for (const area of areas) {
+                if (area && !area.renderOnly) this.displayDrawArea(area.topLeft, size, this.currentSprite, this.selectedAnimation, this.selectedFrame, area.areaIndex, area, 'overlay');
+            }
         }
         // Draw the global tile cursor / selection / paste preview once (not per-area)
         this._drawTileCursorOverlay();
@@ -8641,16 +8842,11 @@ export class SpriteScene extends Scene {
             // draw a subtle checkerboard background for transparency
             if (modeBase) {
                 if (!hideGrid) {
-                    const tile = 16;
-                    const cols = Math.ceil(size.x / tile);
-                    const rows = Math.ceil(size.y / tile);
-                    for (let y = 0; y < rows; y++) {
-                        for (let x = 0; x < cols; x++) {
-                            const px = pos.x + x * tile;
-                            const py = pos.y + y * tile;
-                            const isLight = ((x + y) % 2) === 0;
-                            this.Draw.rect(new Vector(px, py), new Vector(tile, tile), isLight ? '#3a3a3aff' : '#2e2e2eff', true);
-                        }
+                    const checker = this._getCheckerboardCanvas(size.x, size.y, this._checkerboardTileSize);
+                    if (checker && typeof this.Draw.image === 'function') {
+                        this.Draw.image(checker, pos, size, null, 0, 1, false);
+                    } else {
+                        this.Draw.rect(pos, size, this._checkerboardDark || '#2e2e2eff', true);
                     }
                 } else {
                     // flat fill to avoid drawing many rects when zoomed out
@@ -9240,6 +9436,7 @@ export class SpriteScene extends Scene {
     _drawTileCursorOverlay() {
         try {
             if (!this.tilemode) return;
+            const allRenderOnly = !!this._renderOnlyAllVisible;
             const baseArea = (typeof this.computeDrawArea === 'function') ? this.computeDrawArea() : null;
             if (!baseArea) return;
             const basePos = baseArea.topLeft;
@@ -9249,27 +9446,29 @@ export class SpriteScene extends Scene {
 
             // Draw selection outlines for selected tiles — only when relevant renderOnly areas exist
             try {
-                let showTileSelection = false;
+                let showTileSelection = !!(allRenderOnly && this._tileSelection && this._tileSelection.size > 0);
                 if (this._tileSelection && this._tileSelection.size > 0) {
-                    for (const key of this._tileSelection) {
-                        const c = this._parseTileKey(key);
-                        if (!c) continue;
-                        // try to find in current draw areas first
-                        const idx = this._getAreaIndexForCoord(c.col, c.row);
-                        let areaInfo = (Array.isArray(this._drawAreas) && typeof idx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === idx) : null;
-                        // fallback: compute area info from tile coords
-                        if (!areaInfo) {
-                            try {
-                                const pos = this._tileCoordToPos(c.col, c.row, basePos, tileSize);
-                                areaInfo = this.computeAreaInfo(pos, tileSize);
-                                if (areaInfo) areaInfo.renderOnly = this._isSimTooSmall(areaInfo);
-                            } catch (e) { areaInfo = null; }
+                    if (!allRenderOnly) {
+                        for (const key of this._tileSelection) {
+                            const c = this._parseTileKey(key);
+                            if (!c) continue;
+                            // try to find in current draw areas first
+                            const idx = this._getAreaIndexForCoord(c.col, c.row);
+                            let areaInfo = (Array.isArray(this._drawAreas) && typeof idx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === idx) : null;
+                            // fallback: compute area info from tile coords
+                            if (!areaInfo) {
+                                try {
+                                    const pos = this._tileCoordToPos(c.col, c.row, basePos, tileSize);
+                                    areaInfo = this.computeAreaInfo(pos, tileSize);
+                                    if (areaInfo) areaInfo.renderOnly = this._isSimTooSmall(areaInfo);
+                                } catch (e) { areaInfo = null; }
+                            }
+                            if (areaInfo && areaInfo.renderOnly) { showTileSelection = true; break; }
                         }
-                        if (areaInfo && areaInfo.renderOnly) { showTileSelection = true; break; }
                     }
                 }
                 // also allow selection drawing when anchor is over a renderOnly tile
-                if (!showTileSelection && anchor) {
+                if (!showTileSelection && anchor && !allRenderOnly) {
                     const aidx = this._getAreaIndexForCoord(anchor.col, anchor.row);
                     let ainfo = (Array.isArray(this._drawAreas) && typeof aidx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === aidx) : null;
                     if (!ainfo) {
@@ -9294,14 +9493,16 @@ export class SpriteScene extends Scene {
 
             // Tile cursor (single rect matching brush footprint) — only draw when anchor area is renderOnly
             if (anchor) {
-                let showCursor = false;
+                let showCursor = allRenderOnly;
                 try {
-                    const aidx = this._getAreaIndexForCoord(anchor.col, anchor.row);
-                    let ainfo = (Array.isArray(this._drawAreas) && typeof aidx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === aidx) : null;
-                    if (!ainfo) {
-                        try { const pos = this._tileCoordToPos(anchor.col, anchor.row, basePos, tileSize); ainfo = this.computeAreaInfo(pos, tileSize); if (ainfo) ainfo.renderOnly = this._isSimTooSmall(ainfo); } catch(e) { ainfo = null; }
+                    if (!allRenderOnly) {
+                        const aidx = this._getAreaIndexForCoord(anchor.col, anchor.row);
+                        let ainfo = (Array.isArray(this._drawAreas) && typeof aidx === 'number') ? this._drawAreas.find(a => a && a.areaIndex === aidx) : null;
+                        if (!ainfo) {
+                            try { const pos = this._tileCoordToPos(anchor.col, anchor.row, basePos, tileSize); ainfo = this.computeAreaInfo(pos, tileSize); if (ainfo) ainfo.renderOnly = this._isSimTooSmall(ainfo); } catch(e) { ainfo = null; }
+                        }
+                        if (ainfo && ainfo.renderOnly) showCursor = true;
                     }
-                    if (ainfo && ainfo.renderOnly) showCursor = true;
                 } catch (e) { showCursor = false; }
                 if (showCursor) {
                 const side = Math.max(1, Math.min(15, this.brushSize || 1));
