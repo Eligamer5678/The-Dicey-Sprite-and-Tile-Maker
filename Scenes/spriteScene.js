@@ -4207,22 +4207,19 @@ export class SpriteScene extends Scene {
             } catch (e) { /* ignore grow/shrink key errors */ }
 
             // set tool keys when we have a primary anchor point.
-            // Circles support an "even-centered" mode when 4 pixels are selected
-            // and brushSize === 2 (treated as a 2x2 center block).
+            // Circles support an "even-centered" mode when the selection is an
+            // exact 2x2 block (treated as a 2x2 center anchor).
             const hasSingleAnchor = (this.selectionPoints.length === 1);
-            const hasEvenCenterAnchor = (this.selectionPoints.length === 4 && this.brushSize === 2);
+            const hasEvenCenterAnchor = this._hasEvenCircleAnchor();
             // Tile-mode: use tile selection set instead of pixel selectionPoints
             const tileHasSingle = (this.tilemode && this._tileSelection && this._tileSelection.size === 1);
             if (hasSingleAnchor || hasEvenCenterAnchor || tileHasSingle) {
-                if (hasSingleAnchor && this.keys.pressed('l')) {
-                    if (this.stateController) this.stateController.setCurrentTool('line');
-                    else this.currentTool = 'line';
+                if (hasSingleAnchor) {
+                    this._handleLineCircleSpiralShortcut();
+                } else {
+                    this._shapeComboPending = null;
                 }
-                if (hasSingleAnchor && this.keys.pressed('b')) {
-                    if (this.stateController) this.stateController.setCurrentTool('box');
-                    else this.currentTool = 'box';
-                }
-                if (this.keys.pressed('o')) {
+                if (!hasSingleAnchor && hasEvenCenterAnchor && this.keys.pressed('o')) {
                     if (this.stateController) this.stateController.setCurrentTool('circle');
                     else this.currentTool = 'circle';
                 }
@@ -4329,9 +4326,11 @@ export class SpriteScene extends Scene {
                         try { if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.1); } catch (e) {}
                     }
                 }
+            } else {
+                this._shapeComboPending = null;
             }
 
-            // While a shape tool (line/box/circle) is active, Shift+Left click adds
+            // While a shape tool (line/box/circle/spiral/boxSpiral) is active, Shift+Left click adds
             // individual selection points along the shape instead of drawing.
             // The last added point becomes the new starting point for chaining.
             // While a shape tool (line/box/circle) is active, Shift+Left click
@@ -4358,13 +4357,18 @@ export class SpriteScene extends Scene {
                     } else {
                         const end = { x: pos.x, y: pos.y };
                         const filled = this.keys.held('Alt');
+                        const strokeWidth = this._getShapeStrokeWidth();
                         let pixels = [];
                         if (this.currentTool === 'line' && typeof this.computeLinePixels === 'function') {
-                            pixels = this.computeLinePixels(start, end) || [];
+                            pixels = this.computeLinePixels(start, end, strokeWidth) || [];
                         } else if (this.currentTool === 'box' && typeof this.computeBoxPixels === 'function') {
-                            pixels = this.computeBoxPixels(start, end, filled) || [];
+                            pixels = this.computeBoxPixels(start, end, filled, strokeWidth) || [];
                         } else if (this.currentTool === 'circle' && typeof this.computeCirclePixels === 'function') {
-                            pixels = this.computeCirclePixels(start, end, filled) || [];
+                            pixels = this.computeCirclePixels(start, end, filled, strokeWidth) || [];
+                        } else if (this.currentTool === 'spiral' && typeof this.computeSpiralPixels === 'function') {
+                            pixels = this.computeSpiralPixels(start, end, strokeWidth) || [];
+                        } else if (this.currentTool === 'boxSpiral' && typeof this.computeBoxSpiralPixels === 'function') {
+                            pixels = this.computeBoxSpiralPixels(start, end, strokeWidth) || [];
                         }
 
                         if (pixels && pixels.length) {
@@ -6082,9 +6086,139 @@ export class SpriteScene extends Scene {
         }
     }
 
+    _getShapeStrokeWidth() {
+        return Math.max(1, Math.min(15, this.brushSize || 1));
+    }
+
+    _hasEvenCircleAnchor() {
+        try {
+            if (!Array.isArray(this.selectionPoints) || this.selectionPoints.length !== 4) return false;
+            const pts = this.selectionPoints.filter(Boolean);
+            if (pts.length !== 4) return false;
+
+            const area = (typeof pts[0].areaIndex === 'number') ? pts[0].areaIndex : null;
+            for (const p of pts) {
+                const pa = (typeof p.areaIndex === 'number') ? p.areaIndex : null;
+                if (pa !== area) return false;
+            }
+
+            const xs = Array.from(new Set(pts.map(p => Number(p.x)))).sort((a, b) => a - b);
+            const ys = Array.from(new Set(pts.map(p => Number(p.y)))).sort((a, b) => a - b);
+            if (xs.length !== 2 || ys.length !== 2) return false;
+            if (Math.abs(xs[1] - xs[0]) !== 1 || Math.abs(ys[1] - ys[0]) !== 1) return false;
+
+            const keys = new Set(pts.map(p => `${p.x},${p.y}`));
+            return (
+                keys.has(`${xs[0]},${ys[0]}`) &&
+                keys.has(`${xs[1]},${ys[0]}`) &&
+                keys.has(`${xs[0]},${ys[1]}`) &&
+                keys.has(`${xs[1]},${ys[1]}`)
+            );
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _expandPixelsWithBrush(pixels, brushSize = 1) {
+        const side = Math.max(1, Math.min(15, Number(brushSize) || 1));
+        if (!Array.isArray(pixels) || pixels.length === 0) return [];
+        if (side <= 1) {
+            const seenBase = new Set();
+            const outBase = [];
+            for (const p of pixels) {
+                if (!p) continue;
+                const x = Math.round(p.x);
+                const y = Math.round(p.y);
+                const key = `${x},${y}`;
+                if (seenBase.has(key)) continue;
+                seenBase.add(key);
+                outBase.push({ x, y });
+            }
+            return outBase;
+        }
+
+        const half = Math.floor((side - 1) / 2);
+        const seen = new Set();
+        const expanded = [];
+        for (const p of pixels) {
+            if (!p) continue;
+            const bx = Math.round(p.x);
+            const by = Math.round(p.y);
+            for (let oy = 0; oy < side; oy++) {
+                for (let ox = 0; ox < side; ox++) {
+                    const x = bx + ox - half;
+                    const y = by + oy - half;
+                    const key = `${x},${y}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    expanded.push({ x, y });
+                }
+            }
+        }
+        return expanded;
+    }
+
+    _nowMs() {
+        try {
+            if (typeof performance !== 'undefined' && typeof performance.now === 'function') return performance.now();
+        } catch (e) {}
+        return Date.now();
+    }
+
+    _setCurrentShapeTool(toolName) {
+        if (!toolName) return;
+        if (this.stateController) this.stateController.setCurrentTool(toolName);
+        else this.currentTool = toolName;
+    }
+
+    _handleLineCircleSpiralShortcut() {
+        const now = this._nowMs();
+        const windowMs = 200;
+        const lPressed = !!(this.keys && typeof this.keys.pressed === 'function' && this.keys.pressed('l'));
+        const oPressed = !!(this.keys && typeof this.keys.pressed === 'function' && this.keys.pressed('o'));
+        const bPressed = !!(this.keys && typeof this.keys.pressed === 'function' && this.keys.pressed('b'));
+
+        if (lPressed && oPressed) {
+            this._shapeComboPending = null;
+            this._setCurrentShapeTool('spiral');
+            return;
+        }
+        if (lPressed && bPressed) {
+            this._shapeComboPending = null;
+            this._setCurrentShapeTool('boxSpiral');
+            return;
+        }
+
+        const handlePress = (key) => {
+            const pending = this._shapeComboPending;
+            if (pending && pending.key !== key && (now - pending.timeMs) <= windowMs) {
+                this._shapeComboPending = null;
+                const pair = [pending.key, key].sort().join('+');
+                if (pair === 'l+o') this._setCurrentShapeTool('spiral');
+                else if (pair === 'b+l') this._setCurrentShapeTool('boxSpiral');
+                else this._setCurrentShapeTool(key === 'b' ? 'box' : (key === 'o' ? 'circle' : 'line'));
+                return true;
+            }
+            this._shapeComboPending = { key, timeMs: now };
+            return false;
+        };
+
+        if (lPressed) handlePress('l');
+        if (oPressed) handlePress('o');
+        if (bPressed) handlePress('b');
+
+        const pending = this._shapeComboPending;
+        if (pending && (now - pending.timeMs) > windowMs) {
+            if (pending.key === 'l') this._setCurrentShapeTool('line');
+            else if (pending.key === 'o') this._setCurrentShapeTool('circle');
+            else if (pending.key === 'b') this._setCurrentShapeTool('box');
+            this._shapeComboPending = null;
+        }
+    }
+
     // Generate list of pixel coordinates for a Bresenham line between start and end
-    computeLinePixels(start, end) {
-        const pixels = [];
+    computeLinePixels(start, end, strokeWidth = 1) {
+        const basePixels = [];
         let x0 = start.x;
         let y0 = start.y;
         let x1 = end.x;
@@ -6096,13 +6230,125 @@ export class SpriteScene extends Scene {
         let err = dx - dy;
 
         while (true) {
-            pixels.push({ x: x0, y: y0 });
+            basePixels.push({ x: x0, y: y0 });
             if ((x0 === x1) && (y0 === y1)) break;
             let e2 = 2 * err;
             if (e2 > -dy) { err -= dy; x0 += sx; }
             if (e2 < dx) { err += dx; y0 += sy; }
         }
-        return pixels;
+        return this._expandPixelsWithBrush(basePixels, strokeWidth);
+    }
+
+    // Generate an Archimedean spiral path using polar form r = a * theta.
+    // `start` is center; `end` provides radius/direction hint.
+    computeSpiralPixels(start, end, strokeWidth = 1) {
+        const base = [];
+        if (!start || !end) return base;
+
+        const cx = Number(start.x);
+        const cy = Number(start.y);
+        const dx = Number(end.x) - cx;
+        const dy = Number(end.y) - cy;
+        const targetRadius = Math.max(0, Math.hypot(dx, dy));
+
+        if (targetRadius <= 0) {
+            return this._expandPixelsWithBrush([{ x: Math.round(cx), y: Math.round(cy) }], strokeWidth);
+        }
+
+        const twoPi = Math.PI * 2;
+        const targetAngle = ((Math.atan2(dy, dx) % twoPi) + twoPi) % twoPi;
+        // End on the target direction after at least one full turn.
+        const thetaMax = targetAngle + twoPi;
+        const a = targetRadius / Math.max(thetaMax, 1e-6);
+
+        const seen = new Set();
+        const add = (x, y) => {
+            const ix = Math.round(x);
+            const iy = Math.round(y);
+            const key = `${ix},${iy}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            base.push({ x: ix, y: iy });
+        };
+
+        let prev = { x: Math.round(cx), y: Math.round(cy) };
+        add(prev.x, prev.y);
+
+        const samplesPerRad = 24;
+        const steps = Math.max(24, Math.ceil(thetaMax * samplesPerRad));
+        for (let i = 1; i <= steps; i++) {
+            const t = (i / steps) * thetaMax;
+            const r = a * t;
+            const x = cx + r * Math.cos(t);
+            const y = cy + r * Math.sin(t);
+            const curr = { x: Math.round(x), y: Math.round(y) };
+            const seg = this.computeLinePixels(prev, curr, 1) || [];
+            for (const p of seg) add(p.x, p.y);
+            prev = curr;
+        }
+
+        return this._expandPixelsWithBrush(base, strokeWidth);
+    }
+
+    // Generate a square/box spiral path with 90-degree turns.
+    computeBoxSpiralPixels(start, end, strokeWidth = 1) {
+        const base = [];
+        if (!start || !end) return base;
+        const cx = Math.round(start.x);
+        const cy = Math.round(start.y);
+        const tx = Math.round(end.x);
+        const ty = Math.round(end.y);
+        const maxRadius = Math.max(0, Math.max(Math.abs(tx - cx), Math.abs(ty - cy)));
+        if (maxRadius <= 0) return this._expandPixelsWithBrush([{ x: cx, y: cy }], strokeWidth);
+
+        const seen = new Set();
+        const add = (x, y) => {
+            const key = `${x},${y}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+            base.push({ x, y });
+        };
+
+        // Exact sequence requested: 3,3,5,5,7,7... turning 90 degrees each segment.
+        // Segment length includes the current point, so movement is (len - 1) steps.
+        let dirIndex = 0; // start right
+        const dirs = [
+            { x: 1, y: 0 },
+            { x: 0, y: 1 },
+            { x: -1, y: 0 },
+            { x: 0, y: -1 }
+        ];
+
+        let x = cx;
+        let y = cy;
+        add(x, y);
+
+        let oddLen = 3;
+        let shouldStop = false;
+        const safeGuardMaxSegments = Math.max(16, maxRadius * 8);
+        let segCount = 0;
+
+        while (!shouldStop && segCount < safeGuardMaxSegments) {
+            for (let rep = 0; rep < 2 && !shouldStop; rep++) {
+                const dir = dirs[dirIndex];
+                const moveSteps = Math.max(1, oddLen - 1);
+                for (let s = 0; s < moveSteps; s++) {
+                    x += dir.x;
+                    y += dir.y;
+                    add(x, y);
+                    const r = Math.max(Math.abs(x - cx), Math.abs(y - cy));
+                    if (r >= maxRadius) {
+                        shouldStop = true;
+                        break;
+                    }
+                }
+                dirIndex = (dirIndex + 1) % 4;
+                segCount++;
+            }
+            oddLen += 2;
+        }
+
+        return this._expandPixelsWithBrush(base, strokeWidth);
     }
 
     // Check whether a pixel at (x,y) should be masked by explicit selectionPoints.
@@ -6129,7 +6375,7 @@ export class SpriteScene extends Scene {
 
     // Generate list of pixel coordinates for a box between start and end.
     // If filled is true, returns all pixels inside the rectangle, otherwise only the border.
-    computeBoxPixels(start, end, filled) {
+    computeBoxPixels(start, end, filled, strokeWidth = 1) {
         const pixels = [];
         const minX = Math.min(start.x, end.x);
         const minY = Math.min(start.y, end.y);
@@ -6152,7 +6398,8 @@ export class SpriteScene extends Scene {
                 if (maxX !== minX) pixels.push({ x: maxX, y });
             }
         }
-        return pixels;
+        if (filled) return pixels;
+        return this._expandPixelsWithBrush(pixels, strokeWidth);
     }
 
     // Generate list of pixel coordinates for a circle between start and end.
@@ -6160,10 +6407,10 @@ export class SpriteScene extends Scene {
     // is true, returns all pixels inside the circle **and** its border;
     // otherwise only the border.
     //
-    // When brushSize === 2 and exactly 4 selectionPoints exist, we treat those
-    // 4 pixels as a 2x2 center block and use their averaged center (e.g. 1.5,6.5)
+    // When selectionPoints form an exact 2x2 block, we treat those
+    // 4 pixels as a center block and use their averaged center (e.g. 1.5,6.5)
     // to produce an even-centered circle.
-    computeCirclePixels(start, end, filled) {
+    computeCirclePixels(start, end, filled, strokeWidth = 1) {
         const pixels = [];
         if (!start || !end) return pixels;
 
@@ -6171,11 +6418,11 @@ export class SpriteScene extends Scene {
         let cx = start.x;
         let cy = start.y;
 
-        // Even-centered mode: if the user has selected a 2x2 block (4 pixels)
-        // and brushSize is 2, use the average of those pixels as the circle
+        // Even-centered mode: if the user has selected an exact 2x2 block,
+        // use the average of those pixels as the circle
         // center so the circle is centered between pixels instead of on one.
         try {
-            if (this && this.brushSize === 2 && Array.isArray(this.selectionPoints) && this.selectionPoints.length === 4) {
+            if (this && typeof this._hasEvenCircleAnchor === 'function' && this._hasEvenCircleAnchor()) {
                 let sumX = 0, sumY = 0;
                 for (const p of this.selectionPoints) {
                     if (!p) continue;
@@ -6190,14 +6437,13 @@ export class SpriteScene extends Scene {
         const dy = end.y - cy;
         const r = Math.max(0, Math.round(Math.sqrt(dx * dx + dy * dy)));
         if (r === 0) {
-            pixels.push({ x: cx, y: cy });
-            return pixels;
+            return this._expandPixelsWithBrush([{ x: Math.round(cx), y: Math.round(cy) }], strokeWidth);
         }
 
-        const r2 = r * r;
-
-        // use a small band around r^2 for the outline thickness
-        const borderBand = Math.max(1, r);
+        const innerR = Math.max(0, r - 0.5);
+        const outerR = r + 0.5;
+        const innerR2 = innerR * innerR;
+        const outerR2 = outerR * outerR;
 
         // track pixels to avoid duplicates when combining fill + outline
         const seen = new Set();
@@ -6211,10 +6457,10 @@ export class SpriteScene extends Scene {
 
         // Scan a bounding box around the circle and select pixels whose
         // distance from center is near the radius (border) or inside (filled).
-        const minX = Math.floor(cx - r);
-        const maxX = Math.ceil(cx + r);
-        const minY = Math.floor(cy - r);
-        const maxY = Math.ceil(cy + r);
+        const minX = Math.floor(cx - outerR);
+        const maxX = Math.ceil(cx + outerR);
+        const minY = Math.floor(cy - outerR);
+        const maxY = Math.ceil(cy + outerR);
 
         for (let y = minY; y <= maxY; y++) {
             for (let x = minX; x <= maxX; x++) {
@@ -6223,22 +6469,18 @@ export class SpriteScene extends Scene {
                 const dist2 = ddx * ddx + ddy * ddy;
 
                 if (!filled) {
-                    // outline-only: accept pixels whose distance^2 is close to r^2
-                    if (dist2 >= r2 - borderBand && dist2 <= r2 + borderBand) {
+                    if (dist2 >= innerR2 && dist2 <= outerR2) {
                         addPixel(x, y);
                     }
                 } else {
-                    // filled: include interior AND outline band
-                    if (dist2 <= r2) {
-                        addPixel(x, y);
-                    }
-                    if (dist2 >= r2 - borderBand && dist2 <= r2 + borderBand) {
+                    if (dist2 <= outerR2) {
                         addPixel(x, y);
                     }
                 }
             }
         }
-        return pixels;
+        if (filled) return pixels;
+        return this._expandPixelsWithBrush(pixels, strokeWidth);
     }
 
     _selectionPointToWorld(pt) {
@@ -6411,13 +6653,18 @@ export class SpriteScene extends Scene {
             if (!tool) return;
 
             const filled = this.keys.held('Alt');
+            const strokeWidth = this._getShapeStrokeWidth();
             let pixels = [];
             if (tool === 'line') {
-                pixels = this.computeLinePixels(start, end);
+                pixels = this.computeLinePixels(start, end, strokeWidth);
             } else if (tool === 'box') {
-                pixels = this.computeBoxPixels(start, end, filled);
+                pixels = this.computeBoxPixels(start, end, filled, strokeWidth);
             } else if (tool === 'circle' && typeof this.computeCirclePixels === 'function') {
-                pixels = this.computeCirclePixels(start, end, filled);
+                pixels = this.computeCirclePixels(start, end, filled, strokeWidth);
+            } else if (tool === 'spiral' && typeof this.computeSpiralPixels === 'function') {
+                pixels = this.computeSpiralPixels(start, end, strokeWidth);
+            } else if (tool === 'boxSpiral' && typeof this.computeBoxSpiralPixels === 'function') {
+                pixels = this.computeBoxSpiralPixels(start, end, strokeWidth);
             }
 
             if (!pixels || pixels.length === 0) return;
@@ -10917,12 +11164,33 @@ export class SpriteScene extends Scene {
                     // For circles, allow preview with either a single anchor pixel
                     // or an even-centered 2x2 anchor (4 pixels). In both cases we
                     // pass the first point; computeCirclePixels will adjust center
-                    // when 4 points + brushSize == 2.
+                    // when the selection is a 2x2 even anchor.
                     const start = this.selectionPoints[0];
                     const end = mousePixelPos;
                     const filled = this.keys.held('Alt');
-                    const circlePixels = this.computeCirclePixels(start, end, filled) || [];
+                    const strokeWidth = this._getShapeStrokeWidth();
+                    const circlePixels = this.computeCirclePixels(start, end, filled, strokeWidth) || [];
                     for (const p of circlePixels) {
+                        const cellX = dstPos.x + p.x * cellW;
+                        const cellY = dstPos.y + p.y * cellH;
+                        this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), previewFillColor, true);
+                    }
+                } else if (this.currentTool === 'spiral' && this.selectionPoints && this.selectionPoints.length > 0 && typeof this.computeSpiralPixels === 'function') {
+                    const start = this.selectionPoints[0];
+                    const end = mousePixelPos;
+                    const strokeWidth = this._getShapeStrokeWidth();
+                    const spiralPixels = this.computeSpiralPixels(start, end, strokeWidth) || [];
+                    for (const p of spiralPixels) {
+                        const cellX = dstPos.x + p.x * cellW;
+                        const cellY = dstPos.y + p.y * cellH;
+                        this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), previewFillColor, true);
+                    }
+                } else if (this.currentTool === 'boxSpiral' && this.selectionPoints && this.selectionPoints.length > 0 && typeof this.computeBoxSpiralPixels === 'function') {
+                    const start = this.selectionPoints[0];
+                    const end = mousePixelPos;
+                    const strokeWidth = this._getShapeStrokeWidth();
+                    const spiralPixels = this.computeBoxSpiralPixels(start, end, strokeWidth) || [];
+                    for (const p of spiralPixels) {
                         const cellX = dstPos.x + p.x * cellW;
                         const cellY = dstPos.y + p.y * cellH;
                         this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), previewFillColor, true);
@@ -10954,49 +11222,15 @@ export class SpriteScene extends Scene {
     }
 
     drawLine(start, end, color) {
-        // Bresenham's line algorithm
-        let x0 = start.x;
-        let y0 = start.y;
-        let x1 = end.x;
-        let y1 = end.y;
-        let dx = Math.abs(x1 - x0);
-        let dy = Math.abs(y1 - y0);
-        let sx = (x0 < x1) ? 1 : -1;
-        let sy = (y0 < y1) ? 1 : -1;
-        let err = dx - dy;
-
-        while (true) {
-            this.drawPixel(x0, y0, color);
-
-            if ((x0 === x1) && (y0 === y1)) break;
-            let e2 = 2 * err;
-            if (e2 > -dy) { err -= dy; x0 += sx; }
-            if (e2 < dx) { err += dx; y0 += sy; }
-        }
+        const strokeWidth = this._getShapeStrokeWidth();
+        const pixels = this.computeLinePixels(start, end, strokeWidth) || [];
+        for (const p of pixels) this.drawPixel(p.x, p.y, color);
     }
 
     drawBox(start, end, color, filled) {
-        const minX = Math.min(start.x, end.x);
-        const minY = Math.min(start.y, end.y);
-        const maxX = Math.max(start.x, end.x);
-        const maxY = Math.max(start.y, end.y);
-
-        if (filled) {
-            for (let y = minY; y <= maxY; y++) {
-                for (let x = minX; x <= maxX; x++) {
-                    this.drawPixel(x, y, color);
-                }
-            }
-        } else {
-            for (let x = minX; x <= maxX; x++) {
-                this.drawPixel(x, minY, color);
-                this.drawPixel(x, maxY, color);
-            }
-            for (let y = minY + 1; y < maxY; y++) {
-                this.drawPixel(minX, y, color);
-                this.drawPixel(maxX, y, color);
-            }
-        }
+        const strokeWidth = this._getShapeStrokeWidth();
+        const pixels = this.computeBoxPixels(start, end, filled, strokeWidth) || [];
+        for (const p of pixels) this.drawPixel(p.x, p.y, color);
     }
 
     drawPixel(x, y, color) {
