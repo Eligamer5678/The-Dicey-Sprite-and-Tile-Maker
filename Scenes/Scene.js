@@ -83,6 +83,7 @@ export default class Scene {
         if (this.BackgroundImages) resources.set('backgrounds', this.BackgroundImages);
         if (this.SpriteImages) resources.set('sprites', this.SpriteImages);
         if (this.soundGuy) resources.set('soundguy', this.soundGuy);
+        if (this.sfx) resources.set('sfx', this.sfx);
         if (this.musician) resources.set('musician', this.musician);
         if (this.conductor) resources.set('conductor', this.conductor);
         if (this.narrator) resources.set('narrator', this.narrator);
@@ -102,6 +103,7 @@ export default class Scene {
                 case 'backgrounds': this.BackgroundImages = value; break;
                 case 'sprites': this.SpriteImages = value; break;
                 case 'soundguy': this.soundGuy = value; break;
+                case 'sfx': this.sfx = value; break;
                 case 'musician': this.musician = value; break;
                 case 'conductor': this.conductor = value; break;
                 case 'narrator': this.narrator = value; break;

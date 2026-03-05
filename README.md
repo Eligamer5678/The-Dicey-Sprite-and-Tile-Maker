@@ -85,20 +85,35 @@
 - Press space to toggle tile placement
 
 - **Online colab**
-- Type enableColab() into the built in console.
-- Click create/join/the text box. Clicking anywhere else will make the menu disapear.
-- You can type name(Username) to make your cursor show your username.
-- msg() to message players.
+- Click the arrow on the bottom-right to open the colab menu.
+- For a host, just click create. To join a session, type in the code the host created.
+- Click track to follow a players camera
 
-- **Latest update** - as of 2/9/26
-- Made f do fill selected when stuff is selected, as alt+s felt unintuitive
-- Make ; grow selection & ' shrink selection
+- **Latest update** - as of 3/4/26
+- Gradient fill selected (F to fill selected, + n for noise = gradient noise fill)
+- Added short & satisfying fill & select animations to spritesheet mode. 
+- Camera now locks to 0,0 when exiting tilemode, goes to previous position upon reentering
+- New file formats! .tmx (tiled), .gif, .jpeg, and upscaling prompt for png/gif/jpeg
+- Some sound effects added. 
+- Proper multiplayer menu
+- Pallet swapping
+- Fixed sub-pixel rounding causing gaps between tiles
+- Added grow/shink selection with [ & ]
+- Cursor tracking online - cursors use pixel/tile rect instead of mouse pos now.
+- Tilemap sync online
+- Basic sprite/animated tile intergration (still indev)
+- Stronger backend framework, as I swapped it from pure firebase to webRTC colab.
+- Hold shift while using shape tools to select shape
+- Fixed mouse masking issues on UI
+- Auto-tiling & click edges of frames to adjust connections
+- MAJOR optimization of tile rendering, 95% of the lag is gone.
+
+
 
 - **Features in development**
 - Improved UI
 - Selection keyframing, including non 90 degree rotation & flip values
 - Multiple tilemaps & tilemap controls
-- Synced tilemaps in online colab 
-- In-game simulation in tilemode (this will make the previous tilemap maker obsolete, and thus it will be removed)
+- In-game simulation in tilemode (1/2 complete - sprites added)
 
 

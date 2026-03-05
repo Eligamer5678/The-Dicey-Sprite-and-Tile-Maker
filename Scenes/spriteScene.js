@@ -712,42 +712,254 @@ export class SpriteScene extends Scene {
                     } catch (e) { /* ignore write errors */ }
                 };
 
-                // If explicit point selection exists, use those points (respect areaIndex per-point)
+    // Immediate apply of drawSelected (no long animation). Accepts options to
+    // perform a brief UI flair (fade + noise) before or during write.
+    this._applyDrawSelectedImmediate = function(opts = {}) {
+        try {
+            const flairMs = (opts && Number.isFinite(opts.flairMs)) ? Number(opts.flairMs) : 0;
+            const noise = (opts && typeof opts.noise === 'number') ? opts.noise : 0;
+            const sheet = this.currentSprite;
+            if (!sheet) return;
+            const colorHex = this.penColor || '#000000';
+            // If flair requested, perform a quick staged write: small alpha ramp over flairMs
+            if (flairMs > 16) {
+                // build list of target pixels
+                const targets = [];
                 if (this.selectionPoints && this.selectionPoints.length > 0) {
-                    for (const p of this.selectionPoints) {
-                        if (!p) continue;
-                        let anim = this.selectedAnimation;
-                        let frameIdx = this.selectedFrame;
-                        if (this.tilemode && p && typeof p.areaIndex === 'number') {
-                            const binding = this.getAreaBinding(p.areaIndex);
-                            if (binding && binding.anim !== undefined && binding.index !== undefined) {
-                                anim = binding.anim;
-                                frameIdx = Number(binding.index);
-                            }
-                        }
-                        writePixel(anim, frameIdx, p.x, p.y);
-                    }
+                    for (const p of this.selectionPoints) targets.push({ x: p.x, y: p.y, anim: this.selectedAnimation, frameIdx: this.selectedFrame, areaIndex: p.areaIndex });
                 } else if (this.selectionRegion) {
-                    // region selection: paint every pixel inside the region
                     const sr = this.selectionRegion;
                     const minX = Math.min(sr.start.x, sr.end.x);
                     const minY = Math.min(sr.start.y, sr.end.y);
                     const maxX = Math.max(sr.start.x, sr.end.x);
                     const maxY = Math.max(sr.start.y, sr.end.y);
-                    // prefer region's areaIndex if present
-                    let anim = this.selectedAnimation;
-                    let frameIdx = this.selectedFrame;
+                    let anim = this.selectedAnimation, frameIdx = this.selectedFrame;
                     if (this.tilemode && sr && typeof sr.areaIndex === 'number') {
                         const binding = this.getAreaBinding(sr.areaIndex);
-                        if (binding && binding.anim !== undefined && binding.index !== undefined) {
-                            anim = binding.anim;
-                            frameIdx = Number(binding.index);
-                        }
+                        if (binding && binding.anim !== undefined && binding.index !== undefined) { anim = binding.anim; frameIdx = Number(binding.index); }
                     }
-                    for (let yy = minY; yy <= maxY; yy++) {
-                        for (let xx = minX; xx <= maxX; xx++) {
-                            writePixel(anim, frameIdx, xx, yy);
+                    for (let yy = minY; yy <= maxY; yy++) for (let xx = minX; xx <= maxX; xx++) targets.push({ x: xx, y: yy, anim, frameIdx });
+                }
+                if (!targets.length) return;
+                const steps = Math.max(2, Math.min(6, Math.ceil(flairMs / 40)));
+                const stepDelay = Math.round(flairMs / steps);
+                for (let s = 1; s <= steps; s++) {
+                    setTimeout(() => {
+                        try {
+                            const alpha = s / steps;
+                            for (const t of targets) {
+                                const anim = t.anim || this.selectedAnimation;
+                                const frameIdx = (t.frameIdx !== undefined) ? t.frameIdx : this.selectedFrame;
+                                // apply a noisy mix between original and target color by using random alpha tweak
+                                const jitter = (Math.random() - 0.5) * (noise || 0);
+                                const mix = Math.max(0, Math.min(1, alpha + jitter));
+                                const col = Color.convertColor(colorHex).toRgb();
+                                const r = Math.round((col.a || 0) * mix);
+                                const g = Math.round((col.b || 0) * mix);
+                                const b = Math.round((col.c || 0) * mix);
+                                const a = Math.round(((col.d === undefined) ? 1 : (col.d || 0)) * 255 * mix);
+                                try { if (typeof sheet.setPixel === 'function') sheet.setPixel(anim, frameIdx, t.x, t.y, this.rgbaToHex(r, g, b, a), 'replace');
+                                        else {
+                                            const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                                            if (frameCanvas) {
+                                                const ctx = frameCanvas.getContext('2d');
+                                                ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + (a/255) + ')';
+                                                ctx.fillRect(t.x, t.y, 1, 1);
+                                            }
+                                        }
+                                } catch (e) {}
+                            }
+                            if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                        } catch (e) {}
+                    }, s * stepDelay);
+                }
+                // ensure final exact color at end
+                setTimeout(() => {
+                    try {
+                        for (const t of targets) {
+                            const anim = t.anim || this.selectedAnimation;
+                            const frameIdx = (t.frameIdx !== undefined) ? t.frameIdx : this.selectedFrame;
+                            try { if (typeof sheet.setPixel === 'function') sheet.setPixel(anim, frameIdx, t.x, t.y, colorHex, 'replace');
+                                    else {
+                                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                                        if (frameCanvas) {
+                                            const ctx = frameCanvas.getContext('2d');
+                                            const col = Color.convertColor(colorHex).toRgb();
+                                            const r = Math.round(col.a || 0);
+                                            const g = Math.round(col.b || 0);
+                                            const b = Math.round(col.c || 0);
+                                            const a = ((col.d === undefined) ? 1 : (col.d || 0));
+                                            ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+                                            ctx.fillRect(t.x, t.y, 1, 1);
+                                        }
+                                    }
+                            } catch (e) {}
                         }
+                        if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                    } catch (e) {}
+                }, flairMs + 10);
+                return;
+            }
+            // No flair requested: immediate write
+            if (this.selectionPoints && this.selectionPoints.length > 0) {
+                for (const p of this.selectionPoints) {
+                    let anim = this.selectedAnimation;
+                    let frameIdx = this.selectedFrame;
+                    if (this.tilemode && p && typeof p.areaIndex === 'number') {
+                        const binding = this.getAreaBinding(p.areaIndex);
+                        if (binding && binding.anim !== undefined && binding.index !== undefined) { anim = binding.anim; frameIdx = Number(binding.index); }
+                    }
+                    try { if (typeof sheet.setPixel === 'function') sheet.setPixel(anim, frameIdx, p.x, p.y, colorHex, 'replace');
+                            else {
+                                const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                                if (frameCanvas) {
+                                    const ctx = frameCanvas.getContext('2d');
+                                    const col = Color.convertColor(colorHex).toRgb();
+                                    const r = Math.round(col.a || 0);
+                                    const g = Math.round(col.b || 0);
+                                    const b = Math.round(col.c || 0);
+                                    const a = ((col.d === undefined) ? 1 : (col.d || 0));
+                                    ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+                                    ctx.fillRect(p.x, p.y, 1, 1);
+                                }
+                            }
+                    } catch (e) {}
+                }
+            } else if (this.selectionRegion) {
+                const sr = this.selectionRegion;
+                const minX = Math.min(sr.start.x, sr.end.x);
+                const minY = Math.min(sr.start.y, sr.end.y);
+                const maxX = Math.max(sr.start.x, sr.end.x);
+                const maxY = Math.max(sr.start.y, sr.end.y);
+                let anim = this.selectedAnimation;
+                let frameIdx = this.selectedFrame;
+                if (this.tilemode && sr && typeof sr.areaIndex === 'number') {
+                    const binding = this.getAreaBinding(sr.areaIndex);
+                    if (binding && binding.anim !== undefined && binding.index !== undefined) { anim = binding.anim; frameIdx = Number(binding.index); }
+                }
+                for (let yy = minY; yy <= maxY; yy++) for (let xx = minX; xx <= maxX; xx++) {
+                    try { if (typeof sheet.setPixel === 'function') sheet.setPixel(anim, frameIdx, xx, yy, colorHex, 'replace');
+                            else {
+                                const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                                if (frameCanvas) {
+                                    const ctx = frameCanvas.getContext('2d');
+                                    const col = Color.convertColor(colorHex).toRgb();
+                                    const r = Math.round(col.a || 0);
+                                    const g = Math.round(col.b || 0);
+                                    const b = Math.round(col.c || 0);
+                                    const a = ((col.d === undefined) ? 1 : (col.d || 0));
+                                    ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+                                    ctx.fillRect(xx, yy, 1, 1);
+                                }
+                            }
+                    } catch (e) {}
+                }
+            }
+            if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
+        } catch (e) { /* ignore */ }
+    }
+
+                // If explicit point selection exists, use those points (respect areaIndex per-point)
+                if (this.selectionPoints && this.selectionPoints.length > 0) {
+                    try {
+                        // Gather pixels grouped by anim/frame so we can read originals efficiently
+                        const groups = new Map();
+                        for (const p of this.selectionPoints) {
+                            if (!p) continue;
+                            let anim = this.selectedAnimation;
+                            let frameIdx = this.selectedFrame;
+                            if (this.tilemode && p && typeof p.areaIndex === 'number') {
+                                const binding = this.getAreaBinding(p.areaIndex);
+                                if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                                    anim = binding.anim;
+                                    frameIdx = Number(binding.index);
+                                }
+                            }
+                            const key = anim + ':' + frameIdx;
+                            if (!groups.has(key)) groups.set(key, { anim, frameIdx, pts: [] });
+                            groups.get(key).pts.push(p);
+                        }
+                        for (const g of groups.values()) {
+                            const frameCanvas = (typeof this.currentSprite.getFrame === 'function') ? this.currentSprite.getFrame(g.anim, g.frameIdx) : null;
+                            const entries = [];
+                            if (frameCanvas) {
+                                const ctx = frameCanvas.getContext('2d');
+                                let img = null;
+                                try { img = ctx.getImageData(0, 0, frameCanvas.width, frameCanvas.height); } catch (e) { img = null; }
+                                for (const p of g.pts) {
+                                    const x = p.x, y = p.y;
+                                    let r=0,gc=0,b=0,a=0;
+                                    if (img) {
+                                        const idx = (y * img.width + x) * 4;
+                                        r = img.data[idx]; gc = img.data[idx+1]; b = img.data[idx+2]; a = img.data[idx+3];
+                                    }
+                                    entries.push({ x, y, r, g: gc, b, a, anim: g.anim, frameIdx: g.frameIdx });
+                                }
+                            } else {
+                                for (const p of g.pts) entries.push({ x: p.x, y: p.y, r:0, g:0, b:0, a:0, anim: g.anim, frameIdx: g.frameIdx });
+                            }
+                            // animate gradient fill with noise from cursor position
+                            const pos = this.getPos(this.mouse && this.mouse.pos) || {};
+                            const origin = (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) ? { ox: pos.x, oy: pos.y } : null;
+                            this._animateFillSelected(entries, g.anim, g.frameIdx, 220, origin);
+                        }
+                    } catch (e) {
+                        // fallback to immediate write on failure
+                        for (const p of this.selectionPoints) { if (!p) continue; let anim = this.selectedAnimation; let frameIdx = this.selectedFrame; if (this.tilemode && p && typeof p.areaIndex === 'number') { const binding = this.getAreaBinding(p.areaIndex); if (binding && binding.anim !== undefined && binding.index !== undefined) { anim = binding.anim; frameIdx = Number(binding.index); } } writePixel(anim, frameIdx, p.x, p.y); }
+                    }
+                } else if (this.selectionRegion) {
+                    try {
+                        const sr = this.selectionRegion;
+                        const minX = Math.min(sr.start.x, sr.end.x);
+                        const minY = Math.min(sr.start.y, sr.end.y);
+                        const maxX = Math.max(sr.start.x, sr.end.x);
+                        const maxY = Math.max(sr.start.y, sr.end.y);
+                        // prefer region's areaIndex if present
+                        let anim = this.selectedAnimation;
+                        let frameIdx = this.selectedFrame;
+                        if (this.tilemode && sr && typeof sr.areaIndex === 'number') {
+                            const binding = this.getAreaBinding(sr.areaIndex);
+                            if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                                anim = binding.anim;
+                                frameIdx = Number(binding.index);
+                            }
+                        }
+                        const frameCanvas = (typeof this.currentSprite.getFrame === 'function') ? this.currentSprite.getFrame(anim, frameIdx) : null;
+                        const entries = [];
+                        if (frameCanvas) {
+                            const ctx = frameCanvas.getContext('2d');
+                            let img = null;
+                            try { img = ctx.getImageData(minX, minY, maxX - minX + 1, maxY - minY + 1); } catch (e) { img = null; }
+                            for (let yy = minY; yy <= maxY; yy++) {
+                                for (let xx = minX; xx <= maxX; xx++) {
+                                    let r=0,gc=0,b=0,a=0;
+                                    if (img) {
+                                        const lx = xx - minX, ly = yy - minY;
+                                        const idx = (ly * img.width + lx) * 4;
+                                        r = img.data[idx]; gc = img.data[idx+1]; b = img.data[idx+2]; a = img.data[idx+3];
+                                    }
+                                    entries.push({ x: xx, y: yy, r, g: gc, b, a, anim, frameIdx });
+                                }
+                            }
+                        } else {
+                            for (let yy = minY; yy <= maxY; yy++) for (let xx = minX; xx <= maxX; xx++) entries.push({ x: xx, y: yy, r:0, g:0, b:0, a:0, anim, frameIdx });
+                        }
+                        const pos = this.getPos(this.mouse && this.mouse.pos) || {};
+                        const origin = (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) ? { ox: pos.x, oy: pos.y } : null;
+                        this._animateFillSelected(entries, anim, frameIdx, 220, origin);
+                    } catch (e) {
+                        // fallback: immediate region paint
+                        const sr = this.selectionRegion;
+                        const minX = Math.min(sr.start.x, sr.end.x);
+                        const minY = Math.min(sr.start.y, sr.end.y);
+                        const maxX = Math.max(sr.start.x, sr.end.x);
+                        const maxY = Math.max(sr.start.y, sr.end.y);
+                        let anim = this.selectedAnimation; let frameIdx = this.selectedFrame;
+                        if (this.tilemode && sr && typeof sr.areaIndex === 'number') {
+                            const binding = this.getAreaBinding(sr.areaIndex);
+                            if (binding && binding.anim !== undefined && binding.index !== undefined) { anim = binding.anim; frameIdx = Number(binding.index); }
+                        }
+                        for (let yy = minY; yy <= maxY; yy++) for (let xx = minX; xx <= maxX; xx++) writePixel(anim, frameIdx, xx, yy);
                     }
                 } else {
                     window.Debug && window.Debug.log && window.Debug.log('drawSelected: no selection to draw into');
@@ -1742,6 +1954,85 @@ export class SpriteScene extends Scene {
         return;
     }
 
+    _playSfx(slot, opts) {
+        try {
+            if (this.sfx && typeof this.sfx.play === 'function') return this.sfx.play(slot, opts);
+        } catch (e) {
+            /* ignore */
+        }
+        return null;
+    }
+
+    _playBrushSizeSfx(prev, next) {
+        const a = Number(prev) || 1;
+        const b = Number(next) || 1;
+        const diff = Math.abs(b - a);
+        if (!Number.isFinite(diff) || diff <= 0) return;
+        // Small base volume with a bump for big jumps.
+        const volume = Math.max(0.12, Math.min(1, 0.18 + diff * 0.12));
+        this._playSfx('brush.size', { volume });
+    }
+
+    _anyWorldPixelWouldChange(worldPixels, targetHex) {
+        try {
+            if (!this.currentSprite || !Array.isArray(worldPixels) || worldPixels.length === 0) return false;
+            const sheet = this.currentSprite;
+            const slice = sheet.slicePx || 1;
+            const rgba = Color.convertColor(targetHex || '#000000').toRgb();
+            const tr = Math.round(rgba.a || 0);
+            const tg = Math.round(rgba.b || 0);
+            const tb = Math.round(rgba.c || 0);
+            const ta = Math.round((rgba.d ?? 1) * 255);
+
+            const cache = new Map(); // key -> { data, w, h }
+            const getFrameData = (anim, frameIdx) => {
+                const key = String(anim) + '::' + String(frameIdx);
+                if (cache.has(key)) return cache.get(key);
+                const frame = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                if (!frame || !frame.getContext) { cache.set(key, null); return null; }
+                const ctx = frame.getContext('2d');
+                let img = null;
+                try { img = ctx.getImageData(0, 0, frame.width, frame.height); } catch (e) { img = null; }
+                const entry = img ? { data: img.data, w: frame.width, h: frame.height } : null;
+                cache.set(key, entry);
+                return entry;
+            };
+
+            for (const wp of worldPixels) {
+                if (!wp) continue;
+                const wx = Number(wp.x);
+                const wy = Number(wp.y);
+                if (!Number.isFinite(wx) || !Number.isFinite(wy)) continue;
+                const t = this._worldPixelToTile(wx, wy, slice);
+                if (!t) continue;
+                if (this.tilemode && !this._isTileActive(t.col, t.row)) continue;
+
+                let anim = this.selectedAnimation;
+                let frameIdx = this.selectedFrame;
+                if (this.tilemode && typeof t.areaIndex === 'number') {
+                    const bnd = this.getAreaBinding(t.areaIndex);
+                    if (bnd && bnd.anim !== undefined && bnd.index !== undefined) {
+                        anim = bnd.anim;
+                        frameIdx = Number(bnd.index);
+                    }
+                }
+
+                const fd = getFrameData(anim, frameIdx);
+                if (!fd) continue;
+                const lx = t.localX | 0;
+                const ly = t.localY | 0;
+                if (lx < 0 || ly < 0 || lx >= fd.w || ly >= fd.h) continue;
+                const idx = (ly * fd.w + lx) * 4;
+                if (fd.data[idx] !== tr || fd.data[idx + 1] !== tg || fd.data[idx + 2] !== tb || fd.data[idx + 3] !== ta) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (e) {
+            return true; // fail open: better to play than to miss in weird states
+        }
+    }
+
     _startCameraOffsetTween(targetOffset, durationSec = 0.28, targetZoom = null) {
         try {
             const target = (targetOffset && typeof targetOffset.x === 'number' && typeof targetOffset.y === 'number')
@@ -1859,6 +2150,7 @@ export class SpriteScene extends Scene {
 
     // tick handler: called by Scene.tick() via sceneTick
     sceneTick(tickDelta){
+        this._sceneTime = (this._sceneTime || 0) + (tickDelta || 0);
         this.mouse.update(tickDelta)
         this.keys.update(tickDelta)
         try {
@@ -1923,22 +2215,24 @@ export class SpriteScene extends Scene {
                     this._clipboardBrushActive = false;
                 }
             } else if (numPressedThisFrame && !this.keys.held('Shift')) {
+                const prevBrushSize = Number(this.brushSize) || 1;
                 let total = 0;
                 for (const k of numKeys) {
                     if (this.keys.pressed(k) || this.keys.held(k)) total += numKeyMap[k] || 0;
                 }
                 if (this.stateController) this.stateController.setBrushSize(total || 1);
                 else this.brushSize = Math.max(1, Math.min(15, total || 1));
+                try { this._playBrushSizeSfx(prevBrushSize, Number(this.brushSize) || 1); } catch (e) {}
                 this._clipboardBrushActive = false;
             }
 
             // Reset latch when Shift is not held to allow future activations
             if (!this.keys.held('Shift')) this._clipboardBrushFired = false;
 
-            if (this.keys.released('6')) this.stateController ? this.stateController.setAdjustChannel('h') : this.modifyState('h',true,true,["brush","pixelBrush","channel"]);
-            if (this.keys.released('7')) this.stateController ? this.stateController.setAdjustChannel('s') : this.modifyState('s',true,true,["brush","pixelBrush","channel"]);
-            if (this.keys.released('8')) this.stateController ? this.stateController.setAdjustChannel('v') : this.modifyState('v',true,true,["brush","pixelBrush","channel"]);
-            if (this.keys.released('9')) this.stateController ? this.stateController.setAdjustChannel('a') : this.modifyState('a',true,true,["brush","pixelBrush","channel"]);
+            if (this.keys.released('6')) { this.stateController ? this.stateController.setAdjustChannel('h') : this.modifyState('h',true,true,["brush","pixelBrush","channel"]); try { this._playSfx('color.channel'); } catch (e) {} }
+            if (this.keys.released('7')) { this.stateController ? this.stateController.setAdjustChannel('s') : this.modifyState('s',true,true,["brush","pixelBrush","channel"]); try { this._playSfx('color.channel'); } catch (e) {} }
+            if (this.keys.released('8')) { this.stateController ? this.stateController.setAdjustChannel('v') : this.modifyState('v',true,true,["brush","pixelBrush","channel"]); try { this._playSfx('color.channel'); } catch (e) {} }
+            if (this.keys.released('9')) { this.stateController ? this.stateController.setAdjustChannel('a') : this.modifyState('a',true,true,["brush","pixelBrush","channel"]); try { this._playSfx('color.channel'); } catch (e) {} }
 
             // Arrow left/right step selected frame within the current animation.
             const framesArr = (this.currentSprite && this.currentSprite._frames && this.selectedAnimation)
@@ -1952,12 +2246,14 @@ export class SpriteScene extends Scene {
                     if (this.stateController) this.stateController.setActiveFrame(nextFrame);
                     else this.selectedFrame = nextFrame;
                     if (this.FrameSelect && this.FrameSelect._multiSelected) this.FrameSelect._multiSelected.clear();
+                    try { this._playSfx('frame.select'); } catch (e) {}
                 }
                 if (this.keys.released('ArrowRight')) {
                     const nextFrame = wrap((this.selectedFrame || 0) + 1);
                     if (this.stateController) this.stateController.setActiveFrame(nextFrame);
                     else this.selectedFrame = nextFrame;
                     if (this.FrameSelect && this.FrameSelect._multiSelected) this.FrameSelect._multiSelected.clear();
+                    try { this._playSfx('frame.select'); } catch (e) {}
                 }
             }
 
@@ -1971,6 +2267,7 @@ export class SpriteScene extends Scene {
                 if (this.stateController) this.stateController.adjustCurrentChannel(incPressed ? step : -step);
                 else this.modifyState(next, true, true, "brush", "pixelBrush", "adjustAmount", this.state.brush.pixelBrush.channel);
                 this.adjustAmount = this.state.brush.pixelBrush.adjustAmount[this.state.brush.pixelBrush.channel];
+                try { this._playSfx('color.adjust'); } catch (e) {}
             }
 
             // Toggle onion skinning with 'u'. Shift+U prompts for alpha; Shift+Alt+U prompts for range; if multi-selecting, alpha prompt adjusts layer alpha instead.
@@ -2008,6 +2305,7 @@ export class SpriteScene extends Scene {
                     if (this.stateController) this.stateController.toggleOnionSkin();
                     else this.onionSkin = !(typeof this.onionSkin === 'boolean' ? this.onionSkin : false);
                     try { console.log('Onion skin:', this.onionSkin); } catch (e) {}
+                    try { this._playSfx('toggle.onionSkin'); } catch (e) {}
                 } else {
                     try {
                         const multiActive = this.FrameSelect && this.FrameSelect._multiSelected && this.FrameSelect._multiSelected.size > 0;
@@ -2038,10 +2336,12 @@ export class SpriteScene extends Scene {
                     if (this.stateController) this.stateController.toggleAutotile();
                     else this.autotile = !this.autotile;
                     try { console.log('Autotile mode:', this.autotile); } catch (e) {}
+                    try { this._playSfx('toggle.autotile'); } catch (e) {}
                 } else {
                     if (this.stateController) this.stateController.togglePixelPerfect();
                     else this.pixelPerfect = !this.pixelPerfect;
                     try { console.log('Pixel-perfect mode:', this.pixelPerfect); } catch (e) {}
+                    try { this._playSfx('toggle.pixelPerfect'); } catch (e) {}
                 }
             }
 
@@ -2086,6 +2386,75 @@ export class SpriteScene extends Scene {
                         // ignore prompt errors and fall back to default
                     }
                 }
+                try {
+                    // Perform a select-all of pixels matching the current pen color,
+                    // animating the selection as a short chain-reaction.
+                    const sheet = this.currentSprite;
+                    if (sheet && typeof sheet.getFrame === 'function') {
+                        const frameCanvas = sheet.getFrame(this.selectedAnimation, this.selectedFrame);
+                        if (frameCanvas) {
+                            const ctx = frameCanvas.getContext('2d');
+                            const w = frameCanvas.width, h = frameCanvas.height;
+                            try {
+                                const img = ctx.getImageData(0, 0, w, h).data;
+                                const colObj = Color.convertColor(this.penColor || '#000000');
+                                const cRgb = colObj.toRgb();
+                                const tr = Math.round(cRgb.a || 0);
+                                const tg = Math.round(cRgb.b || 0);
+                                const tb = Math.round(cRgb.c || 0);
+                                const ta = Math.round((cRgb.d ?? 1) * 255);
+                                const pts = [];
+                                for (let y = 0; y < h; y++) {
+                                    for (let x = 0; x < w; x++) {
+                                        const idx = (y * w + x) * 4;
+                                        if (img[idx] === tr && img[idx+1] === tg && img[idx+2] === tb && img[idx+3] === ta) {
+                                            pts.push({ x, y, areaIndex: null });
+                                        }
+                                    }
+                                }
+                                if (pts.length) {
+                                    try { this._playSfx('select.pixel'); } catch (e) {}
+                                    this._animateSelectPoints(pts, 200);
+                                }
+                                return;
+                            } catch (e) { /* fall through to Debug.emit fallback */ }
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+                try {
+                    const sheet = this.currentSprite;
+                    if (sheet && typeof sheet.getFrame === 'function') {
+                        const frameCanvas = sheet.getFrame(this.selectedAnimation, this.selectedFrame);
+                        if (frameCanvas) {
+                            const ctx = frameCanvas.getContext('2d');
+                            const w = frameCanvas.width, h = frameCanvas.height;
+                            try {
+                                const img = ctx.getImageData(0, 0, w, h).data;
+                                const colObj = Color.convertColor(this.penColor || '#000000');
+                                const cRgb = colObj.toRgb();
+                                const tr = Math.round(cRgb.a || 0);
+                                const tg = Math.round(cRgb.b || 0);
+                                const tb = Math.round(cRgb.c || 0);
+                                const ta = Math.round((cRgb.d ?? 1) * 255);
+                                const pts = [];
+                                for (let y = 0; y < h; y++) {
+                                    for (let x = 0; x < w; x++) {
+                                        const idx = (y * w + x) * 4;
+                                        if (img[idx] === tr && img[idx+1] === tg && img[idx+2] === tb && img[idx+3] === ta) {
+                                            pts.push({ x, y, areaIndex: null });
+                                        }
+                                    }
+                                }
+                                if (pts.length) {
+                                    try { this._playSfx('select.pixel'); } catch (e) {}
+                                    this._animateSelectPoints(pts, 200);
+                                }
+                                // Prevent further handling
+                                return;
+                            } catch (e) { /* fall through to Debug fallback */ }
+                        }
+                    }
+                } catch (e) { /* ignore */ }
                 if (window.Debug && typeof window.Debug.emit === 'function') {
                     window.Debug.emit('select', hex, buffer);
                 } else if (window.Debug && typeof window.Debug.createSignal === 'function') {
@@ -2143,6 +2512,8 @@ export class SpriteScene extends Scene {
                 const nextTilemode = !wasTilemode;
                 if (this.stateController) this.stateController.setTilemode(nextTilemode);
                 else this.tilemode = nextTilemode;
+
+                try { this._playSfx(nextTilemode ? 'tilemode.on' : 'tilemode.off'); } catch (e) {}
 
                 if (nextTilemode) {
                     const restore = (this._tilemodeSavedOffset && typeof this._tilemodeSavedOffset.x === 'number' && typeof this._tilemodeSavedOffset.y === 'number')
@@ -2477,14 +2848,17 @@ export class SpriteScene extends Scene {
             // If clipboard brush mode is active, paste (left) or erase (right) with clipboard shape instead of square brush
             if (this._clipboardBrushActive && this.clipboard) {
                 if (this.mouse.held('left')) {
-                    this.doPaste(this.mouse.pos);
+                    try { if (this.mouse.pressed('left')) this._playSfx('clipboard.paste'); } catch (e) {}
+                    this.doPaste(this.mouse.pos, { playSfx: false });
                     return;
                 }
                 if (this.mouse.held('right')) {
-                    this.doClipboardErase(this.mouse.pos);
+                    try { if (this.mouse.pressed('right')) this._playSfx('clipboard.erase'); } catch (e) {}
+                    this.doClipboardErase(this.mouse.pos, { playSfx: false });
                     return;
                 }
             }
+
             const color = this.penColor || '#000000';
             const side = Math.max(1, Math.min(15, this.brushSize || 1));
             const half = Math.floor((side - 1) / 2);
@@ -2552,6 +2926,7 @@ export class SpriteScene extends Scene {
                 const sx = pos.x - half;
                 const sy = pos.y - half;
                 const worldPixels = worldPixelsFromBrush(sx, sy);
+                try { if (this._anyWorldPixelWouldChange(worldPixels, color)) this._playSfx('pixel.place'); } catch (e) {}
                 this._paintWorldPixels(worldPixels, color);
             }
             if (this.mouse.held('right')) { // erase NxN square
@@ -2559,6 +2934,7 @@ export class SpriteScene extends Scene {
                 const sx = pos.x - half;
                 const sy = pos.y - half;
                 const worldPixels = worldPixelsFromBrush(sx, sy);
+                try { if (this._anyWorldPixelWouldChange(worldPixels, eraseColor)) this._playSfx('pixel.remove'); } catch (e) {}
                 this._paintWorldPixels(worldPixels, eraseColor);
             }
 
@@ -2596,6 +2972,17 @@ export class SpriteScene extends Scene {
             const side = Math.max(1, Math.min(15, this.brushSize || 1));
             const tiles = this._tileBrushTiles(center.col, center.row, side);
             if (!tiles.length) return;
+
+            // SFX: play once on press.
+            try {
+                if (this.mouse && typeof this.mouse.pressed === 'function') {
+                    if (this.mouse.pressed('left')) this._playSfx('tile.place');
+                    if (this.mouse.pressed('right')) {
+                        const isDeselect = !!(this._tileSelection && this._tileSelection.size > 0);
+                        this._playSfx(isDeselect ? 'select.tile' : 'tile.remove');
+                    }
+                }
+            } catch (e) {}
 
             // Build the frame stack so tile painting mirrors the 'y' bind behavior (multi-select aware).
             const buildStack = () => {
@@ -3947,33 +4334,55 @@ export class SpriteScene extends Scene {
             // While a shape tool (line/box/circle) is active, Shift+Left click adds
             // individual selection points along the shape instead of drawing.
             // The last added point becomes the new starting point for chaining.
-            if (this.currentTool && this.keys.held('Shift') && this.mouse.pressed('left') && this.selectionPoints && this.selectionPoints.length > 0) {
+            // While a shape tool (line/box/circle) is active, Shift+Left click
+            // should select the previewed pixels (replace current selection)
+            // instead of drawing them. This allows holding Shift to capture
+            // the shape preview as a pixel selection.
+            // When a shape tool is active, pressing Shift captures the shape
+            // preview as a selection (replacing any existing selection) and
+            // cancels the active shape tool — no mouse click required.
+            if (this.currentTool && this.keys.pressed('Shift')) {
                 const pos = this.getPos(this.mouse.pos);
                 if (pos && pos.inside) {
-                    const start = this.selectionPoints[this.selectionPoints.length - 1];
-                    const end = { x: pos.x, y: pos.y };
-                    const filled = this.keys.held('Alt');
-                    let pixels = [];
-                    if (this.currentTool === 'line' && typeof this.computeLinePixels === 'function') {
-                        pixels = this.computeLinePixels(start, end) || [];
-                    } else if (this.currentTool === 'box' && typeof this.computeBoxPixels === 'function') {
-                        pixels = this.computeBoxPixels(start, end, filled) || [];
-                    } else if (this.currentTool === 'circle' && typeof this.computeCirclePixels === 'function') {
-                        pixels = this.computeCirclePixels(start, end, filled) || [];
-                    }
+                    // Determine start anchor: prefer last selection point, then first selection point,
+                    // then fall back to the current mouse pos as anchor.
+                    let start = null;
+                    if (this.selectionPoints && this.selectionPoints.length > 0) start = this.selectionPoints[this.selectionPoints.length - 1];
+                    else if (this.selectionPoints && this.selectionPoints.length === 0 && this.selectionRegion) {
+                        // If a rectangular region exists, use its start corner
+                        start = { x: this.selectionRegion.start.x, y: this.selectionRegion.start.y, areaIndex: this.selectionRegion.areaIndex };
+                    } else if (pos && pos.inside) start = { x: pos.x, y: pos.y, areaIndex: pos.areaIndex };
 
-                    if (pixels && pixels.length) {
-                        const areaIndex = (typeof start.areaIndex === 'number') ? start.areaIndex : (typeof pos.areaIndex === 'number' ? pos.areaIndex : null);
-                        for (const p of pixels) {
-                            const exists = this.selectionPoints.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === areaIndex);
-                            if (!exists) {
-                                this.selectionPoints.push({ x: p.x, y: p.y, areaIndex });
-                            }
+                    if (!start) {
+                        // no valid anchor, skip
+                    } else {
+                        const end = { x: pos.x, y: pos.y };
+                        const filled = this.keys.held('Alt');
+                        let pixels = [];
+                        if (this.currentTool === 'line' && typeof this.computeLinePixels === 'function') {
+                            pixels = this.computeLinePixels(start, end) || [];
+                        } else if (this.currentTool === 'box' && typeof this.computeBoxPixels === 'function') {
+                            pixels = this.computeBoxPixels(start, end, filled) || [];
+                        } else if (this.currentTool === 'circle' && typeof this.computeCirclePixels === 'function') {
+                            pixels = this.computeCirclePixels(start, end, filled) || [];
                         }
-                        // Ensure the end point is the last element so it becomes the next start.
-                        const endExists = this.selectionPoints.some(sp => sp.x === end.x && sp.y === end.y && sp.areaIndex === areaIndex);
-                        if (!endExists) {
-                            this.selectionPoints.push({ x: end.x, y: end.y, areaIndex });
+
+                        if (pixels && pixels.length) {
+                            const areaIndex = (typeof start.areaIndex === 'number') ? start.areaIndex : (typeof pos.areaIndex === 'number' ? pos.areaIndex : null);
+                            // Replace current selection with the preview pixels
+                            const newSel = [];
+                            for (const p of pixels) {
+                                newSel.push({ x: p.x, y: p.y, areaIndex });
+                            }
+                            if (this.stateController && typeof this.stateController.setSelectionPoints === 'function') {
+                                try { this.stateController.setSelectionPoints(newSel); this.stateController.clearSelectionRegion(); } catch (e) {}
+                            } else {
+                                this.selectionPoints = newSel;
+                                this.selectionRegion = null;
+                            }
+                            try { this._playSfx('select.pixel'); } catch (e) {}
+                            // Clear the active shape tool so the preview is cancelled
+                            if (this.stateController) this.stateController.clearCurrentTool(); else this.currentTool = null;
                         }
                     }
                 }
@@ -3986,6 +4395,7 @@ export class SpriteScene extends Scene {
             // it adds to any existing selectionPoints instead of replacing them.
             if (this.selectionPoints.length === 2) {
                 if (this.keys.pressed('b')) {
+                    try { this._playSfx('select.pixel'); } catch (e) {}
                     const start = this.selectionPoints[0];
                     const end = this.selectionPoints[1];
                     const filled = true; // box select should generally select the full area
@@ -4030,6 +4440,7 @@ export class SpriteScene extends Scene {
             // expand selection to include the full tile rectangle between them (inclusive).
             try {
                 if (this.tilemode && this._tileSelection && this._tileSelection.size === 2 && this.keys.pressed('b')) {
+                    try { this._playSfx('select.tile'); } catch (e) {}
                     const keys = Array.from(this._tileSelection);
                     if (keys.length === 2) {
                         const a = this._parseTileKey(keys[0]);
@@ -4188,12 +4599,14 @@ export class SpriteScene extends Scene {
                 if (this.keys.released('r','pasteMode')) {
                     try {
                         this.rotateClipboardCW();
+                        try { this._playSfx('clipboard.rotate'); } catch (e) {}
                     } catch (e) { /* ignore */ }
                 }
                 // flip clipboard horizontally with 'f' while in pasteMode
                 if (this.keys.released('f','pasteMode')) {
                     try {
                         if (typeof this.flipClipboardH === 'function') this.flipClipboardH();
+                        try { this._playSfx('clipboard.flip'); } catch (e) {}
                     } catch (e) { /* ignore */ }
                 }
             } catch (e) {
@@ -4207,9 +4620,16 @@ export class SpriteScene extends Scene {
                 // Prevent fill while clipboard preview/pasting (v) is active
                 const fHeldTime = Math.max(this.keys.held('f', true), this.keys.held('F', true));
                 const fPressed = (this.keys.pressed('f') || this.keys.pressed('F'));
-                if (fHeldTime > 1 || (fPressed && !this.keys.held('Alt'))) {
+                const MIN_FILL_HOLD = 0.08; // seconds minimum hold to trigger fill
+                const FILL_COOLDOWN = 0.25; // seconds between allowed fill triggers
+                const nowSec = (this._sceneTime || 0);
+                if (nowSec - (this._lastFillTriggered || 0) < FILL_COOLDOWN) return;
+                if (fHeldTime >= MIN_FILL_HOLD || fPressed) {
+                    this._lastFillTriggered = nowSec;
                     const pos = this.getPos(this.mouse && this.mouse.pos);
-                    if (!pos || (!pos.inside && !(this.tilemode && pos.renderOnly))) return;
+                    const hasSelection = (this.selectionPoints && this.selectionPoints.length > 0) || !!this.selectionRegion;
+                    // If there's no selection, require the mouse to be over a frame (or renderOnly tile).
+                    if (!hasSelection && (!pos || (!pos.inside && !(this.tilemode && pos.renderOnly)))) return;
                     // If there is an explicit selection (points or region), treat
                     // pressing 'f' as "draw selected" (same as Alt+S) instead of
                     // performing a flood-fill into the hovered frame.
@@ -4220,20 +4640,177 @@ export class SpriteScene extends Scene {
                         // trigger drawSelected when there is a selection and
                         // Shift is NOT held.
                         if (hasSelection && !this.keys.held('Shift')) {
-                            if (window.Debug && typeof window.Debug.emit === 'function') {
-                                window.Debug.emit('drawSelected');
-                            } else if (window.Debug && typeof window.Debug.createSignal === 'function') {
-                                const sig = window.Debug.signals && window.Debug.signals.get && window.Debug.signals.get('drawSelected');
-                                if (typeof sig === 'function') sig();
+                            // Schedule fill-selected with a short leeway so combos like
+                            // F + N can be detected. If 'n' is held when the timeout
+                            // fires, run the full gradient+noise animation. Otherwise
+                            // apply the immediate fill (with small UI flair).
+                            try {
+                                    // Ensure a safe immediate-apply helper exists (may not be defined
+                                    // until `drawSelected` has run). This fallback performs a plain
+                                    // immediate fill for selectionPoints or selectionRegion.
+                                    if (typeof this._applyDrawSelectedImmediate !== 'function') {
+                                        this._applyDrawSelectedImmediate = (opts = {}) => {
+                                            try {
+                                                const sheet = this.currentSprite;
+                                                if (!sheet) return;
+                                                const colorHex = this.penColor || '#000000';
+                                                if (this.selectionPoints && this.selectionPoints.length > 0) {
+                                                    for (const p of this.selectionPoints) {
+                                                        if (!p) continue;
+                                                        let anim = this.selectedAnimation;
+                                                        let frameIdx = this.selectedFrame;
+                                                        if (this.tilemode && p && typeof p.areaIndex === 'number') {
+                                                            const binding = this.getAreaBinding(p.areaIndex);
+                                                            if (binding && binding.anim !== undefined && binding.index !== undefined) { anim = binding.anim; frameIdx = Number(binding.index); }
+                                                        }
+                                                        try {
+                                                            if (typeof sheet.setPixel === 'function') sheet.setPixel(anim, frameIdx, p.x, p.y, colorHex, 'replace');
+                                                            else {
+                                                                const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                                                                if (frameCanvas) {
+                                                                    const ctx = frameCanvas.getContext('2d');
+                                                                    const col = Color.convertColor(colorHex).toRgb();
+                                                                    const r = Math.round(col.a || 0), g = Math.round(col.b || 0), b = Math.round(col.c || 0), a = ((col.d === undefined) ? 1 : (col.d || 0));
+                                                                    ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+                                                                    ctx.fillRect(p.x, p.y, 1, 1);
+                                                                }
+                                                            }
+                                                        } catch (e) { /* ignore per-pixel failure */ }
+                                                    }
+                                                } else if (this.selectionRegion) {
+                                                    const sr = this.selectionRegion;
+                                                    const minX = Math.min(sr.start.x, sr.end.x);
+                                                    const minY = Math.min(sr.start.y, sr.end.y);
+                                                    const maxX = Math.max(sr.start.x, sr.end.x);
+                                                    const maxY = Math.max(sr.start.y, sr.end.y);
+                                                    let anim = this.selectedAnimation;
+                                                    let frameIdx = this.selectedFrame;
+                                                    if (this.tilemode && sr && typeof sr.areaIndex === 'number') {
+                                                        const binding = this.getAreaBinding(sr.areaIndex);
+                                                        if (binding && binding.anim !== undefined && binding.index !== undefined) { anim = binding.anim; frameIdx = Number(binding.index); }
+                                                    }
+                                                    for (let yy = minY; yy <= maxY; yy++) {
+                                                        for (let xx = minX; xx <= maxX; xx++) {
+                                                            try {
+                                                                if (typeof sheet.setPixel === 'function') sheet.setPixel(anim, frameIdx, xx, yy, colorHex, 'replace');
+                                                                else {
+                                                                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                                                                    if (frameCanvas) {
+                                                                        const ctx = frameCanvas.getContext('2d');
+                                                                        const col = Color.convertColor(colorHex).toRgb();
+                                                                        const r = Math.round(col.a || 0), g = Math.round(col.b || 0), b = Math.round(col.c || 0), a = ((col.d === undefined) ? 1 : (col.d || 0));
+                                                                        ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+                                                                        ctx.fillRect(xx, yy, 1, 1);
+                                                                    }
+                                                                }
+                                                            } catch (e) { /* ignore per-pixel failure */ }
+                                                        }
+                                                    }
+                                                }
+                                                if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                                            } catch (e) { /* ignore */ }
+                                        };
+                                    }
+                                    // Defer applying the fill briefly so quick N+F combos
+                                    // can be detected; the timeout will either run the
+                                    // animated path (if N held) or apply the immediate
+                                    // fill when the leeway expires.
+                                if (this._fillSelectedTimeout) try { clearTimeout(this._fillSelectedTimeout); } catch (e) {}
+                                this._fillSelectedTimeout = setTimeout(() => {
+                                    try {
+                                        this._fillSelectedTimeout = null;
+                                        // If 'n' is held within the leeway, run the animated gradient+noise
+                                        if (this.keys && typeof this.keys.held === 'function' && this.keys.held('n', true) > 0) {
+                                            // Gather pixels like drawSelected did, then animate
+                                            try {
+                                                const sheet = this.currentSprite;
+                                                if (!sheet) return;
+                                                const groups = new Map();
+                                                // selectionPoints takes precedence
+                                                if (this.selectionPoints && this.selectionPoints.length > 0) {
+                                                    for (const p of this.selectionPoints) {
+                                                        if (!p) continue;
+                                                        let anim = this.selectedAnimation;
+                                                        let frameIdx = this.selectedFrame;
+                                                        if (this.tilemode && p && typeof p.areaIndex === 'number') {
+                                                            const binding = this.getAreaBinding(p.areaIndex);
+                                                            if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                                                                anim = binding.anim;
+                                                                frameIdx = Number(binding.index);
+                                                            }
+                                                        }
+                                                        const key = anim + ':' + frameIdx;
+                                                        if (!groups.has(key)) groups.set(key, { anim, frameIdx, pts: [] });
+                                                        groups.get(key).pts.push(p);
+                                                    }
+                                                } else if (this.selectionRegion) {
+                                                    const sr = this.selectionRegion;
+                                                    const minX = Math.min(sr.start.x, sr.end.x);
+                                                    const minY = Math.min(sr.start.y, sr.end.y);
+                                                    const maxX = Math.max(sr.start.x, sr.end.x);
+                                                    const maxY = Math.max(sr.start.y, sr.end.y);
+                                                    let anim = this.selectedAnimation;
+                                                    let frameIdx = this.selectedFrame;
+                                                    if (this.tilemode && sr && typeof sr.areaIndex === 'number') {
+                                                        const binding = this.getAreaBinding(sr.areaIndex);
+                                                        if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                                                            anim = binding.anim;
+                                                            frameIdx = Number(binding.index);
+                                                        }
+                                                    }
+                                                    const pts = [];
+                                                    for (let yy = minY; yy <= maxY; yy++) for (let xx = minX; xx <= maxX; xx++) pts.push({ x: xx, y: yy, areaIndex: sr.areaIndex });
+                                                    const key = anim + ':' + frameIdx;
+                                                    groups.set(key, { anim, frameIdx, pts });
+                                                }
+                                                // For each group, build entries and animate
+                                                for (const g of groups.values()) {
+                                                    const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(g.anim, g.frameIdx) : null;
+                                                    const entries = [];
+                                                    if (frameCanvas) {
+                                                        const ctx = frameCanvas.getContext('2d');
+                                                        let img = null;
+                                                        try { img = ctx.getImageData(0, 0, frameCanvas.width, frameCanvas.height); } catch (e) { img = null; }
+                                                        for (const p of g.pts) {
+                                                            const x = p.x, y = p.y;
+                                                            let r=0,gc=0,b=0,a=0;
+                                                            if (img) {
+                                                                const idx = (y * img.width + x) * 4;
+                                                                r = img.data[idx]; gc = img.data[idx+1]; b = img.data[idx+2]; a = img.data[idx+3];
+                                                            }
+                                                            entries.push({ x, y, r, g: gc, b, a, anim: g.anim, frameIdx: g.frameIdx });
+                                                        }
+                                                    } else {
+                                                        for (const p of g.pts) entries.push({ x: p.x, y: p.y, r:0, g:0, b:0, a:0, anim: g.anim, frameIdx: g.frameIdx });
+                                                    }
+                                                    const pos = this.getPos(this.mouse && this.mouse.pos) || {};
+                                                    const origin = (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) ? { ox: pos.x, oy: pos.y } : null;
+                                                    // full gradient+noise animation
+                                                    this._animateFillSelected(entries, g.anim, g.frameIdx, 240, origin);
+                                                }
+                                                return;
+                                            } catch (e) {
+                                                // fallthrough to immediate
+                                            }
+                                        }
+                                        // default: immediate apply but with a small UI flair (fade + noise).
+                                        try { this._applyDrawSelectedImmediate({ flairMs: 120, noise: 0.12 }); } catch (e) { this._applyDrawSelectedImmediate(); }
+                                    } catch (e) { /* ignore */ }
+                                }, 100);
+                            } catch (e) {
+                                // fallback: immediate
+                                try { this._applyDrawSelectedImmediate(); } catch (e) {}
                             }
                             return;
                         }
                     } catch (e) { /* ignore selection->draw dispatch errors */ }
                     const sheet = this.currentSprite;
-                    // prefer the bound frame for the area under the mouse
+                    // prefer the bound frame for the area under the mouse, but only
+                    // when in tilemode. In non-tilemode we should not resolve into
+                    // bound area frames (doing so could mutate a different animation).
                     let anim = this.selectedAnimation;
                     let frameIdx = this.selectedFrame;
-                    if (pos && typeof pos.areaIndex === 'number') {
+                    if (this.tilemode && pos && typeof pos.areaIndex === 'number') {
                         const binding = this.getAreaBinding(pos.areaIndex);
                         if (binding && binding.anim !== undefined && binding.index !== undefined) {
                             anim = binding.anim;
@@ -4245,6 +4822,7 @@ export class SpriteScene extends Scene {
                         try {
                             // If there is a tile selection, fill all selected tiles
                             if (this._tileSelection && this._tileSelection.size > 0 && !this.keys.held('Shift')) {
+                                try { this._playSfx('fill.tile'); } catch (e) {}
                                 const binding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
                                 const transform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
                                 for (const key of this._tileSelection) {
@@ -4302,6 +4880,7 @@ export class SpriteScene extends Scene {
 
                             
                             if (this.keys.held('Shift')) {
+                                try { this._playSfx('select.tile'); } catch (e) {}
                                 console.log('yay')
                                 // select the region
                                 if (!this._tileSelection) this._tileSelection = new Set();
@@ -4310,6 +4889,7 @@ export class SpriteScene extends Scene {
                                 this._tileHoverAnchor = { col: startCol, row: startRow };
                                 return;
                             } else {
+                                try { this._playSfx('fill.tile'); } catch (e) {}
                                 console.log('heelo')
                                 // apply fill binding to region
                                 const binding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
@@ -4340,6 +4920,7 @@ export class SpriteScene extends Scene {
                         // If Shift is held, perform a flood-select instead of paint:
                         // build selectionPoints for the connected region matching src color.
                         if (this.keys.held('Shift')) {
+                            try { this._playSfx('select.pixel'); } catch (e) {}
                             const wStride = w;
                             const stack = [];
                             const visited = new Set();
@@ -4363,25 +4944,30 @@ export class SpriteScene extends Scene {
                                 if (y < h - 1) stack.push(p + wStride);
                             }
 
-                            // Merge flood-selected points into any existing selection
-                            const merged = (this.selectionPoints && this.selectionPoints.length > 0)
-                                ? this.selectionPoints.slice()
-                                : [];
-                            for (const p of newPoints) {
-                                const exists = merged.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === p.areaIndex);
-                                if (!exists) merged.push(p);
-                            }
-                            if (this.stateController) {
-                                this.stateController.setSelectionPoints(merged);
-                                this.stateController.clearSelectionRegion();
-                            } else {
-                                this.selectionPoints = merged;
-                                this.selectionRegion = null;
+                            // Animate merge of flood-selected points into any existing selection
+                            try {
+                                this._animateSelectPoints(newPoints, 200, { ox: sx, oy: sy });
+                            } catch (e) {
+                                // fallback to immediate merge on failure
+                                const merged = (this.selectionPoints && this.selectionPoints.length > 0)
+                                    ? this.selectionPoints.slice()
+                                    : [];
+                                for (const p of newPoints) {
+                                    const exists = merged.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === p.areaIndex);
+                                    if (!exists) merged.push(p);
+                                }
+                                if (this.stateController) {
+                                    try { this.stateController.setSelectionPoints(merged); this.stateController.clearSelectionRegion(); } catch (e) {}
+                                } else {
+                                    this.selectionPoints = merged;
+                                    this.selectionRegion = null;
+                                }
                             }
                             return;
                         }
 
                         // Otherwise, perform a paint fill using the current pen color.
+                        try { this._playSfx('fill.pixel'); } catch (e) {}
                         const fillCol = Color.convertColor(this.penColor || '#000000');
                         const fRgb = fillCol.toRgb();
                         const fillR = Math.round(fRgb.a || 0);
@@ -4433,11 +5019,25 @@ export class SpriteScene extends Scene {
                         }
 
                         if (!changes.length) return;
-                        if (typeof sheet.modifyFrame === 'function') {
-                            sheet.modifyFrame(anim, frameIdx, changes);
-                        } else {
-                            for (const c of changes) {
-                                try { sheet.setPixel(anim, frameIdx, c.x, c.y, c.color, 'replace'); } catch (e) { /* ignore */ }
+                        try {
+                            // Animate pixel changes as a short chain reaction (~200ms)
+                            if (typeof this._animatePixelChanges === 'function') {
+                                this._animatePixelChanges(changes, anim, frameIdx, sx, sy, 200);
+                            } else if (typeof sheet.modifyFrame === 'function') {
+                                sheet.modifyFrame(anim, frameIdx, changes);
+                            } else {
+                                for (const c of changes) {
+                                    try { sheet.setPixel(anim, frameIdx, c.x, c.y, c.color, 'replace'); } catch (e) { /* ignore */ }
+                                }
+                            }
+                        } catch (e) {
+                            // fallback: apply immediately on any failure
+                            if (typeof sheet.modifyFrame === 'function') {
+                                try { sheet.modifyFrame(anim, frameIdx, changes); } catch (e) {}
+                            } else {
+                                for (const c of changes) {
+                                    try { sheet.setPixel(anim, frameIdx, c.x, c.y, c.color, 'replace'); } catch (e) { /* ignore */ }
+                                }
                             }
                         }
                     } catch (e) {
@@ -4505,6 +5105,7 @@ export class SpriteScene extends Scene {
                             const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
                             try { this._colorInput.value = '#' + toHex(r) + toHex(g) + toHex(b); } catch (e) {}
                         }
+                        try { this._playSfx('color.combine'); } catch (e) {}
                     }
                 }
             } catch (e) { console.warn('average color (j) failed', e); }
@@ -4634,9 +5235,11 @@ export class SpriteScene extends Scene {
                 if (this.keys && typeof this.keys.released === 'function') {
                     if (this.keys.released('h')) {
                         applyAdjust(1); // additive lighten on selected channel
+                        try { this._playSfx('color.adjust'); } catch (e) {}
                     }
                     if (this.keys.released('k')) {
                         applyAdjust(-1); // additive darken on selected channel
+                        try { this._playSfx('color.adjust'); } catch (e) {}
                     }
                 }
             } catch (e) { console.warn('lighten/darken (h/k) failed', e); }
@@ -6384,6 +6987,7 @@ export class SpriteScene extends Scene {
                 this.spriteClipboard = payload;
                 this._spriteClipboard = payload;
                 this._activeClipboardType = 'sprite';
+                try { this._playSfx('clipboard.copy'); } catch (e) {}
                 return;
             }
             const posInfoForTile = this.getPos(this.mouse && this.mouse.pos);
@@ -6415,6 +7019,7 @@ export class SpriteScene extends Scene {
                         tiles: entries.map(e => ({ dc: e.col - minCol, dr: e.row - minRow, binding: e.binding, transform: e.transform }))
                     };
                     this._activeClipboardType = 'tile';
+                    try { this._playSfx('clipboard.copy'); } catch (e) {}
                 }
                 return;
             }
@@ -6493,6 +7098,7 @@ export class SpriteScene extends Scene {
                 const originOffset = resolvePixelClipboardOriginOffset(minX, minY, maxX, maxY, pointsAreaIndex);
                 this.clipboard = { type: 'points', w, h, pixels, originOffset };
                 this._activeClipboardType = 'pixel';
+                try { this._playSfx('clipboard.copy'); } catch (e) {}
                 // Attempt to also place a transferable representation on the system clipboard
                 if (!localOnly) {
                     try {
@@ -6537,6 +7143,7 @@ export class SpriteScene extends Scene {
             const originOffset = resolvePixelClipboardOriginOffset(minX, minY, maxX, maxY, regionAreaIndex);
             this.clipboard = { type: 'image', w, h, data: img.data, originOffset };
             this._activeClipboardType = 'pixel';
+            try { this._playSfx('clipboard.copy'); } catch (e) {}
             // Attempt to also place a transferable representation on the system clipboard (data URL wrapped in JSON)
             if (!localOnly) {
                 try {
@@ -6571,6 +7178,7 @@ export class SpriteScene extends Scene {
                 this.doCopy(true);
                 this._deleteSpriteEntity(selectedSpriteId, true);
                 this.modifyState(null, false, false, ['spriteLayer', 'selectedEntityId']);
+                try { this._playSfx('clipboard.cut'); } catch (e) {}
                 return;
             }
             const posInfoForTile = this.getPos(this.mouse && this.mouse.pos);
@@ -6595,6 +7203,7 @@ export class SpriteScene extends Scene {
                         tiles: entries.map(e => ({ dc: e.col - minCol, dr: e.row - minRow, binding: e.binding, transform: e.transform }))
                     };
                     this._activeClipboardType = 'tile';
+                    try { this._playSfx('clipboard.cut'); } catch (e) {}
                 }
                 this._tileSelection = new Set();
                 return;
@@ -6611,7 +7220,10 @@ export class SpriteScene extends Scene {
             }
             let anim = this.selectedAnimation;
             let frameIdx = this.selectedFrame;
-            if (typeof sourceAreaIndex === 'number') {
+            // Only consider an area's binding for resolving anim/frame when in tilemode
+            // (matching the logic used by `doCopy`). Otherwise `sourceAreaIndex` may
+            // reference a tile area that should not affect the current single-frame edit.
+            if (this.tilemode && typeof sourceAreaIndex === 'number') {
                 const binding = this.getAreaBinding(sourceAreaIndex);
                 if (binding && binding.anim !== undefined && binding.index !== undefined) {
                     anim = binding.anim;
@@ -6634,6 +7246,7 @@ export class SpriteScene extends Scene {
                 }
                 if (this.stateController) this.stateController.clearSelectionPoints();
                 else this.selectionPoints = [];
+                try { this._playSfx('clipboard.cut'); } catch (e) {}
                 return;
             }
 
@@ -6663,13 +7276,14 @@ export class SpriteScene extends Scene {
             // clear the selection region after cutting
             if (this.stateController) this.stateController.clearSelectionRegion();
             else this.selectionRegion = null;
+            try { this._playSfx('clipboard.cut'); } catch (e) {}
         } catch (e) {
             console.warn('doCut failed', e);
         }
     }
 
     // Paste clipboard at a screen mouse position (mousePos is a Vector in screen space)
-    doPaste(mousePos) {
+    doPaste(mousePos, { playSfx = true } = {}) {
         try {
             if (!this.clipboard && !this._tileClipboard && !this.spriteClipboard && !this._spriteClipboard) return;
             if (!this.currentSprite) return;
@@ -6677,6 +7291,10 @@ export class SpriteScene extends Scene {
             const slice = sheet.slicePx || 1;
             const pos = this.getPos(mousePos);
             if (!pos || (!pos.inside && !(this.tilemode && pos.renderOnly))) return;
+
+            if (playSfx) {
+                try { this._playSfx('clipboard.paste'); } catch (e) {}
+            }
 
             const spriteClip = this.spriteClipboard || this._spriteClipboard || null;
             const activeType = this._activeClipboardType;
@@ -6810,13 +7428,17 @@ export class SpriteScene extends Scene {
     }
 
     // Erase using the clipboard footprint (transparent pixels are ignored; opaque pixels erase to transparent)
-    doClipboardErase(mousePos) {
+    doClipboardErase(mousePos, { playSfx = true } = {}) {
         try {
             if (!this.clipboard || !this.currentSprite) return;
             const sheet = this.currentSprite;
             const slice = sheet.slicePx || 1;
             const pos = this.getPos(mousePos);
             if (!pos || !pos.inside) return;
+
+            if (playSfx) {
+                try { this._playSfx('clipboard.erase'); } catch (e) {}
+            }
 
             let anim = this.selectedAnimation;
             let frameIdx = this.selectedFrame;
@@ -6895,6 +7517,199 @@ export class SpriteScene extends Scene {
         } catch (e) {
             console.warn('doClipboardErase failed', e);
         }
+    }
+
+    // Animate applying pixel changes as a chain-reaction expanding from origin
+    _animatePixelChanges(changes, anim, frameIdx, originX = 0, originY = 0, durationMs = 200) {
+        try {
+            if (!Array.isArray(changes) || changes.length === 0) return;
+            const sheet = this.currentSprite;
+            if (!sheet) return;
+            // compute distance from origin for each change
+            const entries = changes.map(c => ({ ...c, dist: Math.hypot((c.x - (originX||0)), (c.y - (originY||0))) }));
+            const maxDist = entries.reduce((m, e) => Math.max(m, e.dist), 0) || 1;
+            const steps = Math.min(12, Math.max(4, Math.ceil(entries.length / 25)));
+            // bucket by normalized distance
+            const buckets = Array.from({ length: steps }, () => []);
+            for (const e of entries) {
+                const n = Math.min(steps - 1, Math.floor((e.dist / maxDist) * steps));
+                buckets[n].push(e);
+            }
+            const delay = Math.max(0, Math.round(durationMs / steps));
+            // apply buckets in sequence
+            for (let i = 0; i < buckets.length; i++) {
+                const batch = buckets[i];
+                setTimeout(() => {
+                    try {
+                        if (!batch || batch.length === 0) return;
+                        if (typeof sheet.modifyFrame === 'function') {
+                            const simple = batch.map(b => ({ x: b.x, y: b.y, color: b.color, blendType: b.blendType || 'replace' }));
+                            try { sheet.modifyFrame(anim, frameIdx, simple); } catch (e) {
+                                for (const c of simple) {
+                                    try { sheet.setPixel(anim, frameIdx, c.x, c.y, c.color, 'replace'); } catch (e) {}
+                                }
+                            }
+                        } else {
+                            for (const c of batch) {
+                                try { sheet.setPixel(anim, frameIdx, c.x, c.y, c.color, 'replace'); } catch (e) {}
+                            }
+                        }
+                        if (typeof sheet._rebuildSheetCanvas === 'function') {
+                            try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                        }
+                    } catch (e) { /* ignore per-batch errors */ }
+                }, i * delay);
+            }
+        } catch (e) { /* ignore animation failures */ }
+    }
+
+    // Animate building selection points in a chain reaction over ~durationMs
+    _animateSelectPoints(points, durationMs = 200, origin = null) {
+        try {
+            if (!Array.isArray(points) || points.length === 0) return;
+            const steps = Math.min(12, Math.max(4, Math.ceil(points.length / 25)));
+            // compute centroid to expand from
+            let cx = 0, cy = 0;
+            if (origin && Number.isFinite(origin.ox) && Number.isFinite(origin.oy)) {
+                cx = origin.ox; cy = origin.oy;
+            } else {
+                for (const p of points) { cx += p.x; cy += p.y; }
+                cx /= points.length; cy /= points.length;
+            }
+            const entries = points.map(p => ({ ...p, dist: Math.hypot(p.x - cx, p.y - cy) }));
+            const maxDist = entries.reduce((m, e) => Math.max(m, e.dist), 0) || 1;
+            const buckets = Array.from({ length: steps }, () => []);
+            for (const e of entries) {
+                const n = Math.min(steps - 1, Math.floor((e.dist / maxDist) * steps));
+                buckets[n].push({ x: e.x, y: e.y, areaIndex: e.areaIndex });
+            }
+            const delay = Math.max(0, Math.round(durationMs / steps));
+            let accumulated = this.selectionPoints && this.selectionPoints.length ? this.selectionPoints.slice() : [];
+            for (let i = 0; i < buckets.length; i++) {
+                const batch = buckets[i];
+                setTimeout(() => {
+                    try {
+                        if (!batch || batch.length === 0) return;
+                        for (const p of batch) {
+                            const exists = accumulated.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === p.areaIndex);
+                            if (!exists) accumulated.push(p);
+                        }
+                        if (this.stateController && typeof this.stateController.setSelectionPoints === 'function') {
+                            try { this.stateController.setSelectionPoints(accumulated.slice()); this.stateController.clearSelectionRegion(); } catch (e) {}
+                        } else {
+                            this.selectionPoints = accumulated.slice();
+                            this.selectionRegion = null;
+                        }
+                    } catch (e) { /* ignore per-batch errors */ }
+                }, i * delay);
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    // Animate filling a set of selected pixels with a spatial gradient + noise.
+    _animateFillSelected(entries, anim, frameIdx, durationMs = 220, origin = null) {
+        try {
+            if (!Array.isArray(entries) || entries.length === 0) return;
+            const sheet = this.currentSprite;
+            if (!sheet) return;
+            // Compute fill-iteration distances (BFS) from start so the animation
+            // follows the actual topology of the selected pixels rather than a
+            // radial or simple projection. Build a map of points for adjacency.
+            const pointMap = new Map();
+            for (const e of entries) {
+                const key = e.x + ',' + e.y;
+                pointMap.set(key, e);
+                e._dist = Infinity;
+            }
+            // choose start: nearest entry to origin or centroid
+            let sx = 0, sy = 0;
+            if (origin && Number.isFinite(origin.ox) && Number.isFinite(origin.oy)) {
+                sx = origin.ox; sy = origin.oy;
+            } else {
+                for (const e of entries) { sx += e.x; sy += e.y; }
+                sx /= entries.length; sy /= entries.length;
+            }
+            // find nearest entry to start
+            let startEntry = null, bestD = Infinity;
+            for (const e of entries) {
+                const d = Math.hypot(e.x - sx, e.y - sy);
+                if (d < bestD) { bestD = d; startEntry = e; }
+            }
+            // BFS from startEntry to compute iteration distances
+            if (startEntry) {
+                const q = [];
+                startEntry._dist = 0;
+                q.push(startEntry);
+                const visited = new Set();
+                visited.add(startEntry.x + ',' + startEntry.y);
+                while (q.length) {
+                    const cur = q.shift();
+                    const d = cur._dist;
+                    const nx = cur.x, ny = cur.y;
+                    const neigh = [ [nx+1, ny], [nx-1, ny], [nx, ny+1], [nx, ny-1] ];
+                    for (const [ax, ay] of neigh) {
+                        const k = ax + ',' + ay;
+                        if (!pointMap.has(k) || visited.has(k)) continue;
+                        const ne = pointMap.get(k);
+                        ne._dist = d + 1;
+                        visited.add(k);
+                        q.push(ne);
+                    }
+                }
+            }
+            // Assign disconnected points a large distance (append at end)
+            let maxDist = 0;
+            for (const e of entries) {
+                if (!Number.isFinite(e._dist)) e._dist = Infinity;
+                else maxDist = Math.max(maxDist, e._dist);
+            }
+            const totalIters = Math.max(1, (Number.isFinite(maxDist) ? (maxDist + 1) : 1));
+            const steps = Math.min(Math.max(4, totalIters), 60);
+            const buckets = Array.from({ length: steps }, () => []);
+            const scale = steps / totalIters;
+            for (const e of entries) {
+                const idx = (e._dist === Infinity) ? (steps - 1) : Math.min(steps - 1, Math.floor(e._dist * scale));
+                buckets[idx].push(e);
+            }
+            // target color
+            const targetCol = Color.convertColor(this.penColor || '#000000').toRgb();
+            const tr = Math.round(targetCol.a || 0), tg = Math.round(targetCol.b || 0), tb = Math.round(targetCol.c || 0), ta = Math.round((targetCol.d ?? 1) * 255);
+            const delay = Math.max(0, Math.round(durationMs / steps));
+            // apply buckets sequentially with spatially-varying mix + noise
+            for (let i = 0; i < buckets.length; i++) {
+                const batch = buckets[i];
+                setTimeout(() => {
+                    try {
+                        // for each pixel compute a mix factor based on normalized distance plus small noise
+                        const changes = [];
+                                for (const p of batch) {
+                                    // mix factor: use BFS iteration distance when available
+                                    // (normalized), otherwise fallback to radial distance.
+                                    const base = (Number.isFinite(p._dist) && p._dist !== Infinity)
+                                        ? Math.min(1, (p._dist / Math.max(1, maxDist)))
+                                        : Math.min(1, (p.dist || 0) / (maxDist || 1));
+                                    const noise = (Math.random() - 0.5) * 0.25; // noise magnitude
+                                    const mix = Math.max(0, Math.min(1, base + noise));
+                            // lerp original -> target
+                            const r = Math.round((1 - mix) * (p.r || 0) + mix * tr);
+                            const g = Math.round((1 - mix) * (p.g || 0) + mix * tg);
+                            const b = Math.round((1 - mix) * (p.b || 0) + mix * tb);
+                            const a = Math.round((1 - mix) * (p.a || 0) + mix * ta);
+                            changes.push({ x: p.x, y: p.y, color: this.rgbaToHex(r, g, b, a), blendType: 'replace' });
+                        }
+                        if (!changes.length) return;
+                        if (typeof sheet.modifyFrame === 'function') {
+                            try { sheet.modifyFrame(anim, frameIdx, changes); } catch (e) {
+                                for (const c of changes) try { sheet.setPixel(anim, frameIdx, c.x, c.y, c.color, 'replace'); } catch (e) {}
+                            }
+                        } else {
+                            for (const c of changes) try { sheet.setPixel(anim, frameIdx, c.x, c.y, c.color, 'replace'); } catch (e) {}
+                        }
+                        if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
+                    } catch (e) { /* ignore per-batch errors */ }
+                }, i * delay);
+            }
+        } catch (e) { /* ignore */ }
     }
 
     // Schedule sending buffered ops (throttled)
@@ -7843,6 +8658,7 @@ export class SpriteScene extends Scene {
         } finally {
             this._ignoreUndoCapture = false;
         }
+        try { this._playSfx('history.undo'); } catch (e) {}
         return true;
     }
 
@@ -7861,6 +8677,7 @@ export class SpriteScene extends Scene {
         } finally {
             this._ignoreUndoCapture = false;
         }
+        try { this._playSfx('history.redo'); } catch (e) {}
         return true;
     }
 
@@ -9290,6 +10107,7 @@ export class SpriteScene extends Scene {
         if (typeof areaIndex !== 'number' || areaIndex < 0) return false;
         const t = this._areaTransforms[areaIndex] || { rot: 0, flipH: false };
         t.rot = ((t.rot || 0) + 90) % 360;
+        try { this._playSfx('tile.rotate'); } catch (e) {}
         return this._setAreaTransformAtIndex(areaIndex, t, true);
     }
 
@@ -9298,6 +10116,7 @@ export class SpriteScene extends Scene {
         if (typeof areaIndex !== 'number' || areaIndex < 0) return false;
         const t = this._areaTransforms[areaIndex] || { rot: 0, flipH: false };
         t.flipH = !t.flipH;
+        try { this._playSfx('tile.flip'); } catch (e) {}
         return this._setAreaTransformAtIndex(areaIndex, t, true);
     }
 
@@ -9332,6 +10151,7 @@ export class SpriteScene extends Scene {
                     try { dctx.imageSmoothingEnabled = false; } catch (e) {}
                     try { dctx.drawImage(tmp, 0, 0, dest.width, dest.height); } catch (e) { /* ignore draw errors */ }
                     try { if (typeof sheet._updatePackedFrame === 'function') sheet._updatePackedFrame(anim, frameIdx); else if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) { try { sheet._rebuildSheetCanvas(); } catch (er) {} }
+                    try { this._playSfx('tile.rotate'); } catch (e) {}
                     return true;
                 }
                 // fallback: replace physical slot if materialized frame not available
@@ -9348,6 +10168,7 @@ export class SpriteScene extends Scene {
                     if (found !== -1) {
                         arr[found] = tmp;
                         try { if (typeof sheet._updatePackedFrame === 'function') sheet._updatePackedFrame(anim, frameIdx); else if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) { try { sheet._rebuildSheetCanvas(); } catch (er) {} }
+                        try { this._playSfx('tile.rotate'); } catch (e) {}
                         return true;
                     }
                 }
@@ -9381,6 +10202,7 @@ export class SpriteScene extends Scene {
                     try { dctx.imageSmoothingEnabled = false; } catch (e) {}
                     try { dctx.drawImage(tmp, 0, 0, dest.width, dest.height); } catch (e) { /* ignore draw errors */ }
                     try { if (typeof sheet._updatePackedFrame === 'function') sheet._updatePackedFrame(anim, frameIdx); else if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) { try { sheet._rebuildSheetCanvas(); } catch (er) {} }
+                    try { this._playSfx('tile.flip'); } catch (e) {}
                     return true;
                 }
                 if (sheet._frames && sheet._frames.has(anim)) {
@@ -9396,6 +10218,7 @@ export class SpriteScene extends Scene {
                     if (found !== -1) {
                         arr[found] = tmp;
                         try { if (typeof sheet._updatePackedFrame === 'function') sheet._updatePackedFrame(anim, frameIdx); else if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) { try { sheet._rebuildSheetCanvas(); } catch (er) {} }
+                        try { this._playSfx('tile.flip'); } catch (e) {}
                         return true;
                     }
                 }

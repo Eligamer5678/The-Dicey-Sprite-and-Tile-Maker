@@ -1713,6 +1713,7 @@ export default class FrameSelect {
                             if (this.mouse.released('left') && !this.keys.held('Shift') && !this.mouse.held('right') && currentSel !== i) {
                                 if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
                                 if (this.scene) this.scene.selectedFrame = i;
+                                try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.select'); } catch (e) {}
                                 try { if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch (e) {}
                                 handledConnectionToggle = true;
                             }
@@ -1722,6 +1723,7 @@ export default class FrameSelect {
                                 if (part !== -1) {
                                     this._toggleFrameConnection(anim, i, part);
                                     if (this.scene) this.scene.selectedFrame = i;
+                                    try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.select'); } catch (e) {}
                                     handledConnectionToggle = true;
                                 }
                             }
@@ -1732,6 +1734,7 @@ export default class FrameSelect {
                                 } else {
                                     if (this._multiSelected && this._multiSelected.size > 0 && !this.mouse.held('right')) this._multiSelected.clear();
                                     if (this.scene) this.scene.selectedFrame = i;
+                                    try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.select'); } catch (e) {}
                                 }
                             }
                         } catch (e) { if (this.scene) this.scene.selectedFrame = item.index; }
@@ -1750,6 +1753,7 @@ export default class FrameSelect {
                             this._ensureAnimationListed(anim);
                             this.sprite.insertFrame(anim);
                             if (this.scene) this.scene.selectedFrame = framesArr.length;
+                            try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.select'); } catch (e) {}
                             if (this._multiSelected && this._multiSelected.size > 0) this._multiSelected.clear();
                         }
                     }
@@ -1890,6 +1894,7 @@ export default class FrameSelect {
 
                             if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
                             if (this.scene && newLogicalIndex !== null) this.scene.selectedFrame = newLogicalIndex;
+                            try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.merge'); } catch (e) {}
                             // clear multi selection after merge
                             if (this._multiSelected) this._multiSelected.clear();
                             try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
@@ -1961,6 +1966,7 @@ export default class FrameSelect {
                         const newLen = (this.sprite._frames.get(anim) || []).length;
                         if (newLen === 0) this.scene.selectedFrame = 0;
                         else this.scene.selectedFrame = Math.max(0, Math.min(sel, newLen - 1));
+                        try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.delete'); } catch (e) {}
                         // mask input so other UI doesn't receive the same key/mouse (use addMask for click context)
                         this.mouse.addMask(1);
                     }
@@ -2047,6 +2053,7 @@ export default class FrameSelect {
                                 if (this._multiSelected) this._multiSelected.clear();
                                 for (const ni of newLogicalIndices) this._multiSelected.add(ni);
                                 if (this.scene && newLogicalIndices.length > 0) this.scene.selectedFrame = newLogicalIndices[0];
+                                try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.duplicate'); } catch (e) {}
                                 try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                             } else {
                                 // fallback: duplicate single selected frame (existing behavior)
@@ -2078,6 +2085,7 @@ export default class FrameSelect {
                                             } catch (e) { console.warn('FrameSelect single duplicate copy failed', e); }
                                             if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
                                             if (this.scene) this.scene.selectedFrame = newLogical;
+                                            try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.duplicate'); } catch (e) {}
                                         } else if (src) {
                                             const clone = document.createElement('canvas');
                                             clone.width = this.sprite.slicePx || (src ? src.width : 16);
@@ -2087,6 +2095,7 @@ export default class FrameSelect {
                                             arr.splice(sel + 1, 0, clone);
                                             if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
                                             if (this.scene) this.scene.selectedFrame = sel + 1;
+                                            try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.duplicate'); } catch (e) {}
                                         }
                                         try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                     } catch (e) { console.warn('FrameSelect duplicate failed', e); }
@@ -2112,6 +2121,7 @@ export default class FrameSelect {
                                     arr[sel] = prev;
                                     if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
                                     if (this.scene) this.scene.selectedFrame = sel - 1;
+                                    try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                 }
                             } else {
@@ -2150,6 +2160,7 @@ export default class FrameSelect {
                                         for (const ni of newIndices) this._multiSelected.add(ni);
                                         if (this.scene) this.scene.selectedFrame = newIndices[0];
                                         if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                        try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                         try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                     }
                                 } else {
@@ -2194,6 +2205,7 @@ export default class FrameSelect {
                                         if (ni !== -1) this._multiSelected.add(ni);
                                     }
                                     if (this.scene) this.scene.selectedFrame = Math.min(...Array.from(this._multiSelected));
+                                    try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                 }
                             }
@@ -2217,6 +2229,7 @@ export default class FrameSelect {
                                     arr[sel] = next;
                                     if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
                                     if (this.scene) this.scene.selectedFrame = sel + 1;
+                                    try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                 }
                             } else {
@@ -2256,6 +2269,7 @@ export default class FrameSelect {
                                         for (const ni of newIndices) this._multiSelected.add(ni);
                                         if (this.scene) this.scene.selectedFrame = newIndices[0];
                                         if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                        try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                         try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                     }
                                 } else {
@@ -2290,11 +2304,12 @@ export default class FrameSelect {
                                     if (!this.sprite._frameGroups) this.sprite._frameGroups = new Map();
                                     this.sprite._frameGroups.set(anim, groups);
                                     if (this._multiSelected) this._multiSelected.clear();
-                                    for (const orig of selOriginals) {
+                                    for (const orig of originals) {
                                         const ni = arr.indexOf(orig);
                                         if (ni !== -1) this._multiSelected.add(ni);
                                     }
                                     if (this.scene) this.scene.selectedFrame = Math.min(...Array.from(this._multiSelected));
+                                    try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                 }
                             }

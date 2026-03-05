@@ -25,6 +25,8 @@ import ServerManager from './js/Server/ServerManager.js';
 import Menu from './js/UI/Menu.js';
 import UIButton from './js/UI/Button.js';
 import UITextInput from './js/UI/UITextInput.js';
+import SoundManager from './js/SoundManager.js';
+import { createSFX } from './js/SFX.js';
 
 
 const mainWidth = 1920;
@@ -77,6 +79,34 @@ class Game {
         this.remoteStateSignal = new Signal(); // Signal to apply remote state updates
         this.enableMultiplayer = new Signal(); // Signal to enable multiplayer features
         this.playerCount = 1; // Number of players in the current session
+
+        // Audio (shared across all scenes)
+        try {
+            this.soundGuy = new SoundManager();
+            this.sfx = createSFX(this.soundGuy, { baseUrl: './sounds', masterVolume: 0.9 });
+            // Fire-and-forget preload; missing files are handled gracefully.
+            try { this.sfx.preload(); } catch (e) { /* ignore */ }
+
+            // Debug hooks + auto-resume on first user gesture.
+            try {
+                window.soundGuy = this.soundGuy;
+                window.sfx = this.sfx;
+                const resumeOnce = () => {
+                    try { this.soundGuy && this.soundGuy.resume && this.soundGuy.resume(); } catch (e) {}
+                    try { window.removeEventListener('pointerdown', resumeOnce, true); } catch (e) {}
+                    try { window.removeEventListener('keydown', resumeOnce, true); } catch (e) {}
+                };
+                window.addEventListener('pointerdown', resumeOnce, true);
+                window.addEventListener('keydown', resumeOnce, true);
+            } catch (e) {
+                /* ignore */
+            }
+        } catch (e) {
+            console.warn('Audio init failed; SFX disabled', e);
+            this.soundGuy = null;
+            this.sfx = null;
+        }
+
         (async () => {
             const cfgUrl = './js/Server/firebaseConfig.js';
             try {
@@ -168,6 +198,14 @@ class Game {
                 this.server,
                 this.playerCount
             );
+
+            // Inject shared resources.
+            try {
+                scene.soundGuy = this.soundGuy;
+                scene.sfx = this.sfx;
+            } catch (e) {
+                /* ignore */
+            }
             if (scene.onPreload) return  scene.onPreload(resources).then(() => {
                 this.scenes.set(name, scene);
                 return scene;
