@@ -3,6 +3,7 @@ import Vector,{v} from '../js/Vector.js';
 import createHDiv from '../js/htmlElements/createHDiv.js';
 import createHInput from '../js/htmlElements/createHInput.js';
 import SpriteSheet from '../js/Spritesheet.js';
+import Geometry from '../js/Geometry.js';
 import FrameSelect from '../js/UI/frameSelect.js';
 import Color from '../js/Color.js';
 import { copyToClipboard } from '../js/Support.js';
@@ -2095,6 +2096,469 @@ export class SpriteScene extends Scene {
         }
     }
 
+    _isAnimationAvailable(animName) {
+        try {
+            const name = String(animName || '').trim();
+            return !!(name && this.currentSprite && this.currentSprite._frames && this.currentSprite._frames.has(name));
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _getAnimationFrameCountSafe(animName) {
+        try {
+            if (!this._isAnimationAvailable(animName)) return 0;
+            return Math.max(1, Number(this._getAnimationLogicalFrameCount(animName) || 0));
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    _resolveDirectionalAnimation(baseAnim, dirName, prefixes = []) {
+        try {
+            const base = String(baseAnim || '').trim();
+            const dir = String(dirName || '').trim().toLowerCase();
+            if (!base || !dir) return null;
+            const opposite = { left: 'right', right: 'left', up: 'down', down: 'up' };
+            const oppositeDir = opposite[dir] || null;
+            const flipX = (dir === 'left' || dir === 'right');
+            const flipY = (dir === 'up' || dir === 'down');
+
+            const candidates = [];
+            for (const p of prefixes) {
+                const pref = String(p || '').trim();
+                if (!pref) continue;
+                candidates.push(`${base}-${pref}-${dir}`);
+            }
+            candidates.push(`${base}-${dir}`);
+
+            for (const c of candidates) {
+                if (this._isAnimationAvailable(c)) return { anim: c, flipX: false, flipY: false };
+            }
+
+            if (!oppositeDir) return null;
+            const oppositeCandidates = [];
+            for (const p of prefixes) {
+                const pref = String(p || '').trim();
+                if (!pref) continue;
+                oppositeCandidates.push(`${base}-${pref}-${oppositeDir}`);
+            }
+            oppositeCandidates.push(`${base}-${oppositeDir}`);
+
+            for (const c of oppositeCandidates) {
+                if (!this._isAnimationAvailable(c)) continue;
+                return {
+                    anim: c,
+                    flipX: !!flipX,
+                    flipY: !!flipY
+                };
+            }
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _resolvePlayerSimAnimation(player, moveX, moveY) {
+        try {
+            const base = String((player && player.baseAnim) || this.selectedAnimation || 'idle');
+            const gravity = !!(player && player.gravityEnabled);
+            const onGround = !!(player && player.onGround);
+            const absX = Math.abs(moveX || 0);
+            const absY = Math.abs(moveY || 0);
+            const isMoving = (absX > 0.0001 || absY > 0.0001);
+
+            if (!isMoving) return { anim: base, flipX: false, flipY: false };
+
+            if (gravity && !onGround) {
+                const jumpAnim = `${base}-jump`;
+                if (this._isAnimationAvailable(jumpAnim)) {
+                    return { anim: jumpAnim, flipX: false, flipY: false };
+                }
+            }
+
+            let dir = 'right';
+            if (gravity) {
+                dir = (moveX < 0) ? 'left' : 'right';
+            } else if (absX >= absY) {
+                dir = (moveX < 0) ? 'left' : 'right';
+            } else {
+                dir = (moveY < 0) ? 'up' : 'down';
+            }
+
+            const walkOrMove = this._resolveDirectionalAnimation(base, dir, ['walk'])
+                || this._resolveDirectionalAnimation(base, dir, ['move'])
+                || this._resolveDirectionalAnimation(base, dir, []);
+            if (walkOrMove) return walkOrMove;
+            return { anim: base, flipX: false, flipY: false };
+        } catch (e) {
+            return { anim: this.selectedAnimation || 'idle', flipX: false, flipY: false };
+        }
+    }
+
+    _cursorToWorldPixel(posInfo = null) {
+        try {
+            const pos = posInfo || this.getPos(this.mouse && this.mouse.pos);
+            if (!pos) return null;
+            const slice = Math.max(1, Number((this.currentSprite && this.currentSprite.slicePx) || 1));
+            const col = Number.isFinite(Number(pos.tileCol)) ? (Number(pos.tileCol) | 0) : 0;
+            const row = Number.isFinite(Number(pos.tileRow)) ? (Number(pos.tileRow) | 0) : 0;
+            const lx = Number.isFinite(Number(pos.x)) ? Number(pos.x) : (slice * 0.5);
+            const ly = Number.isFinite(Number(pos.y)) ? Number(pos.y) : (slice * 0.5);
+            return new Vector(col * slice + lx, row * slice + ly);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _worldPixelToDrawWorld(worldPos, basePos, tileDrawSize, slicePx) {
+        try {
+            if (!worldPos || !basePos || !tileDrawSize || !slicePx) return null;
+            const sx = tileDrawSize.x / slicePx;
+            const sy = tileDrawSize.y / slicePx;
+            return new Vector(basePos.x + worldPos.x * sx, basePos.y + worldPos.y * sy);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _isSolidTileForSim(col, row) {
+        try {
+            if (!this.tilemode) return false;
+            return !!this._isTileActive(col, row);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _isPlayerGroundedByProbe(player, insetPx = 2, probeHeight = 3, probeOffsetY = 1) {
+        try {
+            if (!player || !player.pos || !player.size || !this.tilemode) return false;
+            const slice = Math.max(1, Number((this.currentSprite && this.currentSprite.slicePx) || 16));
+            const px = Number(player.pos.x) || 0;
+            const py = Number(player.pos.y) || 0;
+            const pw = Math.max(1, Number(player.size.x) || slice);
+            const ph = Math.max(1, Number(player.size.y) || slice);
+
+            const probePos = new Vector(px + insetPx, py + ph + probeOffsetY);
+            const probeSize = new Vector(Math.max(1, pw - insetPx * 2), Math.max(1, probeHeight));
+
+            const minCol = Math.floor(probePos.x / slice) - 1;
+            const maxCol = Math.floor((probePos.x + probeSize.x) / slice) + 1;
+            const minRow = Math.floor(probePos.y / slice) - 1;
+            const maxRow = Math.floor((probePos.y + probeSize.y) / slice) + 1;
+            const tileSize = new Vector(slice, slice);
+
+            for (let row = minRow; row <= maxRow; row++) {
+                for (let col = minCol; col <= maxCol; col++) {
+                    if (!this._isSolidTileForSim(col, row)) continue;
+                    const tilePos = new Vector(col * slice, row * slice);
+                    if (Geometry.rectCollide(probePos, probeSize, tilePos, tileSize)) return true;
+                }
+            }
+            return false;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _togglePlayerSimMode() {
+        try {
+            const mode = this._playerSimMode;
+            if (!mode) return false;
+
+            if (mode.active) {
+                const pass = mode.passcode || '';
+                if (!(this.keys.released(' ', pass) || this.keys.released('Space', pass) || this.keys.released('Spacebar', pass))) return false;
+                mode.active = false;
+                mode.player = null;
+                try {
+                    if (mode.prevPasscode) this.keys.setPasscode(mode.prevPasscode);
+                    else this.keys.resetPasscode();
+                } catch (e) {}
+                try { if (mode.prevOffset && mode.prevZoom) this._startCameraOffsetTween(mode.prevOffset.clone(), 0.35, mode.prevZoom.clone()); } catch (e) {}
+                return true;
+            }
+
+            if (!(this.keys.released(' ') || this.keys.released('Space') || this.keys.released('Spacebar'))) return false;
+            const baseAnim = String(this.selectedAnimation || '').trim();
+            if (!baseAnim || !this._isAnimationAvailable(baseAnim)) return false;
+
+            const pos = this.getPos(this.mouse && this.mouse.pos);
+            if (!pos || (!pos.inside && !pos.renderOnly)) return false;
+
+            const worldAtCursor = this._cursorToWorldPixel(pos);
+            if (!worldAtCursor) return false;
+
+            const slice = Math.max(1, Number((this.currentSprite && this.currentSprite.slicePx) || 16));
+            const playerSize = new Vector(slice * 0.8, slice * 0.8);
+            const spawn = new Vector(worldAtCursor.x - playerSize.x * 0.5, worldAtCursor.y - playerSize.y * 0.5);
+
+            mode.prevPasscode = this.keys.passcode || '';
+            mode.prevOffset = this.offset && this.offset.clone ? this.offset.clone() : new Vector(0, 0);
+            mode.prevZoom = this.zoom && this.zoom.clone ? this.zoom.clone() : new Vector(1, 1);
+            mode.active = true;
+            mode.player = {
+                pos: spawn,
+                vlos: new Vector(0, 0),
+                size: playerSize,
+                baseAnim,
+                anim: baseAnim,
+                frame: 0,
+                frameClock: 0,
+                flipX: false,
+                flipY: false,
+                gravityEnabled: false,
+                onGround: false,
+                facingX: 1,
+                facingY: 1,
+                maxFallSpeed: 220,
+                camLook: new Vector(0, 0),
+                coyoteTimeMax: 0.22,
+                coyoteTime: 0,
+                fallLookTimer: 0,
+                fallLookY: 0
+            };
+            this.keys.setPasscode(mode.passcode);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _updatePlayerSimMode(tickDelta) {
+        try {
+            const mode = this._playerSimMode;
+            const player = mode && mode.player;
+            if (!mode || !mode.active || !player) return false;
+
+            const dt = Math.max(0.001, Number(tickDelta) || 0.016);
+            const pass = mode.passcode || '';
+            if (this.keys.released('g', pass) || this.keys.released('G', pass)) {
+                player.gravityEnabled = !player.gravityEnabled;
+                if (!player.gravityEnabled) player.vlos.y = 0;
+            }
+
+            const left = !!(this.keys.held('a', false, pass) || this.keys.held('A', false, pass) || this.keys.held('ArrowLeft', false, pass));
+            const right = !!(this.keys.held('d', false, pass) || this.keys.held('D', false, pass) || this.keys.held('ArrowRight', false, pass));
+            const up = !!(this.keys.held('w', false, pass) || this.keys.held('W', false, pass) || this.keys.held('ArrowUp', false, pass));
+            const down = !!(this.keys.held('s', false, pass) || this.keys.held('S', false, pass) || this.keys.held('ArrowDown', false, pass));
+
+            let moveX = (right ? 1 : 0) - (left ? 1 : 0);
+            let moveY = (down ? 1 : 0) - (up ? 1 : 0);
+            const speed = player.gravityEnabled ? 70 : 70;
+            const gravityAcc = 170;
+            const jumpVel = 90;
+            const maxFallSpeed = Math.max(1, Number(player.maxFallSpeed) || 220);
+            const coyoteMax = Math.max(0, Number(player.coyoteTimeMax) || 0.12);
+
+            // Ground probe is independent from collision response so tiny bounces do not kill jump readiness.
+            if (player.gravityEnabled) {
+                player.onGround = this._isPlayerGroundedByProbe(player, 2, Math.max(2, Math.round(player.size.y * 0.08)), 1);
+                player.coyoteTime = player.onGround ? coyoteMax : Math.max(0, (Number(player.coyoteTime) || 0) - dt);
+            }
+
+            if (!player.gravityEnabled && moveX !== 0 && moveY !== 0) {
+                const inv = Math.SQRT1_2;
+                moveX *= inv;
+                moveY *= inv;
+            }
+
+            if (moveX !== 0) player.facingX = (moveX < 0 ? -1 : 1);
+            if (!player.gravityEnabled && moveY !== 0) player.facingY = (moveY < 0 ? -1 : 1);
+
+            if (player.gravityEnabled) {
+                const jumpPressed = !!(this.keys.pressed('w', pass) || this.keys.pressed('W', pass) || this.keys.pressed('ArrowUp', pass));
+                if (jumpPressed && (player.onGround || (player.coyoteTime > 0))) {
+                    player.vlos.y = -jumpVel;
+                    player.onGround = false;
+                    player.coyoteTime = 0;
+                }
+                player.vlos.x = moveX * speed;
+                player.vlos.y += gravityAcc * dt;
+                if (player.vlos.y > maxFallSpeed) player.vlos.y = maxFallSpeed;
+                moveY = player.vlos.y;
+            } else {
+                player.vlos.x = moveX * speed;
+                player.vlos.y = moveY * speed;
+                player.coyoteTime = 0;
+                player.fallLookTimer = 0;
+                player.fallLookY = 0;
+            }
+
+            const deltaStep = player.vlos.clone().multS(dt);
+            let curPos = player.pos.clone();
+            let curStep = deltaStep.clone();
+            let collidedBottom = false;
+
+            const slice = Math.max(1, Number((this.currentSprite && this.currentSprite.slicePx) || 16));
+            const tileSize = new Vector(slice, slice);
+            const centerX = curPos.x + player.size.x * 0.5;
+            const centerY = curPos.y + player.size.y * 0.5;
+            const centerCol = Math.floor(centerX / slice);
+            const centerRow = Math.floor(centerY / slice);
+            const speedMag = Math.sqrt(curStep.x * curStep.x + curStep.y * curStep.y);
+            const radius = speedMag > 0.7 ? 2 : 1; // 5x5 when moving quickly, otherwise 3x3
+
+            for (let dy = -radius; dy <= radius; dy++) {
+                for (let dx = -radius; dx <= radius; dx++) {
+                    const col = centerCol + dx;
+                    const row = centerRow + dy;
+                    if (!this._isSolidTileForSim(col, row)) continue;
+                    const tilePos = new Vector(col * slice, row * slice);
+                    const res = Geometry.spriteToTile(curPos, curStep, player.size, tilePos, tileSize, 1);
+                    if (!res) continue;
+                    curPos = res.pos;
+                    curStep = res.vlos;
+                    if (res.collided && res.collided.bottom) collidedBottom = true;
+                }
+            }
+
+            curPos.addS(curStep);
+            player.pos = curPos;
+            if (player.gravityEnabled) {
+                player.vlos.x = curStep.x / dt;
+                player.vlos.y = curStep.y / dt;
+                if (collidedBottom && player.vlos.y > 0) player.vlos.y = 0;
+            }
+            player.onGround = player.gravityEnabled
+                ? this._isPlayerGroundedByProbe(player, 2, Math.max(2, Math.round(player.size.y * 0.08)), 1)
+                : collidedBottom;
+            if (player.gravityEnabled) {
+                player.coyoteTime = player.onGround ? coyoteMax : Math.max(0, (Number(player.coyoteTime) || 0) - dt);
+                if (player.onGround) {
+                    // Landing snaps away any fall-induced camera bias immediately.
+                    player.fallLookTimer = 0;
+                    player.fallLookY = 0;
+                }
+            }
+
+            const animInfo = this._resolvePlayerSimAnimation(player, moveX, moveY);
+            const nextAnim = (animInfo && animInfo.anim) ? animInfo.anim : player.baseAnim;
+            if (nextAnim !== player.anim) {
+                player.anim = nextAnim;
+                player.frame = 0;
+                player.frameClock = 0;
+            }
+            player.flipX = !!(animInfo && animInfo.flipX);
+            player.flipY = !!(animInfo && animInfo.flipY);
+
+            const frameCount = this._getAnimationFrameCountSafe(player.anim);
+            if (frameCount > 0) {
+                const fps = Math.max(0, Number(this._getSpriteAnimationFps(player.anim, 8)) || 0);
+                if (fps > 0) {
+                    player.frameClock += dt * fps;
+                    while (player.frameClock >= 1) {
+                        player.frameClock -= 1;
+                        player.frame = (player.frame + 1) % frameCount;
+                    }
+                } else {
+                    player.frame = Math.max(0, Math.min(frameCount - 1, player.frame | 0));
+                }
+            } else {
+                player.frame = 0;
+            }
+
+            const baseArea = this.computeDrawArea();
+            if (baseArea) {
+                const centerWorld = new Vector(player.pos.x + player.size.x * 0.5, player.pos.y + player.size.y * 0.5);
+                const rightHeld = Math.max(
+                    Number(this.keys.held('d', true, pass)) || 0,
+                    Number(this.keys.held('D', true, pass)) || 0,
+                    Number(this.keys.held('ArrowRight', true, pass)) || 0
+                );
+                const leftHeld = Math.max(
+                    Number(this.keys.held('a', true, pass)) || 0,
+                    Number(this.keys.held('A', true, pass)) || 0,
+                    Number(this.keys.held('ArrowLeft', true, pass)) || 0
+                );
+                const downHeld = Math.max(
+                    Number(this.keys.held('s', true, pass)) || 0,
+                    Number(this.keys.held('S', true, pass)) || 0,
+                    Number(this.keys.held('ArrowDown', true, pass)) || 0
+                );
+                const upHeld = Math.max(
+                    Number(this.keys.held('w', true, pass)) || 0,
+                    Number(this.keys.held('W', true, pass)) || 0,
+                    Number(this.keys.held('ArrowUp', true, pass)) || 0
+                );
+
+                const lookRampSec = 1.35;
+                const lookXIntent = Math.max(-1, Math.min(1, (rightHeld - leftHeld) / lookRampSec));
+                const lookYIntent = Math.max(-1, Math.min(1, (downHeld - upHeld) / lookRampSec));
+                const maxLookX = slice * 2.8;
+                const maxLookY = slice * 1.8;
+
+                let desiredLookX = 0;
+                let desiredLookY = 0;
+                if (player.gravityEnabled) {
+                    desiredLookX = lookXIntent * maxLookX;
+                    const keyLookY = lookYIntent * maxLookY;
+                    desiredLookY = keyLookY;
+
+                    // Falling look-ahead: ramps with fall duration (smooth) and starts before terminal velocity.
+                    const fallStartSpeed = maxFallSpeed * 0.32;
+                    const fallingNow = (!player.onGround) && (player.vlos.y > fallStartSpeed);
+                    if (fallingNow) player.fallLookTimer = (Number(player.fallLookTimer) || 0) + dt;
+                    else player.fallLookTimer = Math.max(0, (Number(player.fallLookTimer) || 0) - dt * 2.5);
+
+                    const fallRampSec = 0.95;
+                    const fallDurationIntent = Math.max(0, Math.min(1, (Number(player.fallLookTimer) || 0) / fallRampSec));
+                    const fallSpeedIntent = Math.max(0, Math.min(1, (player.vlos.y - fallStartSpeed) / Math.max(1, (maxFallSpeed - fallStartSpeed))));
+                    let fallIntent = Math.max(fallDurationIntent, fallSpeedIntent * 0.6);
+
+                    const upSuppression = Math.max(0, Math.min(1, upHeld / lookRampSec));
+                    fallIntent *= (1 - upSuppression * 0.9);
+
+                    const maxFallLookY = slice * 3.4;
+                    if (player.onGround) {
+                        player.fallLookY = 0;
+                    } else {
+                        player.fallLookY = maxFallLookY * fallIntent;
+                    }
+                    desiredLookY = keyLookY + (Number(player.fallLookY) || 0);
+                }
+
+                if (!player.camLook || typeof player.camLook.x !== 'number') player.camLook = new Vector(0, 0);
+                const lookEase = 1 - Math.exp(-4.5 * dt);
+                player.camLook.x += (desiredLookX - player.camLook.x) * lookEase;
+                player.camLook.y += (desiredLookY - player.camLook.y) * lookEase;
+
+                const focusWorld = centerWorld.add(player.camLook);
+                const centerDraw = this._worldPixelToDrawWorld(focusWorld, baseArea.topLeft, baseArea.size, slice);
+                if (centerDraw) {
+                    const targetOffsetX = (1920 / (2 * this.zoom.x)) - centerDraw.x;
+                    const targetOffsetY = (1080 / (2 * this.zoom.y)) - centerDraw.y;
+                    const ease = 1 - Math.exp(-9 * dt);
+                    this.offset.x += (targetOffsetX - this.offset.x) * ease;
+                    this.offset.y += (targetOffsetY - this.offset.y) * ease;
+                    if (this.panVlos) { this.panVlos.x = 0; this.panVlos.y = 0; }
+                    if (this.zoomVlos) { this.zoomVlos.x = 0; this.zoomVlos.y = 0; }
+                }
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _drawPlayerSim(basePos, areaSize) {
+        try {
+            const mode = this._playerSimMode;
+            const player = mode && mode.player;
+            if (!mode || !mode.active || !player || !this.currentSprite) return;
+
+            const slice = Math.max(1, Number((this.currentSprite && this.currentSprite.slicePx) || 16));
+            const drawPos = this._worldPixelToDrawWorld(player.pos, basePos, areaSize, slice);
+            if (!drawPos) return;
+            const drawSize = new Vector((player.size.x / slice) * areaSize.x, (player.size.y / slice) * areaSize.y);
+            const invert = { x: player.flipX ? -1 : 1, y: player.flipY ? -1 : 1 };
+            this.Draw.sheet(this.currentSprite, drawPos, drawSize, player.anim, player.frame, invert, 1, false);
+        } catch (e) {
+            /* ignore player sim draw errors */
+        }
+    }
+
     _handleSpriteEntityInteractions() {
         try {
             if (!this.tilemode || !this.mouse || !this.keys) {
@@ -2153,6 +2617,23 @@ export class SpriteScene extends Scene {
         this._sceneTime = (this._sceneTime || 0) + (tickDelta || 0);
         this.mouse.update(tickDelta)
         this.keys.update(tickDelta)
+        if (!this._playerSimMode) {
+            this._playerSimMode = {
+                active: false,
+                player: null,
+                passcode: '__spriteScenePlayerSim__',
+                prevPasscode: '',
+                prevOffset: null,
+                prevZoom: null
+            };
+        }
+        try { this._togglePlayerSimMode(); } catch (e) {}
+        if (this._playerSimMode && this._playerSimMode.active) {
+            this.mouse.setMask(1);
+            this.mouse.setPower(0);
+            try { this._updatePlayerSimMode(tickDelta); } catch (e) {}
+            return;
+        }
         try {
             const currentAnim = String(this.selectedAnimation || '');
             const prevAnim = String(this._lastEditorAnimationForSpriteSelection || '');
@@ -2680,51 +3161,6 @@ export class SpriteScene extends Scene {
                         }
                     }
                 } catch (e) { console.warn('area bind key failed', e); }
-
-                // Toggle tile activation under cursor when in tilemode (infinite grid). Space adds/removes tiles.
-                try {
-                    if (this.tilemode && this.keys && typeof this.keys.released === 'function' && (this.keys.released(' ') || this.keys.released('Space') || this.keys.released('Spacebar'))) {
-                        const slashHeld = (this.keys.held && (this.keys.held('/') || this.keys.held('?')));
-                        const shiftHeld = this.keys.held && this.keys.held('Shift');
-                        const mirrorChord = slashHeld || shiftHeld;
-                        const pos = this.getPos(this.mouse && this.mouse.pos);
-                        if (pos && pos.tileCol !== null && pos.tileRow !== null) {
-                            const areaIdx = (typeof pos.areaIndex === 'number') ? pos.areaIndex : this._getAreaIndexForCoord(pos.tileCol, pos.tileRow);
-                            if (mirrorChord) {
-                                // Space + hold '/' -> ensure tile active, add mirrored frame, bind tile to it.
-                                this._activateTile(pos.tileCol, pos.tileRow);
-                                const sheet = this.currentSprite;
-                                const anim = this.selectedAnimation;
-                                const srcFrame = this.selectedFrame;
-                                if (sheet && anim !== undefined && anim !== null && Number.isFinite(srcFrame)) {
-                                    const insertAt = Math.max(0, Math.floor(srcFrame) + 1);
-                                    try { if (typeof sheet.insertFrame === 'function') sheet.insertFrame(anim, insertAt); } catch (e) { /* ignore insert errors */ }
-                                    try {
-                                        const src = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, srcFrame) : null;
-                                        const dst = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, insertAt) : null;
-                                        if (src && dst && src.width && src.height && dst.getContext) {
-                                            const dctx = dst.getContext('2d');
-                                            try { dctx.clearRect(0, 0, dst.width, dst.height); } catch (e) {}
-                                            try { dctx.imageSmoothingEnabled = false; } catch (e) {}
-                                            dctx.save();
-                                            dctx.translate(dst.width, 0);
-                                            dctx.scale(-1, 1);
-                                            dctx.drawImage(src, 0, 0);
-                                            dctx.restore();
-                                        }
-                                        if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch (e) {}
-                                        this._setAreaBindingAtIndex(areaIdx, { anim, index: insertAt }, true);
-                                        if (this.stateController) this.stateController.setActiveFrame(insertAt);
-                                        else this.selectedFrame = insertAt;
-                                    } catch (e) { /* ignore mirror copy errors */ }
-                                }
-                            } else {
-                                if (pos.tileActive) this._deactivateTile(pos.tileCol, pos.tileRow);
-                                else this._activateTile(pos.tileCol, pos.tileRow);
-                            }
-                        }
-                    }
-                } catch (e) { console.warn('tile activation toggle failed', e); }
 
                     // Rotate / Flip preview and commit handlers for area under mouse
                     try {
@@ -4460,6 +4896,7 @@ export class SpriteScene extends Scene {
                                 }
                             }
                         }
+
                     }
                 }
             } catch (e) { /* ignore tile box-select errors */ }
@@ -8782,6 +9219,386 @@ export class SpriteScene extends Scene {
     }
 
     // --- Undo / Redo helpers ---
+    _captureTileUndoState() {
+        try {
+            const activeTiles = [];
+            if (this._tileActive && this._tileActive.size > 0) {
+                const keys = Array.from(this._tileActive).sort();
+                for (const key of keys) {
+                    const c = this._parseTileKey(key);
+                    if (c) activeTiles.push({ col: c.col | 0, row: c.row | 0 });
+                }
+            }
+
+            const bindings = [];
+            if (Array.isArray(this._areaBindings)) {
+                for (let i = 0; i < this._areaBindings.length; i++) {
+                    const b = this._areaBindings[i];
+                    if (!b || typeof b !== 'object') continue;
+                    bindings.push({
+                        i,
+                        anim: String(b.anim || ''),
+                        index: Number.isFinite(Number(b.index)) ? (Number(b.index) | 0) : 0,
+                        multiFrames: Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v) | 0) : null
+                    });
+                }
+            }
+
+            const transforms = [];
+            if (Array.isArray(this._areaTransforms)) {
+                for (let i = 0; i < this._areaTransforms.length; i++) {
+                    const t = this._areaTransforms[i];
+                    if (!t || typeof t !== 'object') continue;
+                    transforms.push({ i, rot: Number(t.rot || 0) | 0, flipH: !!t.flipH });
+                }
+            }
+
+            const selectionPoints = Array.isArray(this.selectionPoints)
+                ? this.selectionPoints
+                    .map((p) => ({
+                        x: Number(p && p.x) | 0,
+                        y: Number(p && p.y) | 0,
+                        areaIndex: Number.isFinite(Number(p && p.areaIndex)) ? (Number(p.areaIndex) | 0) : null
+                    }))
+                : [];
+
+            const selectionRegion = this.selectionRegion
+                ? {
+                    start: {
+                        x: Number(this.selectionRegion.start && this.selectionRegion.start.x) | 0,
+                        y: Number(this.selectionRegion.start && this.selectionRegion.start.y) | 0
+                    },
+                    end: {
+                        x: Number(this.selectionRegion.end && this.selectionRegion.end.x) | 0,
+                        y: Number(this.selectionRegion.end && this.selectionRegion.end.y) | 0
+                    },
+                    areaIndex: Number.isFinite(Number(this.selectionRegion.areaIndex)) ? (Number(this.selectionRegion.areaIndex) | 0) : null
+                }
+                : null;
+
+            const tileSelection = (this._tileSelection && this._tileSelection.size > 0)
+                ? Array.from(this._tileSelection).sort()
+                : [];
+
+            return {
+                tilemode: !!this.tilemode,
+                tileCols: Number(this.tileCols) | 0,
+                tileRows: Number(this.tileRows) | 0,
+                activeTiles,
+                bindings,
+                transforms,
+                selectionPoints,
+                selectionRegion,
+                tileSelection
+            };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _tileUndoStateHash(state) {
+        try { return JSON.stringify(state || null); } catch (e) { return ''; }
+    }
+
+    _captureSelectionUndoState() {
+        try {
+            return {
+                selectionPoints: Array.isArray(this.selectionPoints)
+                    ? this.selectionPoints.map((p) => ({
+                        x: Number(p && p.x) | 0,
+                        y: Number(p && p.y) | 0,
+                        areaIndex: Number.isFinite(Number(p && p.areaIndex)) ? (Number(p.areaIndex) | 0) : null
+                    }))
+                    : [],
+                selectionRegion: this.selectionRegion
+                    ? {
+                        start: {
+                            x: Number(this.selectionRegion.start && this.selectionRegion.start.x) | 0,
+                            y: Number(this.selectionRegion.start && this.selectionRegion.start.y) | 0
+                        },
+                        end: {
+                            x: Number(this.selectionRegion.end && this.selectionRegion.end.x) | 0,
+                            y: Number(this.selectionRegion.end && this.selectionRegion.end.y) | 0
+                        },
+                        areaIndex: Number.isFinite(Number(this.selectionRegion.areaIndex)) ? (Number(this.selectionRegion.areaIndex) | 0) : null
+                    }
+                    : null,
+                tileSelection: (this._tileSelection && this._tileSelection.size > 0)
+                    ? Array.from(this._tileSelection).sort()
+                    : []
+            };
+        } catch (e) {
+            return { selectionPoints: [], selectionRegion: null, tileSelection: [] };
+        }
+    }
+
+    _applySelectionUndoState(state) {
+        try {
+            if (!state || typeof state !== 'object') return false;
+            this.selectionPoints = Array.isArray(state.selectionPoints)
+                ? state.selectionPoints.map((p) => ({
+                    x: Number(p && p.x) | 0,
+                    y: Number(p && p.y) | 0,
+                    areaIndex: Number.isFinite(Number(p && p.areaIndex)) ? (Number(p.areaIndex) | 0) : null
+                }))
+                : [];
+            this.selectionRegion = state.selectionRegion
+                ? {
+                    start: {
+                        x: Number(state.selectionRegion.start && state.selectionRegion.start.x) | 0,
+                        y: Number(state.selectionRegion.start && state.selectionRegion.start.y) | 0
+                    },
+                    end: {
+                        x: Number(state.selectionRegion.end && state.selectionRegion.end.x) | 0,
+                        y: Number(state.selectionRegion.end && state.selectionRegion.end.y) | 0
+                    },
+                    areaIndex: Number.isFinite(Number(state.selectionRegion.areaIndex)) ? (Number(state.selectionRegion.areaIndex) | 0) : null
+                }
+                : null;
+            this._tileSelection = new Set(Array.isArray(state.tileSelection) ? state.tileSelection : []);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _trackSelectionUndoState() {
+        try {
+            const cur = this._captureSelectionUndoState();
+            const curHash = this._tileUndoStateHash(cur);
+            if (!this._selectionUndoStateHash) {
+                this._selectionUndoStateHash = curHash;
+                this._selectionUndoState = cur;
+                return;
+            }
+            if (curHash === this._selectionUndoStateHash) return;
+
+            // Keep baseline synced when undo capture is suppressed (e.g. during undo/redo apply).
+            if (this._ignoreUndoCapture) {
+                this._selectionUndoStateHash = curHash;
+                this._selectionUndoState = cur;
+                return;
+            }
+
+            const before = this._selectionUndoState || { selectionPoints: [], selectionRegion: null, tileSelection: [] };
+            const now = Date.now();
+            const last = this._undoStack[this._undoStack.length - 1];
+            const canMerge = last && last.type === 'selection-state' && (now - Number(last.time || 0)) <= Math.max(150, Number(this._undoMergeMs) || 0);
+            if (canMerge) {
+                last.after = cur;
+                last.afterHash = curHash;
+                last.time = now;
+                this._redoStack = [];
+            } else {
+                this._pushUndo({
+                    type: 'selection-state',
+                    before,
+                    after: cur,
+                    beforeHash: this._selectionUndoStateHash,
+                    afterHash: curHash,
+                    time: now
+                });
+            }
+            this._selectionUndoStateHash = curHash;
+            this._selectionUndoState = cur;
+        } catch (e) {
+            /* ignore selection undo tracking errors */
+        }
+    }
+
+    _recordUndoTileState(beforeState, afterState) {
+        if (this._ignoreUndoCapture) return;
+        if (!beforeState || !afterState) return;
+        const beforeHash = this._tileUndoStateHash(beforeState);
+        const afterHash = this._tileUndoStateHash(afterState);
+        if (!beforeHash || beforeHash === afterHash) return;
+
+        const now = Date.now();
+        const last = this._undoStack[this._undoStack.length - 1];
+        const canMerge = last && last.type === 'tile-state' && (now - Number(last.time || 0)) <= Math.max(150, Number(this._undoMergeMs) || 0);
+        if (canMerge) {
+            last.after = afterState;
+            last.afterHash = afterHash;
+            last.time = now;
+            this._redoStack = [];
+            return;
+        }
+        this._pushUndo({ type: 'tile-state', before: beforeState, after: afterState, beforeHash, afterHash, time: now });
+    }
+
+    _queueDeferredTileUndoCapture(syncOp = true) {
+        try {
+            if (!syncOp || this._ignoreUndoCapture) return false;
+            if (!this._tileUndoPendingBefore) this._tileUndoPendingBefore = this._captureTileUndoState();
+            if (this._tileUndoFinalizeScheduled) return true;
+
+            this._tileUndoFinalizeScheduled = true;
+            setTimeout(() => {
+                try { this._flushPendingTileUndoCapture(); } catch (e) { /* ignore */ }
+            }, 0);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _flushPendingTileUndoCapture() {
+        try {
+            if (this._tileUndoFinalizeScheduled) this._tileUndoFinalizeScheduled = false;
+            if (!this._tileUndoPendingBefore) return false;
+            const beforeState = this._tileUndoPendingBefore;
+            this._tileUndoPendingBefore = null;
+            const afterState = this._captureTileUndoState();
+            this._recordUndoTileState(beforeState, afterState);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _syncTileStateToCollab(fromState, toState) {
+        try {
+            if (this._suppressOutgoing || !this._canSendCollab || !this._canSendCollab()) return false;
+            if (!fromState || !toState) return false;
+
+            const fromTiles = new Set((Array.isArray(fromState.activeTiles) ? fromState.activeTiles : [])
+                .map((t) => this._tileKey(Number(t && t.col) | 0, Number(t && t.row) | 0)));
+            const toTiles = new Set((Array.isArray(toState.activeTiles) ? toState.activeTiles : [])
+                .map((t) => this._tileKey(Number(t && t.col) | 0, Number(t && t.row) | 0)));
+
+            for (const key of fromTiles) {
+                if (toTiles.has(key)) continue;
+                const c = this._parseTileKey(key);
+                if (!c) continue;
+                this._queueTileOp('deactivate', { col: c.col | 0, row: c.row | 0 });
+            }
+
+            for (const key of toTiles) {
+                const c = this._parseTileKey(key);
+                if (!c) continue;
+                this._queueTileOp('activate', { col: c.col | 0, row: c.row | 0 });
+            }
+
+            const bindingByIndex = new Map();
+            for (const b of (Array.isArray(toState.bindings) ? toState.bindings : [])) {
+                if (!b || !Number.isFinite(Number(b.i))) continue;
+                bindingByIndex.set(Number(b.i) | 0, b);
+            }
+
+            const transformByIndex = new Map();
+            for (const t of (Array.isArray(toState.transforms) ? toState.transforms : [])) {
+                if (!t || !Number.isFinite(Number(t.i))) continue;
+                transformByIndex.set(Number(t.i) | 0, t);
+            }
+
+            for (const key of toTiles) {
+                const c = this._parseTileKey(key);
+                if (!c) continue;
+                const idx = this._getAreaIndexForCoord(c.col | 0, c.row | 0);
+                if (!Number.isFinite(idx)) continue;
+
+                const b = bindingByIndex.get(idx | 0);
+                if (b) {
+                    this._queueTileOp('bind', {
+                        col: c.col | 0,
+                        row: c.row | 0,
+                        anim: String(b.anim || this.selectedAnimation || 'idle'),
+                        index: Number.isFinite(Number(b.index)) ? (Number(b.index) | 0) : 0,
+                        multiFrames: Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v) | 0) : null
+                    });
+                } else {
+                    this._queueTileOp('clearBinding', { col: c.col | 0, row: c.row | 0 });
+                }
+
+                const t = transformByIndex.get(idx | 0);
+                if (t) {
+                    this._queueTileOp('setTransform', {
+                        col: c.col | 0,
+                        row: c.row | 0,
+                        rot: Number(t.rot || 0) | 0,
+                        flipH: !!t.flipH
+                    });
+                } else {
+                    this._queueTileOp('clearTransform', { col: c.col | 0, row: c.row | 0 });
+                }
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _applyTileUndoState(state) {
+        try {
+            if (!state || typeof state !== 'object') return false;
+
+            this.tilemode = !!state.tilemode;
+            this.tileCols = Math.max(1, Number(state.tileCols) | 0 || this.tileCols || 3);
+            this.tileRows = Math.max(1, Number(state.tileRows) | 0 || this.tileRows || this.tileCols || 3);
+
+            this._tileActive = new Set();
+            if (!(this._tileCoordToIndex instanceof Map)) this._tileCoordToIndex = new Map();
+            if (!Array.isArray(this._tileIndexToCoord)) this._tileIndexToCoord = [];
+
+            const activeTiles = Array.isArray(state.activeTiles) ? state.activeTiles : [];
+            for (const t of activeTiles) {
+                if (!t) continue;
+                const c = Number(t.col);
+                const r = Number(t.row);
+                if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
+                this._activateTile(c | 0, r | 0, false);
+            }
+
+            this._areaBindings = [];
+            const bindings = Array.isArray(state.bindings) ? state.bindings : [];
+            for (const b of bindings) {
+                if (!b || !Number.isFinite(Number(b.i))) continue;
+                const idx = Number(b.i) | 0;
+                this._areaBindings[idx] = {
+                    anim: String(b.anim || ''),
+                    index: Number.isFinite(Number(b.index)) ? (Number(b.index) | 0) : 0,
+                    multiFrames: Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v) | 0) : null
+                };
+            }
+
+            this._areaTransforms = [];
+            const transforms = Array.isArray(state.transforms) ? state.transforms : [];
+            for (const t of transforms) {
+                if (!t || !Number.isFinite(Number(t.i))) continue;
+                const idx = Number(t.i) | 0;
+                this._areaTransforms[idx] = { rot: Number(t.rot || 0) | 0, flipH: !!t.flipH };
+            }
+
+            this.selectionPoints = Array.isArray(state.selectionPoints)
+                ? state.selectionPoints.map((p) => ({
+                    x: Number(p && p.x) | 0,
+                    y: Number(p && p.y) | 0,
+                    areaIndex: Number.isFinite(Number(p && p.areaIndex)) ? (Number(p.areaIndex) | 0) : null
+                }))
+                : [];
+
+            this.selectionRegion = state.selectionRegion
+                ? {
+                    start: {
+                        x: Number(state.selectionRegion.start && state.selectionRegion.start.x) | 0,
+                        y: Number(state.selectionRegion.start && state.selectionRegion.start.y) | 0
+                    },
+                    end: {
+                        x: Number(state.selectionRegion.end && state.selectionRegion.end.x) | 0,
+                        y: Number(state.selectionRegion.end && state.selectionRegion.end.y) | 0
+                    },
+                    areaIndex: Number.isFinite(Number(state.selectionRegion.areaIndex)) ? (Number(state.selectionRegion.areaIndex) | 0) : null
+                }
+                : null;
+
+            this._tileSelection = new Set(Array.isArray(state.tileSelection) ? state.tileSelection : []);
+            this._tileActiveVersion = (Number.isFinite(this._tileActiveVersion) ? this._tileActiveVersion : 0) + 1;
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     _pushUndo(entry) {
         if (!entry || this._ignoreUndoCapture) return;
         this._undoStack.push(entry);
@@ -8882,6 +9699,7 @@ export class SpriteScene extends Scene {
     }
 
     undo() {
+        this._flushPendingTileUndoCapture();
         if (!this._undoStack || this._undoStack.length === 0) return false;
         const now = Date.now();
         let entry = null;
@@ -8899,10 +9717,19 @@ export class SpriteScene extends Scene {
                 this._applyPixelBatch(entry.anim, entry.frame, entry.pixels, false);
             } else if (entry.type === 'delete-frame') {
                 this._restoreDeletedFrame(entry);
+            } else if (entry.type === 'tile-state') {
+                const preState = this._captureTileUndoState();
+                this._applyTileUndoState(entry.before);
+                this._syncTileStateToCollab(preState, entry.before);
+            } else if (entry.type === 'selection-state') {
+                this._applySelectionUndoState(entry.before);
             }
             this._redoStack.push(entry);
             if (this._redoStack.length > this._undoMax) this._redoStack.shift();
         } finally {
+            const curSel = this._captureSelectionUndoState();
+            this._selectionUndoState = curSel;
+            this._selectionUndoStateHash = this._tileUndoStateHash(curSel);
             this._ignoreUndoCapture = false;
         }
         try { this._playSfx('history.undo'); } catch (e) {}
@@ -8910,6 +9737,7 @@ export class SpriteScene extends Scene {
     }
 
     redo() {
+        this._flushPendingTileUndoCapture();
         if (!this._redoStack || this._redoStack.length === 0) return false;
         const entry = this._redoStack.pop();
         this._ignoreUndoCapture = true;
@@ -8919,9 +9747,18 @@ export class SpriteScene extends Scene {
             } else if (entry.type === 'delete-frame') {
                 // redo delete: re-apply removal
                 try { this.currentSprite && this.currentSprite.popFrame(entry.anim, entry.index); } catch (e) { /* ignore */ }
+            } else if (entry.type === 'tile-state') {
+                const preState = this._captureTileUndoState();
+                this._applyTileUndoState(entry.after);
+                this._syncTileStateToCollab(preState, entry.after);
+            } else if (entry.type === 'selection-state') {
+                this._applySelectionUndoState(entry.after);
             }
             this._undoStack.push(entry);
         } finally {
+            const curSel = this._captureSelectionUndoState();
+            this._selectionUndoState = curSel;
+            this._selectionUndoStateHash = this._tileUndoStateHash(curSel);
             this._ignoreUndoCapture = false;
         }
         try { this._playSfx('history.redo'); } catch (e) {}
@@ -9517,6 +10354,7 @@ export class SpriteScene extends Scene {
     }
 
     _activateTile(col, row, syncOp = true) {
+        this._queueDeferredTileUndoCapture(syncOp);
         try {
             if (!this._tileActive) this._tileActive = new Set();
             this._tileActive.add(this._tileKey(col, row));
@@ -9527,6 +10365,7 @@ export class SpriteScene extends Scene {
     }
 
     _deactivateTile(col, row, syncOp = true) {
+        this._queueDeferredTileUndoCapture(syncOp);
         try {
             const key = this._tileKey(col, row);
             if (this._tileActive) this._tileActive.delete(key);
@@ -10295,6 +11134,7 @@ export class SpriteScene extends Scene {
     }
 
     _setAreaBindingAtIndex(areaIndex, bindingEntry, syncOp = true) {
+        this._queueDeferredTileUndoCapture(syncOp);
         try {
             if (!Number.isFinite(areaIndex) || areaIndex < 0) return false;
             areaIndex = areaIndex | 0;
@@ -10320,6 +11160,7 @@ export class SpriteScene extends Scene {
     }
 
     _setAreaTransformAtIndex(areaIndex, transformEntry, syncOp = true) {
+        this._queueDeferredTileUndoCapture(syncOp);
         try {
             if (!Number.isFinite(areaIndex) || areaIndex < 0) return false;
             areaIndex = areaIndex | 0;
@@ -10485,6 +11326,7 @@ export class SpriteScene extends Scene {
 
     draw() {
         if (!this.isReady) return;
+        this._trackSelectionUndoState();
         this.Draw.background('#222')
         this.Draw.pushMatrix()
         this.Draw.scale(this.zoom)
@@ -10579,6 +11421,7 @@ export class SpriteScene extends Scene {
             }
         }
         this._drawSpriteEntities(basePos, size, visible);
+        this._drawPlayerSim(basePos, size);
         // Draw the global tile cursor / selection / paste preview once (not per-area)
         this._drawTileCursorOverlay();
 
@@ -10711,7 +11554,6 @@ export class SpriteScene extends Scene {
                         // Draw placeholder for inactive tile slot; no mirroring/binding until activated.
                         this.Draw.rect(pos, size, '#222222DD', true);
                         this.Draw.rect(pos, size, '#000000aa', false, true, 1, '#000000AA');
-                        try { this.Draw.text('Press space to add tile', new Vector(pos.x + 8, pos.y + 12), '#AAAAAA', 0, 12, { align: 'left', baseline: 'top', font: 'monospace' }); } catch (e) {}
                     }
                     return;
                 }

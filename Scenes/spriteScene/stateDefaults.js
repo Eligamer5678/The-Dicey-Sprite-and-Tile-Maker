@@ -165,6 +165,8 @@ export function initializeSpriteSceneState(scene, currentSprite) {
     scene._undoTimeWindowMs = 30000;
     scene._ignoreUndoCapture = false;
     scene._undoMergeMs = 100;
+    scene._tileUndoPendingBefore = null;
+    scene._tileUndoFinalizeScheduled = false;
     scene._bypassMirrorWrap = false;
 
     scene.selectionPoints = [];

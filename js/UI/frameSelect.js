@@ -587,6 +587,7 @@ export default class FrameSelect {
         let gids = [];
         let spriteObjects = [];
         let tsxInfo = null;
+        let mapBaseName = this._stripExtension(this._basenameFromPath(primaryFile && primaryFile.name ? primaryFile.name : ''));
 
         if (isTmx) {
             const mapEl = primaryDoc.querySelector('map');
@@ -603,6 +604,7 @@ export default class FrameSelect {
                 const tsxDoc = this._parseXmlText(await tsxFile.text());
                 if (!tsxDoc) throw new Error('Failed to parse TSX: ' + tsxFile.name);
                 tsxInfo = this._extractTsxInfo(tsxDoc);
+                mapBaseName = this._stripExtension(this._basenameFromPath(tsxFile.name || mapBaseName || '')) || mapBaseName;
             } else {
                 const tsxDoc = this._parseXmlText(tilesetRef.outerHTML);
                 if (!tsxDoc) throw new Error('Failed to parse inline tileset from TMX');
@@ -630,7 +632,9 @@ export default class FrameSelect {
                         if (pv === null) pv = pe.textContent || '';
                         p[pn] = pv;
                     }
-                    spriteObjects.push({ x, y, props: p });
+                    const nm = String(o.getAttribute('name') || '').trim();
+                    const ty = String(o.getAttribute('type') || '').trim();
+                    spriteObjects.push({ x, y, name: nm, type: ty, props: p });
                 }
             }
         } else {
@@ -639,6 +643,7 @@ export default class FrameSelect {
             mapHeight = Math.max(1, Math.ceil((Number(tsxInfo.tilecount) || 1) / mapWidth));
             gids = new Array(mapWidth * mapHeight).fill(0).map((_, i) => (i + 1));
             spriteObjects = [];
+            mapBaseName = this._stripExtension(this._basenameFromPath(primaryFile && primaryFile.name ? primaryFile.name : '')) || mapBaseName;
         }
 
         const imageRefName = this._basenameFromPath(tsxInfo.imageSource || '').toLowerCase();
@@ -653,14 +658,101 @@ export default class FrameSelect {
 
         const ss = new SpriteSheet(imgSource, slice);
         ss._frames = new Map();
-        for (let r = 0; r < rows; r++) {
-            const frames = [];
-            for (let c = 0; c < cols; c++) {
-                const tid = r * cols + c;
-                if (tid >= (Number(tsxInfo.tilecount) || (rows * cols))) break;
-                frames.push({ __lazy: true, src: imgSource, sx: c * slice, sy: r * slice, w: slice, h: slice });
+        const tilecount = Math.max(1, Number(tsxInfo.tilecount) || (rows * cols));
+        const hasSourceAnimMeta = (() => {
+            try {
+                for (const props of tsxInfo.perTile.values()) {
+                    if (props && String(props.source_anim || '').trim()) return true;
+                }
+            } catch (e) {}
+            return false;
+        })();
+
+        if (hasSourceAnimMeta) {
+            const byAnim = new Map();
+            for (const [tidRaw, props] of tsxInfo.perTile.entries()) {
+                const tid = Number(tidRaw) | 0;
+                if (!Number.isFinite(tid) || tid < 0 || tid >= tilecount) continue;
+                const anim = String((props && props.source_anim) || '').trim();
+                if (!anim) continue;
+                const sx = (tid % cols) * slice;
+                const sy = Math.floor(tid / cols) * slice;
+                const index = Number.isFinite(Number(props.source_index)) ? (Number(props.source_index) | 0) : 0;
+                if (index < 0) continue;
+                if (!byAnim.has(anim)) byAnim.set(anim, new Map());
+                const frameMap = byAnim.get(anim);
+                if (!frameMap.has(index)) {
+                    frameMap.set(index, { __lazy: true, src: imgSource, sx, sy, w: slice, h: slice });
+                }
             }
-            ss._frames.set('anim' + r, frames);
+
+            for (const [anim, frameMap] of byAnim.entries()) {
+                const maxIndex = Math.max(0, ...Array.from(frameMap.keys()));
+                const frames = new Array(maxIndex + 1).fill(null);
+                for (const [idx, frame] of frameMap.entries()) frames[idx] = frame;
+                for (let i = 0; i < frames.length; i++) {
+                    if (frames[i]) continue;
+                    frames[i] = document.createElement('canvas');
+                    frames[i].width = slice;
+                    frames[i].height = slice;
+                }
+                ss._frames.set(anim, frames);
+            }
+            if (ss._frames.size === 0) ss._frames.set('anim0', []);
+        } else {
+            for (let r = 0; r < rows; r++) {
+                const frames = [];
+                for (let c = 0; c < cols; c++) {
+                    const tid = r * cols + c;
+                    if (tid >= tilecount) break;
+                    frames.push({ __lazy: true, src: imgSource, sx: c * slice, sy: r * slice, w: slice, h: slice });
+                }
+                ss._frames.set('anim' + r, frames);
+            }
+        }
+
+        // Optional: restore sprite-only animations packed alongside TMX/TSX in zip exports.
+        try {
+            let manifestFile = null;
+            const preferred = (String(mapBaseName || '').trim() + '.sprites.json').toLowerCase();
+            if (preferred) manifestFile = byBase.get(preferred) || null;
+            if (!manifestFile) {
+                for (const f of fileList) {
+                    const n = String((f && f.name) || '').toLowerCase();
+                    if (n.endsWith('.sprites.json')) { manifestFile = f; break; }
+                }
+            }
+            if (manifestFile) {
+                const raw = await manifestFile.text();
+                const parsed = JSON.parse(String(raw || '{}'));
+                const animEntries = Array.isArray(parsed && parsed.animations) ? parsed.animations : [];
+                for (const entry of animEntries) {
+                    if (!entry) continue;
+                    const animName = String(entry.name || '').trim();
+                    if (!animName) continue;
+                    const frameNames = Array.isArray(entry.frames) ? entry.frames : [];
+                    const frames = [];
+                    for (const fn of frameNames) {
+                        const key = this._basenameFromPath(String(fn || '')).toLowerCase();
+                        const frameFile = byBase.get(key);
+                        if (!frameFile) continue;
+                        const source = await this._decodeImageFile(frameFile);
+                        if (!source) continue;
+                        const c = document.createElement('canvas');
+                        c.width = slice;
+                        c.height = slice;
+                        const ctx = c.getContext('2d');
+                        try { ctx.imageSmoothingEnabled = false; } catch (e) {}
+                        try { ctx.drawImage(source, 0, 0, slice, slice); } catch (e) {}
+                        frames.push(c);
+                    }
+                    if (frames.length > 0) {
+                        ss._frames.set(animName, frames);
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('Failed to import sprite animation manifest', e);
         }
         try { ss._rebuildSheetCanvas(); } catch (e) {}
 
@@ -685,6 +777,7 @@ export default class FrameSelect {
             const V_FLIP = 0x40000000;
             const D_FLIP = 0x20000000;
             const MASK = 0x1FFFFFFF;
+            const defaultAnimForTileFallback = (animNames && animNames.length > 0) ? String(animNames[0]) : 'anim0';
 
             for (let r = 0; r < mapHeight; r++) {
                 for (let c = 0; c < mapWidth; c++) {
@@ -701,8 +794,8 @@ export default class FrameSelect {
                     if (!Number.isFinite(areaIndex)) continue;
 
                     const tileProps = tsxInfo.perTile.get(tileId) || {};
-                    const fallbackAnim = 'anim' + Math.floor(tileId / cols);
-                    const fallbackFrame = tileId % cols;
+                    const fallbackAnim = hasSourceAnimMeta ? defaultAnimForTileFallback : ('anim' + Math.floor(tileId / cols));
+                    const fallbackFrame = hasSourceAnimMeta ? 0 : (tileId % cols);
                     const anim = String(tileProps.source_anim || fallbackAnim);
                     const frameIndex = Number.isFinite(Number(tileProps.source_index)) ? (Number(tileProps.source_index) | 0) : fallbackFrame;
                     let multiFrames = null;
@@ -739,7 +832,21 @@ export default class FrameSelect {
                     for (const s of spriteObjects) {
                         const col = Math.round((Number(s.x) || 0) / slice) - midC;
                         const row = Math.round(((Number(s.y) || 0) - slice) / slice) - midR;
-                        const anim = String((s.props && s.props.anim) || (this.scene.selectedSpriteAnimation || this.scene.selectedAnimation || 'anim0'));
+                        let anim = String((s.props && s.props.anim) || '').trim();
+                        if (!anim) {
+                            const nameHint = String((s && s.name) || '').trim();
+                            const typeHint = String((s && s.type) || '').trim();
+                            const candidate = nameHint || typeHint;
+                            if (candidate && candidate !== 'sprite') anim = candidate;
+                        }
+                        if (!anim) anim = String(this.scene.selectedSpriteAnimation || this.scene.selectedAnimation || 'anim0');
+                        if (anim && this.scene.currentSprite && this.scene.currentSprite._frames && !this.scene.currentSprite._frames.has(anim)) {
+                            const parent = anim.includes('-') ? String(anim.split('-')[0] || '').trim() : '';
+                            if (parent && this.scene.currentSprite._frames.has(parent)) {
+                                const parentFrames = this.scene.currentSprite._frames.get(parent) || [];
+                                this.scene.currentSprite._frames.set(anim, parentFrames.slice());
+                            }
+                        }
                         const created = this.scene._addSpriteEntityAt(col, row, anim, false);
                         if (created && s.props && Object.prototype.hasOwnProperty.call(s.props, 'fps')) {
                             const n = Number(s.props.fps);
@@ -1194,8 +1301,11 @@ export default class FrameSelect {
                             for (const t of activeTiles) {
                                 const idx = getAreaIndex(t.col, t.row);
                                 const binding = (Number.isFinite(idx) && Array.isArray(scene._areaBindings)) ? scene._areaBindings[idx] : null;
-                                if (!binding || binding.anim === undefined || binding.index === undefined) continue;
-                                const entry = { col: t.col, row: t.row, anim: binding.anim, index: Number(binding.index) };
+                                const fallbackAnim = String(scene.selectedAnimation || 'anim0');
+                                const fallbackIndex = Number.isFinite(Number(scene.selectedFrame)) ? (Number(scene.selectedFrame) | 0) : 0;
+                                const anim = (binding && binding.anim !== undefined) ? String(binding.anim) : fallbackAnim;
+                                const index = (binding && binding.index !== undefined && Number.isFinite(Number(binding.index))) ? (Number(binding.index) | 0) : fallbackIndex;
+                                const entry = { col: t.col, row: t.row, anim, index };
                                 if (Array.isArray(binding.multiFrames) && binding.multiFrames.length > 0) entry.multiFrames = binding.multiFrames.slice();
                                 const transform = (Number.isFinite(idx) && Array.isArray(scene._areaTransforms)) ? scene._areaTransforms[idx] : null;
                                 if (transform && ((transform.rot||0)!==0 || transform.flipH)) entry.transform = { rot: transform.rot||0, flipH: !!transform.flipH };
@@ -1406,6 +1516,53 @@ export default class FrameSelect {
                     archive.file(mapFileName, tmx);
                     archive.file(tilesetFileName, tsx);
                     archive.file(imageFileName, pngBlob);
+
+                    // Include sprite-only animations referenced by sprite entities so they round-trip.
+                    const spriteManifest = { version: 1, slice, animations: [] };
+                    const spriteAnimNames = Array.from(new Set(spriteEntities
+                        .map((s) => String((s && s.anim) || '').trim())
+                        .filter(Boolean)));
+                    for (const animName of spriteAnimNames) {
+                        const getCount = () => {
+                            if (this.scene && typeof this.scene._getAnimationLogicalFrameCount === 'function') {
+                                try { return Math.max(0, Number(this.scene._getAnimationLogicalFrameCount(animName)) | 0); } catch (e) {}
+                            }
+                            const arr = (this.sprite && this.sprite._frames) ? (this.sprite._frames.get(animName) || []) : [];
+                            return Math.max(0, arr.length | 0);
+                        };
+                        const frameCount = getCount();
+                        if (frameCount <= 0) continue;
+                        const frameFiles = [];
+                        for (let i = 0; i < frameCount; i++) {
+                            const src = (this.sprite && typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(animName, i) : null;
+                            if (!src) continue;
+                            const fc = document.createElement('canvas');
+                            fc.width = slice;
+                            fc.height = slice;
+                            const fctx = fc.getContext('2d');
+                            try { fctx.imageSmoothingEnabled = false; } catch (e) {}
+                            try { fctx.drawImage(src, 0, 0, slice, slice); } catch (e) {}
+                            const fb = await new Promise((res) => fc.toBlob((b) => res(b), 'image/png'));
+                            if (!fb) continue;
+                            const safeAnim = encodeURIComponent(animName);
+                            const fn = `${baseName}__sprite__${safeAnim}__${i}.png`;
+                            archive.file(fn, fb);
+                            frameFiles.push(fn);
+                        }
+                        if (frameFiles.length > 0) {
+                            const profile = (spriteLayer && spriteLayer.animationProfiles && spriteLayer.animationProfiles[animName]) ? spriteLayer.animationProfiles[animName] : null;
+                            spriteManifest.animations.push({
+                                name: animName,
+                                fps: Number.isFinite(Number(profile && profile.fps)) ? Number(profile.fps) : null,
+                                parentAnim: profile && profile.parent ? String(profile.parent) : '',
+                                frames: frameFiles
+                            });
+                        }
+                    }
+                    if (spriteManifest.animations.length > 0) {
+                        archive.file(baseName + '.sprites.json', JSON.stringify(spriteManifest, null, 2));
+                    }
+
                     zipBlob = await archive.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
                 } catch (e) {
                     console.warn('Failed to build tiled ZIP package', e);
