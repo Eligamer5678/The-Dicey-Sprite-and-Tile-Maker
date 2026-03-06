@@ -207,6 +207,11 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
             scene._lastCursorPos = null;
             scene._remoteCursors = new Map();
             scene._cursorTTLms = 5000;
+            scene._playerSimSendIntervalMs = 70;
+            scene._playerSimThrottleId = null;
+            scene._lastPlayerSimPayload = null;
+            scene._remotePlayerSims = new Map();
+            scene._playerSimTTLms = 6000;
             scene._cursorCleanupId = setInterval(() => { try { scene._cleanupCursors(); } catch (e) {} }, 2000);
         } catch (e) {}
     } catch (e) {

@@ -2186,27 +2186,53 @@ export class SpriteScene extends Scene {
         }
     }
 
-    _resolvePlayerSimAnimation(player, moveX, moveY) {
+    _resolvePlayerSimAnimation(player, moveX, moveY, inputState = null) {
         try {
             const base = String((player && player.baseAnim) || this.selectedAnimation || 'idle');
             const gravity = !!(player && player.gravityEnabled);
             const onGround = !!(player && player.onGround);
             const absX = Math.abs(moveX || 0);
             const absY = Math.abs(moveY || 0);
-            const isMoving = (absX > 0.0001 || absY > 0.0001);
+            const moveDeadzone = gravity ? 0.35 : 0.15;
+            const horizontalMoving = absX > moveDeadzone;
+            const verticalMoving = gravity ? (!onGround && (absY > moveDeadzone)) : (absY > moveDeadzone);
+            const isMoving = horizontalMoving || verticalMoving;
+            const facingX = (player && Number(player.facingX)) || 1;
+            const downHeld = !!(inputState && inputState.downHeld);
 
+            // Grounded crouch/crawl variants.
+            if (gravity && onGround && downHeld) {
+                if (horizontalMoving) {
+                    const crawlDir = (moveX < 0) ? 'left' : 'right';
+                    const crawl = this._resolveDirectionalAnimation(base, crawlDir, ['craw']);
+                    if (crawl) return crawl;
+                } else {
+                    const crouchAnim = `${base}-crouch`;
+                    if (this._isAnimationAvailable(crouchAnim)) {
+                        return { anim: crouchAnim, flipX: false, flipY: false };
+                    }
+                    const idleCrawlDir = (facingX < 0) ? 'left' : 'right';
+                    const idleCrawl = this._resolveDirectionalAnimation(base, idleCrawlDir, ['craw']);
+                    if (idleCrawl) return idleCrawl;
+                }
+            }
+
+            // At rest, always return to the base animation.
             if (!isMoving) return { anim: base, flipX: false, flipY: false };
 
             if (gravity && !onGround) {
                 const jumpAnim = `${base}-jump`;
                 if (this._isAnimationAvailable(jumpAnim)) {
-                    return { anim: jumpAnim, flipX: false, flipY: false };
+                    return { anim: jumpAnim, flipX: (facingX < 0), flipY: false };
                 }
             }
 
             let dir = 'right';
             if (gravity) {
-                dir = (moveX < 0) ? 'left' : 'right';
+                // In gravity mode, vertical movement should keep the last horizontal facing.
+                dir = horizontalMoving
+                    ? ((moveX < 0) ? 'left' : 'right')
+                    : ((facingX < 0) ? 'left' : 'right');
             } else if (absX >= absY) {
                 dir = (moveX < 0) ? 'left' : 'right';
             } else {
@@ -2289,6 +2315,215 @@ export class SpriteScene extends Scene {
         }
     }
 
+    _buildPlayerSimPayload(player, active = true) {
+        try {
+            if (!player || !player.pos || !player.size) {
+                return {
+                    a: 0,
+                    t: Date.now(),
+                    c: this.clientId
+                };
+            }
+            const payload = {
+                a: active ? 1 : 0,
+                t: Date.now(),
+                c: this.clientId,
+                px: Number(player.pos.x) || 0,
+                py: Number(player.pos.y) || 0,
+                sx: Math.max(1, Number(player.size.x) || 1),
+                sy: Math.max(1, Number(player.size.y) || 1),
+                vx: Number(player.vlos && player.vlos.x) || 0,
+                vy: Number(player.vlos && player.vlos.y) || 0,
+                ba: String(player.baseAnim || this.selectedAnimation || 'idle'),
+                an: String(player.anim || player.baseAnim || this.selectedAnimation || 'idle'),
+                fr: Math.max(0, Number(player.frame) || 0),
+                fx: player.flipX ? 1 : 0,
+                fy: player.flipY ? 1 : 0,
+                ge: player.gravityEnabled ? 1 : 0,
+                og: player.onGround ? 1 : 0
+            };
+            if (this.playerName) payload.n = String(this.playerName);
+            return payload;
+        } catch (e) {
+            return {
+                a: 0,
+                t: Date.now(),
+                c: this.clientId
+            };
+        }
+    }
+
+    _schedulePlayerSimSend(force = false) {
+        try {
+            const mode = this._playerSimMode;
+            const player = mode && mode.player;
+            if (!this._canSendCollab() || !mode || !mode.active || !player) return;
+            const payload = this._buildPlayerSimPayload(player, true);
+            const last = this._lastPlayerSimPayload;
+            const now = Date.now();
+            const changed = !last
+                || (Math.abs((last.px || 0) - payload.px) > 0.15)
+                || (Math.abs((last.py || 0) - payload.py) > 0.15)
+                || (last.an !== payload.an)
+                || (last.fr !== payload.fr)
+                || (last.fx !== payload.fx)
+                || (last.fy !== payload.fy)
+                || (last.ge !== payload.ge)
+                || (last.og !== payload.og);
+            const aged = !last || ((now - (Number(last.t) || 0)) > (this._playerSimSendIntervalMs || 70));
+            if (!force && !changed && !aged) return;
+            this._lastPlayerSimPayload = payload;
+            if (this._playerSimThrottleId && !force) return;
+            if (force) {
+                this._sendPlayerSim(payload);
+                return;
+            }
+            this._playerSimThrottleId = setTimeout(() => {
+                try { this._sendPlayerSim(); } catch (e) {}
+                try { clearTimeout(this._playerSimThrottleId); } catch (e) {}
+                this._playerSimThrottleId = null;
+            }, this._playerSimSendIntervalMs || 70);
+        } catch (e) {}
+    }
+
+    _sendPlayerSim(payload = null) {
+        try {
+            if (!this._canSendCollab()) return;
+            const mode = this._playerSimMode;
+            const player = mode && mode.player;
+            const body = payload || this._lastPlayerSimPayload || this._buildPlayerSimPayload(player, !!(mode && mode.active));
+            const diff = {};
+            diff['playerSims/' + this.clientId] = body;
+            try { this._sendCollabDiff(diff); } catch (e) {}
+        } catch (e) {}
+    }
+
+    _clearPlayerSimBroadcast() {
+        try {
+            this._lastPlayerSimPayload = null;
+            try {
+                if (this._playerSimThrottleId) clearTimeout(this._playerSimThrottleId);
+            } catch (e) {}
+            this._playerSimThrottleId = null;
+            if (!this._canSendCollab()) return;
+            const diff = {};
+            diff['playerSims/' + this.clientId] = null;
+            try { this._sendCollabDiff(diff); } catch (e) {}
+        } catch (e) {}
+    }
+
+    _normalizeIncomingPlayerSim(raw) {
+        try {
+            if (!raw || typeof raw !== 'object') return null;
+            const active = Number(raw.a) === 1 || raw.active === true;
+            if (!active) return null;
+            const targetPos = new Vector(Number(raw.px || 0), Number(raw.py || 0));
+            const now = Date.now();
+            return {
+                active: true,
+                time: Number(raw.t || raw.time || Date.now()),
+                client: String(raw.c || raw.client || ''),
+                name: raw.n ? String(raw.n) : (raw.name ? String(raw.name) : null),
+                pos: targetPos.clone(),
+                targetPos,
+                renderPos: targetPos.clone(),
+                size: new Vector(Math.max(1, Number(raw.sx || 1)), Math.max(1, Number(raw.sy || 1))),
+                vlos: new Vector(Number(raw.vx || 0), Number(raw.vy || 0)),
+                baseAnim: String(raw.ba || raw.baseAnim || this.selectedAnimation || 'idle'),
+                anim: String(raw.an || raw.anim || raw.ba || raw.baseAnim || this.selectedAnimation || 'idle'),
+                frame: Math.max(0, Number(raw.fr || raw.frame) || 0),
+                flipX: Number(raw.fx) === 1 || raw.flipX === true,
+                flipY: Number(raw.fy) === 1 || raw.flipY === true,
+                gravityEnabled: Number(raw.ge) === 1 || raw.gravityEnabled === true,
+                onGround: Number(raw.og) === 1 || raw.onGround === true,
+                lastReceiveTime: now
+            };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _upsertRemotePlayerSim(clientId, normalized) {
+        try {
+            if (!clientId || !normalized) return false;
+            if (!this._remotePlayerSims) this._remotePlayerSims = new Map();
+
+            const prev = this._remotePlayerSims.get(clientId);
+            if (!prev) {
+                normalized.client = clientId;
+                normalized.lastReceiveTime = Date.now();
+                this._remotePlayerSims.set(clientId, normalized);
+                return true;
+            }
+
+            prev.active = true;
+            prev.time = Number(normalized.time || Date.now());
+            prev.client = clientId;
+            prev.name = normalized.name || prev.name || null;
+            prev.targetPos = normalized.targetPos ? normalized.targetPos.clone() : new Vector(normalized.pos?.x || 0, normalized.pos?.y || 0);
+            if (!prev.renderPos || typeof prev.renderPos.x !== 'number' || typeof prev.renderPos.y !== 'number') {
+                prev.renderPos = prev.targetPos.clone();
+            }
+            prev.pos = prev.targetPos.clone();
+            prev.size = normalized.size ? normalized.size.clone() : prev.size;
+            prev.vlos = normalized.vlos ? normalized.vlos.clone() : new Vector(0, 0);
+            prev.baseAnim = normalized.baseAnim || prev.baseAnim || this.selectedAnimation || 'idle';
+            prev.anim = normalized.anim || prev.anim || prev.baseAnim || this.selectedAnimation || 'idle';
+            prev.frame = Math.max(0, Number(normalized.frame) || 0);
+            prev.flipX = !!normalized.flipX;
+            prev.flipY = !!normalized.flipY;
+            prev.gravityEnabled = !!normalized.gravityEnabled;
+            prev.onGround = !!normalized.onGround;
+            prev.lastReceiveTime = Date.now();
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _updateRemotePlayerSims(tickDelta) {
+        try {
+            if (!this._remotePlayerSims || this._remotePlayerSims.size === 0) return;
+            const dt = Math.max(0.001, Number(tickDelta) || 0.016);
+            const now = Date.now();
+            const ttl = this._playerSimTTLms || 6000;
+            const catchup = 1 - Math.exp(-12 * dt);
+
+            for (const [cid, player] of Array.from(this._remotePlayerSims.entries())) {
+                if (!player || cid === this.clientId) continue;
+
+                const age = now - (Number(player.time) || 0);
+                if (age > ttl) {
+                    this._remotePlayerSims.delete(cid);
+                    continue;
+                }
+
+                if (!player.targetPos) player.targetPos = player.pos ? player.pos.clone() : new Vector(0, 0);
+                if (!player.renderPos) player.renderPos = player.targetPos.clone();
+
+                const receiveAgeSec = Math.max(0, (now - (Number(player.lastReceiveTime) || now)) / 1000);
+                const leadSec = Math.min(0.12, receiveAgeSec);
+                const vel = player.vlos || new Vector(0, 0);
+                const predicted = new Vector(
+                    Number(player.targetPos.x || 0) + (Number(vel.x || 0) * leadSec),
+                    Number(player.targetPos.y || 0) + (Number(vel.y || 0) * leadSec)
+                );
+
+                const dx = predicted.x - player.renderPos.x;
+                const dy = predicted.y - player.renderPos.y;
+                const distSq = dx * dx + dy * dy;
+                if (distSq > 64 * 64) {
+                    player.renderPos = predicted.clone();
+                } else {
+                    player.renderPos.x += dx * catchup;
+                    player.renderPos.y += dy * catchup;
+                }
+            }
+        } catch (e) {
+            /* ignore remote sim smoothing errors */
+        }
+    }
+
     _togglePlayerSimMode() {
         try {
             const mode = this._playerSimMode;
@@ -2299,6 +2534,7 @@ export class SpriteScene extends Scene {
                 if (!(this.keys.released(' ', pass) || this.keys.released('Space', pass) || this.keys.released('Spacebar', pass))) return false;
                 mode.active = false;
                 mode.player = null;
+                try { this._clearPlayerSimBroadcast(); } catch (e) {}
                 try {
                     if (mode.prevPasscode) this.keys.setPasscode(mode.prevPasscode);
                     else this.keys.resetPasscode();
@@ -2354,6 +2590,10 @@ export class SpriteScene extends Scene {
                 fallLookY: 0
             };
             this.keys.setPasscode(mode.passcode);
+            try {
+                this._lastPlayerSimPayload = this._buildPlayerSimPayload(mode.player, true);
+                this._schedulePlayerSimSend(true);
+            } catch (e) {}
             return true;
         } catch (e) {
             return false;
@@ -2490,7 +2730,9 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            const animInfo = this._resolvePlayerSimAnimation(player, moveX, moveY);
+            const animInfo = this._resolvePlayerSimAnimation(player, moveX, moveY, {
+                downHeld: down
+            });
             const nextAnim = (animInfo && animInfo.anim) ? animInfo.anim : player.baseAnim;
             if (nextAnim !== player.anim) {
                 player.anim = nextAnim;
@@ -2518,6 +2760,12 @@ export class SpriteScene extends Scene {
 
             const baseArea = this.computeDrawArea();
             if (baseArea) {
+                const crawlAvailable = !!(
+                    this._resolveDirectionalAnimation(player.baseAnim, 'left', ['craw'])
+                    || this._resolveDirectionalAnimation(player.baseAnim, 'right', ['craw'])
+                );
+                const crawlingInput = !!(down && (left || right));
+                const suppressDownLook = !!(player.gravityEnabled && player.onGround && crawlingInput && crawlAvailable);
                 const centerWorld = new Vector(player.pos.x + player.size.x * 0.5, player.pos.y + player.size.y * 0.5);
                 const rightHeld = Math.max(
                     Number(this.keys.held('d', true, pass)) || 0,
@@ -2542,7 +2790,8 @@ export class SpriteScene extends Scene {
 
                 const lookRampSec = 1.35;
                 const lookXIntent = Math.max(-1, Math.min(1, (rightHeld - leftHeld) / lookRampSec));
-                const lookYIntent = Math.max(-1, Math.min(1, (downHeld - upHeld) / lookRampSec));
+                let lookYIntent = Math.max(-1, Math.min(1, (downHeld - upHeld) / lookRampSec));
+                if (suppressDownLook && lookYIntent > 0) lookYIntent = 0;
                 const maxLookX = slice * 2.8;
                 const maxLookY = slice * 1.8;
 
@@ -2593,6 +2842,7 @@ export class SpriteScene extends Scene {
                     if (this.zoomVlos) { this.zoomVlos.x = 0; this.zoomVlos.y = 0; }
                 }
             }
+            try { this._schedulePlayerSimSend(false); } catch (e) {}
             return true;
         } catch (e) {
             return false;
@@ -2613,6 +2863,39 @@ export class SpriteScene extends Scene {
             this.Draw.sheet(this.currentSprite, drawPos, drawSize, player.anim, player.frame, invert, 1, false);
         } catch (e) {
             /* ignore player sim draw errors */
+        }
+    }
+
+    _drawRemotePlayerSims(basePos, areaSize) {
+        try {
+            if (!this._remotePlayerSims || this._remotePlayerSims.size === 0 || !this.currentSprite) return;
+            const slice = Math.max(1, Number((this.currentSprite && this.currentSprite.slicePx) || 16));
+            const now = Date.now();
+            const ttl = this._playerSimTTLms || 6000;
+
+            for (const [cid, player] of Array.from(this._remotePlayerSims.entries())) {
+                if (!player || cid === this.clientId) continue;
+                const age = now - (Number(player.time) || 0);
+                if (age > ttl) {
+                    this._remotePlayerSims.delete(cid);
+                    continue;
+                }
+                if (!player.pos || !player.size) continue;
+
+                const simPos = player.renderPos || player.targetPos || player.pos;
+                if (!simPos) continue;
+                const drawPos = this._worldPixelToDrawWorld(simPos, basePos, areaSize, slice);
+                if (!drawPos) continue;
+                const drawSize = new Vector((player.size.x / slice) * areaSize.x, (player.size.y / slice) * areaSize.y);
+                let anim = player.anim || player.baseAnim || this.selectedAnimation || 'idle';
+                if (!this._isAnimationAvailable(anim)) anim = player.baseAnim || this.selectedAnimation || 'idle';
+                const frameCount = this._getAnimationFrameCountSafe(anim);
+                const frame = frameCount > 0 ? Math.max(0, Math.min(frameCount - 1, Number(player.frame) || 0)) : 0;
+                const invert = { x: player.flipX ? -1 : 1, y: player.flipY ? -1 : 1 };
+                this.Draw.sheet(this.currentSprite, drawPos, drawSize, anim, frame, invert, 1, false);
+            }
+        } catch (e) {
+            /* ignore remote player sim draw errors */
         }
     }
 
@@ -2674,6 +2957,7 @@ export class SpriteScene extends Scene {
         this._sceneTime = (this._sceneTime || 0) + (tickDelta || 0);
         this.mouse.update(tickDelta)
         this.keys.update(tickDelta)
+        try { this._updateRemotePlayerSims(tickDelta); } catch (e) {}
         if (!this._playerSimMode) {
             this._playerSimMode = {
                 active: false,
@@ -8766,6 +9050,27 @@ export class SpriteScene extends Scene {
                     }
                 }
             } catch (e) {}
+            try {
+                const sims = state.playerSims || null;
+                if (sims && typeof sims === 'object') {
+                    for (const cid of Object.keys(sims)) {
+                        try {
+                            if (!cid || cid === this.clientId) continue;
+                            const raw = sims[cid];
+                            if (!raw || raw === null) {
+                                try { this._remotePlayerSims && this._remotePlayerSims.delete(cid); } catch (e) {}
+                                continue;
+                            }
+                            const normalized = this._normalizeIncomingPlayerSim(raw);
+                            if (!normalized) {
+                                try { this._remotePlayerSims && this._remotePlayerSims.delete(cid); } catch (e) {}
+                                continue;
+                            }
+                            try { this._upsertRemotePlayerSim(cid, normalized); } catch (e) {}
+                        } catch (e) { continue; }
+                    }
+                }
+            } catch (e) {}
             if (!edits || typeof edits !== 'object') return;
             for (const id of Object.keys(edits)) {
                 if (this._seenOpIds && this._seenOpIds.has(id)) continue;
@@ -10226,14 +10531,24 @@ export class SpriteScene extends Scene {
     // Remove stale remote cursors from local map
     _cleanupCursors() {
         try {
-            if (!this._remoteCursors) return;
             const now = Date.now();
             const ttl = this._cursorTTLms || 5000;
-            for (const [id, entry] of Array.from(this._remoteCursors.entries())) {
-                try {
-                    const t = Number(entry.time) || 0;
-                    if (t && (now - t) > ttl) this._remoteCursors.delete(id);
-                } catch (e) { continue; }
+            if (this._remoteCursors) {
+                for (const [id, entry] of Array.from(this._remoteCursors.entries())) {
+                    try {
+                        const t = Number(entry.time) || 0;
+                        if (t && (now - t) > ttl) this._remoteCursors.delete(id);
+                    } catch (e) { continue; }
+                }
+            }
+            if (this._remotePlayerSims) {
+                const simTtl = this._playerSimTTLms || 6000;
+                for (const [id, entry] of Array.from(this._remotePlayerSims.entries())) {
+                    try {
+                        const t = Number(entry.time) || 0;
+                        if (t && (now - t) > simTtl) this._remotePlayerSims.delete(id);
+                    } catch (e) { continue; }
+                }
             }
         } catch (e) {}
     }
@@ -11722,6 +12037,7 @@ export class SpriteScene extends Scene {
             }
         }
         this._drawSpriteEntities(basePos, size, visible);
+        this._drawRemotePlayerSims(basePos, size);
         this._drawPlayerSim(basePos, size);
         // Draw the global tile cursor / selection / paste preview once (not per-area)
         this._drawTileCursorOverlay();
