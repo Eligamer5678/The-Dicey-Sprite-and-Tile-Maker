@@ -2319,7 +2319,7 @@ export class SpriteScene extends Scene {
 
             const pos = this.getPos(this.mouse && this.mouse.pos);
             if (!pos || (!pos.inside && !pos.renderOnly)) return false;
-
+            
             const worldAtCursor = this._cursorToWorldPixel(pos);
             if (!worldAtCursor) return false;
 
@@ -4735,7 +4735,7 @@ export class SpriteScene extends Scene {
                 // If user clicks left (without Shift) while a pixel tool is active, commit the selection
                 if (!this.keys.held('Shift') && this.mouse.pressed('left') && this.currentTool) {
                     const pos = this.getPos(this.mouse.pos);
-                    const anchor = this.selectionPoints[0];
+                    const anchor = this._getShapeAnchorPoint(pos);
                     const anchorArea = (anchor && typeof anchor.areaIndex === 'number') ? anchor.areaIndex : null;
                     let target = null;
                     if (pos && pos.inside && (!this.tilemode || anchorArea === null || pos.areaIndex === anchorArea)) {
@@ -4744,7 +4744,7 @@ export class SpriteScene extends Scene {
                         target = this._unclampedPixelForArea(anchorArea, this.mouse.pos);
                     }
                     if (target) {
-                        const start = this.selectionPoints[0];
+                        const start = anchor;
                         const end = { x: target.x, y: target.y };
                         this.commitSelection(start, end);
                         try { if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.1); } catch (e) {}
@@ -6590,6 +6590,44 @@ export class SpriteScene extends Scene {
 
     _getShapeStrokeWidth() {
         return Math.max(1, Math.min(15, this.brushSize || 1));
+    }
+
+    _getShapeAnchorPoint(posInfo = null) {
+        try {
+            if (!Array.isArray(this.selectionPoints) || this.selectionPoints.length === 0) return null;
+            const points = this.selectionPoints.filter(Boolean);
+            if (points.length === 0) return null;
+
+            // Default to latest point so chained shape placement stays intuitive.
+            let fallback = points[points.length - 1] || points[0];
+            if (!this.tilemode) return fallback;
+
+            const pos = posInfo || this.getPos(this.mouse && this.mouse.pos);
+            const hoveredArea = (pos && Number.isFinite(Number(pos.areaIndex))) ? (Number(pos.areaIndex) | 0) : null;
+            if (hoveredArea === null) return fallback;
+
+            // In tilemode, prefer the anchor from the currently hovered tile.
+            let best = null;
+            let bestDist = Infinity;
+            const hx = Number(pos && pos.x);
+            const hy = Number(pos && pos.y);
+            for (const p of points) {
+                const pa = Number.isFinite(Number(p.areaIndex)) ? (Number(p.areaIndex) | 0) : null;
+                if (pa !== hoveredArea) continue;
+                const dx = Number.isFinite(hx) ? (Number(p.x) - hx) : 0;
+                const dy = Number.isFinite(hy) ? (Number(p.y) - hy) : 0;
+                const dist = dx * dx + dy * dy;
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = p;
+                }
+            }
+            return best || fallback;
+        } catch (e) {
+            return (Array.isArray(this.selectionPoints) && this.selectionPoints.length > 0)
+                ? this.selectionPoints[this.selectionPoints.length - 1]
+                : null;
+        }
     }
 
     _hasEvenCircleAnchor() {
@@ -12236,7 +12274,7 @@ export class SpriteScene extends Scene {
             }
 
             const posInfo = posInfoGlobal;
-            const anchor = (this.selectionPoints && this.selectionPoints.length > 0) ? this.selectionPoints[0] : null;
+            const anchor = this._getShapeAnchorPoint(posInfo);
             const anchorArea = (anchor && typeof anchor.areaIndex === 'number') ? anchor.areaIndex : null;
 
             // Only show shape previews on the anchor's tile when known to avoid duplication across tiles.
@@ -12244,13 +12282,10 @@ export class SpriteScene extends Scene {
                 return;
             }
 
-            // Determine mouse pixel even when off-frame for circle/line previews.
+            // Only preview when the cursor is actually over a valid tile pixel.
             let mousePixelPos = null;
             if (posInfo && posInfo.inside && (anchorArea === null || posInfo.areaIndex === anchorArea)) {
                 mousePixelPos = { x: posInfo.x, y: posInfo.y };
-            } else if (anchor) {
-                const fallback = this._unclampedPixelForArea(anchorArea !== null ? anchorArea : areaIndex, this.mouse && this.mouse.pos);
-                if (fallback) mousePixelPos = { x: fallback.x, y: fallback.y };
             }
 
             if (mousePixelPos) {
@@ -12262,15 +12297,15 @@ export class SpriteScene extends Scene {
                 const cursorOutlineColor = useYellow ? '#FFFF00EE' : '#FFFFFFEE';
 
                 if (this.currentTool === 'line' && this.selectionPoints.length === 1) {
-                    this.drawLine(this.selectionPoints[0], mousePixelPos, previewLineColor);
+                    this.drawLine(anchor, mousePixelPos, previewLineColor);
                 } else if (this.currentTool === 'box' && this.selectionPoints.length === 1) {
-                    this.drawBox(this.selectionPoints[0], mousePixelPos, previewLineColor, this.keys.held('Alt'));
+                    this.drawBox(anchor, mousePixelPos, previewLineColor, this.keys.held('Alt'));
                 } else if (this.currentTool === 'circle' && this.selectionPoints && this.selectionPoints.length > 0 && typeof this.computeCirclePixels === 'function') {
                     // For circles, allow preview with either a single anchor pixel
                     // or an even-centered 2x2 anchor (4 pixels). In both cases we
                     // pass the first point; computeCirclePixels will adjust center
                     // when the selection is a 2x2 even anchor.
-                    const start = this.selectionPoints[0];
+                    const start = anchor;
                     const end = mousePixelPos;
                     const filled = this.keys.held('Alt');
                     const strokeWidth = this._getShapeStrokeWidth();
@@ -12281,7 +12316,7 @@ export class SpriteScene extends Scene {
                         this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), previewFillColor, true);
                     }
                 } else if (this.currentTool === 'spiral' && this.selectionPoints && this.selectionPoints.length > 0 && typeof this.computeSpiralPixels === 'function') {
-                    const start = this.selectionPoints[0];
+                    const start = anchor;
                     const end = mousePixelPos;
                     const strokeWidth = this._getShapeStrokeWidth();
                     const spiralPixels = this.computeSpiralPixels(start, end, strokeWidth) || [];
@@ -12291,7 +12326,7 @@ export class SpriteScene extends Scene {
                         this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), previewFillColor, true);
                     }
                 } else if (this.currentTool === 'boxSpiral' && this.selectionPoints && this.selectionPoints.length > 0 && typeof this.computeBoxSpiralPixels === 'function') {
-                    const start = this.selectionPoints[0];
+                    const start = anchor;
                     const end = mousePixelPos;
                     const strokeWidth = this._getShapeStrokeWidth();
                     const spiralPixels = this.computeBoxSpiralPixels(start, end, strokeWidth) || [];
