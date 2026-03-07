@@ -4,6 +4,7 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
         scene._seenOpIds = new Set();
         scene._sendScheduledId = null;
         scene._sendIntervalMs = 120;
+        scene._tileStatePending = null;
         scene.clientId = scene.playerId || ('c' + Math.random().toString(36).slice(2, 8));
         scene._lastModified = new Map();
         scene._suppressOutgoing = false;
@@ -23,7 +24,8 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
             if (typeof sheet.modifyFrame === 'function') {
                 const originalModifyFrame = sheet.modifyFrame.bind(sheet);
                 sheet.modifyFrame = (animation, index, changes) => {
-                    try { scene._recordUndoPixels(animation, index, changes); } catch (e) {}
+                    const pixelLayer = (scene && typeof scene.getActiveLayerIndex === 'function') ? (scene.getActiveLayerIndex('pixel') | 0) : 0;
+                    try { scene._recordUndoPixels(animation, index, changes, pixelLayer); } catch (e) {}
                     const result = originalModifyFrame(animation, index, changes);
                     try {
                         const pixels = [];
@@ -44,7 +46,7 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
                                 }
                             } catch (e) {}
                             if (!scene._suppressOutgoing) {
-                                scene._opBuffer.push({ type: 'draw', anim: animation, frame: Number(index), pixels, client: scene.clientId, time: Date.now() });
+                                scene._opBuffer.push({ type: 'draw', anim: animation, frame: Number(index), pixelLayer, pixels, client: scene.clientId, time: Date.now() });
                                 scene._scheduleSend && scene._scheduleSend();
                             }
                         }
@@ -56,13 +58,14 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
             if (typeof sheet.setPixel === 'function') {
                 const originalSetPixel = sheet.setPixel.bind(sheet);
                 sheet.setPixel = (animation, index, x, y, color, blendType) => {
-                    try { scene._recordUndoPixels(animation, index, { x, y, color, blendType }); } catch (e) {}
+                    const pixelLayer = (scene && typeof scene.getActiveLayerIndex === 'function') ? (scene.getActiveLayerIndex('pixel') | 0) : 0;
+                    try { scene._recordUndoPixels(animation, index, { x, y, color, blendType }, pixelLayer); } catch (e) {}
                     const result = originalSetPixel(animation, index, x, y, color, blendType);
                     try {
                         const now = Date.now();
                         try { scene._markPixelModified(animation, Number(index), Number(x), Number(y), now); } catch (e) {}
                         if (!scene._suppressOutgoing) {
-                            scene._opBuffer.push({ type: 'draw', anim: animation, frame: Number(index), pixels: [{ x: Number(x), y: Number(y), color: (color || '#000000') }], client: scene.clientId, time: now });
+                            scene._opBuffer.push({ type: 'draw', anim: animation, frame: Number(index), pixelLayer, pixels: [{ x: Number(x), y: Number(y), color: (color || '#000000') }], client: scene.clientId, time: now });
                             scene._scheduleSend && scene._scheduleSend();
                         }
                     } catch (e) {}
@@ -74,6 +77,7 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
                 const originalInsertFrame = sheet.insertFrame.bind(sheet);
                 sheet.insertFrame = (animation, index) => {
                     const result = originalInsertFrame(animation, index);
+                    try { if (scene && typeof scene._syncPixelLayerAnimationStructure === 'function') scene._syncPixelLayerAnimationStructure('insert', animation, index); } catch (e) {}
                     try {
                         const arr = sheet._frames.get(animation) || [];
                         let logical = 0;
@@ -117,6 +121,7 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
                     } catch (e) {}
 
                     const result = originalPopFrame(animation, index);
+                    try { if (scene && typeof scene._syncPixelLayerAnimationStructure === 'function') scene._syncPixelLayerAnimationStructure('delete', animation, index); } catch (e) {}
                     try {
                         const arr = sheet._frames.get(animation) || [];
                         let logical = 0;
@@ -147,6 +152,7 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
                 const originalAddAnimation = sheet.addAnimation.bind(sheet);
                 sheet.addAnimation = (name, row, frameCount) => {
                     const result = originalAddAnimation(name, row, frameCount);
+                    try { if (scene && typeof scene._syncPixelLayerAnimationStructure === 'function') scene._syncPixelLayerAnimationStructure('addAnim', name, Number(frameCount) || 0); } catch (e) {}
                     try {
                         if (!scene._suppressOutgoing && scene._canSendCollab && scene._canSendCollab()) {
                             const diff = {};
@@ -162,6 +168,7 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
                 const originalRemoveAnimation = sheet.removeAnimation.bind(sheet);
                 sheet.removeAnimation = (name) => {
                     const result = originalRemoveAnimation(name);
+                    try { if (scene && typeof scene._syncPixelLayerAnimationStructure === 'function') scene._syncPixelLayerAnimationStructure('removeAnim', name); } catch (e) {}
                     try {
                         if (!scene._suppressOutgoing && scene._canSendCollab && scene._canSendCollab()) {
                             const diff = {};
@@ -177,6 +184,7 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
                 const originalRenameAnimation = sheet.renameAnimation.bind(sheet);
                 sheet.renameAnimation = (oldName, newName) => {
                     const result = originalRenameAnimation(oldName, newName);
+                    try { if (result && scene && typeof scene._syncPixelLayerAnimationStructure === 'function') scene._syncPixelLayerAnimationStructure('rename', oldName, null, newName); } catch (e) {}
                     try {
                         if (result && !scene._suppressOutgoing && scene._canSendCollab && scene._canSendCollab()) {
                             const id = (Date.now()) + '_' + Math.random().toString(36).slice(2, 6);

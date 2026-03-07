@@ -102,9 +102,17 @@ export function initializeSpriteSceneState(scene, currentSprite) {
             enabled: false,
             cols: 3,
             rows: 3,
+            activeTileLayerIndex: 0,
             activeTiles: [],
             bindings: [],
             transforms: [],
+            tileLayers: [
+                {
+                    name: 'Tile Layer 1',
+                    bindings: [],
+                    transforms: []
+                }
+            ],
             waypoints: []
         },
         spriteLayer: {

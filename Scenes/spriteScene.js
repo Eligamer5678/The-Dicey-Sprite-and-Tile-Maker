@@ -65,6 +65,8 @@ export class SpriteScene extends Scene {
         initializeSpriteSceneState(this, this.currentSprite);
         installSpriteSceneStateBindings(this);
         this.stateController = createSpriteSceneStateController(this);
+        this._ensureLayerState();
+        this._installPixelLayerHooks();
         this.webrtcCollab = createSpriteWebRTCCollabController(this);
         setupSpriteSceneMultiplayerHooks(this, this.currentSprite);
         this._syncSpriteAnimationProfilesFromSheet();
@@ -140,12 +142,14 @@ export class SpriteScene extends Scene {
         this._autosaveEnabled = true;
         this._autosaveIntervalSeconds = 5;
         this._autosaveIntervalId = null;
+        this._restoringSavedState = false;
 
         
 
         // Start autosave timer if enabled
         if (this._autosaveEnabled) {
             this._autosaveIntervalId = setInterval(() => {
+                if (this._restoringSavedState) return;
                 try { this.doSave(); } catch (e) { /* ignore autosave errors */ }
             }, (this._autosaveIntervalSeconds || 60) * 1000);
         }
@@ -157,6 +161,7 @@ export class SpriteScene extends Scene {
             if (this.saver && typeof this.saver.load === 'function') {
                 try { this.saver.load(); } catch (e) {}
             }
+            this._restoringSavedState = true;
             (async () => {
                 try {
                     const keyName = (this.currentSprite && this.currentSprite.name) ? this.currentSprite.name : 'spritesheet';
@@ -232,6 +237,7 @@ export class SpriteScene extends Scene {
                             }
                             if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
                             if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
+                            this._ensureLayerState();
                             if (!this._tileActive) this._tileActive = new Set();
                             if (Array.isArray(layout.activeTiles)) {
                                 for (const t of layout.activeTiles) {
@@ -243,40 +249,86 @@ export class SpriteScene extends Scene {
                             } else {
                                 this._seedTileActives(cols, rows);
                             }
-                            if (Array.isArray(layout.bindings)) {
-                                for (const b of layout.bindings) {
-                                    if (!b) continue;
-                                    let idx = null;
-                                    if (Number.isFinite(b.col) && Number.isFinite(b.row)) {
-                                        idx = this._getAreaIndexForCoord(Number(b.col), Number(b.row));
-                                        this._activateTile(Number(b.col), Number(b.row));
-                                    } else {
-                                        const i = Number(b.areaIndex);
-                                        if (!Number.isFinite(i) || i < 0) continue;
-                                        const legacy = this._coordFromLegacyIndex(i, this.tileCols, this.tileRows);
-                                        idx = this._getAreaIndexForCoord(legacy.col, legacy.row);
-                                        this._activateTile(legacy.col, legacy.row);
-                                    }
-                                    if (!Number.isFinite(idx)) continue;
-                                    const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
-                                    this._setAreaBindingAtIndex(idx, { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf : null }, false);
+
+                            const decodeBindingIndex = (entry) => {
+                                if (!entry) return null;
+                                if (Number.isFinite(entry.col) && Number.isFinite(entry.row)) {
+                                    const c = Number(entry.col);
+                                    const r = Number(entry.row);
+                                    this._activateTile(c, r);
+                                    return this._getAreaIndexForCoord(c, r);
                                 }
+                                const i = Number(entry.areaIndex);
+                                if (!Number.isFinite(i) || i < 0) return null;
+                                const legacy = this._coordFromLegacyIndex(i, this.tileCols, this.tileRows);
+                                this._activateTile(legacy.col, legacy.row);
+                                return this._getAreaIndexForCoord(legacy.col, legacy.row);
+                            };
+
+                            if (Array.isArray(layout.pixelLayers) && layout.pixelLayers.length > 0) {
+                                this._pixelLayers = layout.pixelLayers.map((src, i) => {
+                                    const l = (src && typeof src === 'object') ? src : { name: String(src || '') };
+                                    return {
+                                        name: String(l.name || ('Pixel Layer ' + (i + 1))).trim() || ('Pixel Layer ' + (i + 1)),
+                                        visibility: this._normalizePixelLayerVisibility(l.visibility, 0)
+                                    };
+                                });
+                                this._activePixelLayerIndex = Math.max(0, Math.min(Number(layout.activePixelLayerIndex) | 0, this._pixelLayers.length - 1));
                             }
-                            if (Array.isArray(layout.transforms)) {
-                                for (const t of layout.transforms) {
-                                    if (!t) continue;
-                                    let idx = null;
-                                    if (Number.isFinite(t.col) && Number.isFinite(t.row)) {
-                                        idx = this._getAreaIndexForCoord(Number(t.col), Number(t.row));
-                                        this._activateTile(Number(t.col), Number(t.row));
-                                    } else {
-                                        const i = Number(t.areaIndex);
-                                        if (!Number.isFinite(i) || i < 0) continue;
-                                        idx = i;
+
+                            const incomingSavedTileLayers = this._normalizeIncomingTileLayers(layout.tileLayers);
+                            if (Array.isArray(incomingSavedTileLayers) && incomingSavedTileLayers.length > 0) {
+                                this._tileLayers = [];
+                                for (let li = 0; li < incomingSavedTileLayers.length; li++) {
+                                    const srcRaw = incomingSavedTileLayers[li];
+                                    const srcLayer = (srcRaw && typeof srcRaw === 'object') ? srcRaw : { name: String(srcRaw || '') };
+                                    const outLayer = {
+                                        name: String(srcLayer.name || ('Tile Layer ' + (li + 1))).trim() || ('Tile Layer ' + (li + 1)),
+                                        visibility: this._normalizeTileLayerVisibility(srcLayer.visibility, 0),
+                                        bindings: [],
+                                        transforms: []
+                                    };
+
+                                    const layerBindings = Array.isArray(srcLayer.bindings) ? srcLayer.bindings : [];
+                                    for (const b of layerBindings) {
+                                        const idx = decodeBindingIndex(b);
+                                        if (!Number.isFinite(idx)) continue;
+                                        const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
+                                        outLayer.bindings[idx] = { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf : null };
                                     }
-                                    if (!Number.isFinite(idx)) continue;
-                                    this._setAreaTransformAtIndex(idx, { rot: (t.rot || 0), flipH: !!t.flipH }, false);
+
+                                    const layerTransforms = Array.isArray(srcLayer.transforms) ? srcLayer.transforms : [];
+                                    for (const t of layerTransforms) {
+                                        const idx = decodeBindingIndex(t);
+                                        if (!Number.isFinite(idx)) continue;
+                                        outLayer.transforms[idx] = { rot: (t.rot || 0), flipH: !!t.flipH };
+                                    }
+
+                                    this._tileLayers.push(outLayer);
                                 }
+                                this._activeTileLayerIndex = Math.max(0, Math.min(Number(layout.activeTileLayerIndex) | 0, this._tileLayers.length - 1));
+                                this._syncActiveTileLayerReferences();
+                            } else {
+                                if (Array.isArray(layout.bindings)) {
+                                    this._areaBindings = [];
+                                    for (const b of layout.bindings) {
+                                        if (!b) continue;
+                                        const idx = decodeBindingIndex(b);
+                                        if (!Number.isFinite(idx)) continue;
+                                        const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
+                                        this._setAreaBindingAtIndex(idx, { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf : null }, false);
+                                    }
+                                }
+                                if (Array.isArray(layout.transforms)) {
+                                    this._areaTransforms = [];
+                                    for (const t of layout.transforms) {
+                                        if (!t) continue;
+                                        const idx = decodeBindingIndex(t);
+                                        if (!Number.isFinite(idx)) continue;
+                                        this._setAreaTransformAtIndex(idx, { rot: (t.rot || 0), flipH: !!t.flipH }, false);
+                                    }
+                                }
+                                this._adoptCurrentTileArraysIntoActiveLayer();
                             }
                             if (Array.isArray(layout.waypoints)) {
                                 const waypointKeys = [];
@@ -327,6 +379,8 @@ export class SpriteScene extends Scene {
                     // Reconstruct frames from saved per-frame images
                     if (!this.currentSprite || !this.currentSprite._frames) return;
                     const animNames = Object.keys(meta.animations || {});
+                    this._ensureLayerState();
+                    this._ensurePixelLayerStore();
                     let pending = 0;
                     for (const anim of animNames) {
                         const count = meta.animations[anim] || 0;
@@ -362,12 +416,45 @@ export class SpriteScene extends Scene {
                             } catch (e) { /* ignore */ }
                         }
                         this.currentSprite._frames.set(anim, arr);
+
+                        // Restore additional pixel layers (>0) if present.
+                        for (let li = 1; li < (this._pixelLayers?.length || 0); li++) {
+                            for (let i = 0; i < count; i++) {
+                                try {
+                                    const path = 'sprites/' + keyName + '/pixelLayers/' + li + '/frames/' + encodeURIComponent(anim) + '/' + i;
+                                    const dataUrl = (this.saver && typeof this.saver.getImage === 'function') ? this.saver.getImage(path) : null;
+                                    if (!dataUrl) continue;
+                                    pending++;
+                                    (async () => {
+                                        try {
+                                            const c = this._ensurePixelLayerFrameCanvas(li, anim, i, true);
+                                            if (!c || !c.getContext) return;
+                                            const ctx = c.getContext('2d');
+                                            ctx.clearRect(0, 0, c.width, c.height);
+                                            const im = new Image();
+                                            await new Promise((res) => {
+                                                im.onload = () => { try { ctx.drawImage(im, 0, 0, c.width, c.height); } catch (e) {} res(); };
+                                                im.onerror = () => res();
+                                                im.src = dataUrl;
+                                            });
+                                        } catch (e) { /* ignore */ }
+                                        pending--;
+                                        if (pending === 0) {
+                                            try { this.currentSprite._rebuildSheetCanvas(); } catch (e) {}
+                                        }
+                                    })();
+                                } catch (e) { /* ignore */ }
+                            }
+                        }
                     }
                     // If nothing pending, still rebuild so packed sheet picks up metadata
                     if (pending === 0) {
                         try { this.currentSprite._rebuildSheetCanvas(); } catch (e) {}
                     }
                 } catch (e) { /* ignore load errors */ }
+                finally {
+                    this._restoringSavedState = false;
+                }
             })();
         } catch (e) {}
 
@@ -1806,6 +1893,7 @@ export class SpriteScene extends Scene {
 
     _serializeTilemapState() {
         try {
+            this._ensureLayerState();
             const activeTiles = (this._tileActive && typeof this._tileActive.values === 'function')
                 ? Array.from(this._tileActive.values())
                 : [];
@@ -1850,17 +1938,69 @@ export class SpriteScene extends Scene {
                 enabled: !!this.tilemode,
                 cols: Number(this.tileCols || 3),
                 rows: Number(this.tileRows || 3),
+                activeTileLayerIndex: Math.max(0, Number(this._activeTileLayerIndex) | 0),
                 activeTiles,
                 bindings,
                 transforms,
+                tileLayers: [],
                 waypoints: this._getWaypointCoords(false).map((wp) => ({ col: wp.col, row: wp.row }))
             };
+
+            if (Array.isArray(this._tileLayers)) {
+                for (let li = 0; li < this._tileLayers.length; li++) {
+                    const layer = this._tileLayers[li] || {};
+                    const layerBindings = [];
+                    const layerTransforms = [];
+
+                    const srcBindings = Array.isArray(layer.bindings) ? layer.bindings : [];
+                    for (let i = 0; i < srcBindings.length; i++) {
+                        const b = srcBindings[i];
+                        if (!b || typeof b !== 'object') continue;
+                        const coord = this._tileIndexToCoord && this._tileIndexToCoord[i] ? this._tileIndexToCoord[i] : null;
+                        if (!coord || !Number.isFinite(coord.col) || !Number.isFinite(coord.row)) continue;
+                        const mf = Array.isArray(b.multiFrames)
+                            ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
+                            : null;
+                        layerBindings.push({
+                            col: Number(coord.col),
+                            row: Number(coord.row),
+                            anim: b.anim,
+                            index: Number(b.index),
+                            multiFrames: (mf && mf.length > 0) ? mf : null
+                        });
+                    }
+
+                    const srcTransforms = Array.isArray(layer.transforms) ? layer.transforms : [];
+                    for (let i = 0; i < srcTransforms.length; i++) {
+                        const t = srcTransforms[i];
+                        if (!t || typeof t !== 'object') continue;
+                        const coord = this._tileIndexToCoord && this._tileIndexToCoord[i] ? this._tileIndexToCoord[i] : null;
+                        if (!coord || !Number.isFinite(coord.col) || !Number.isFinite(coord.row)) continue;
+                        layerTransforms.push({
+                            col: Number(coord.col),
+                            row: Number(coord.row),
+                            rot: Number(t.rot || 0),
+                            flipH: !!t.flipH
+                        });
+                    }
+
+                    payload.tileLayers.push({
+                        name: String((layer && layer.name) || ('Tile Layer ' + (li + 1))),
+                        visibility: this._normalizeTileLayerVisibility(layer && layer.visibility, 0),
+                        bindings: layerBindings,
+                        transforms: layerTransforms
+                    });
+                }
+            }
+
             this.modifyState(payload.enabled, false, false, ['tilemap', 'enabled']);
             this.modifyState(payload.cols, false, false, ['tilemap', 'cols']);
             this.modifyState(payload.rows, false, false, ['tilemap', 'rows']);
+            this.modifyState(payload.activeTileLayerIndex, false, false, ['tilemap', 'activeTileLayerIndex']);
             this.modifyState(payload.activeTiles, false, false, ['tilemap', 'activeTiles']);
             this.modifyState(payload.bindings, false, false, ['tilemap', 'bindings']);
             this.modifyState(payload.transforms, false, false, ['tilemap', 'transforms']);
+            this.modifyState(payload.tileLayers, false, false, ['tilemap', 'tileLayers']);
             this.modifyState(payload.waypoints, false, false, ['tilemap', 'waypoints']);
             return payload;
         } catch (e) {
@@ -1892,63 +2032,138 @@ export class SpriteScene extends Scene {
                 for (const key of active) {
                     const p = this._parseTileKey(key);
                     if (!p) continue;
-                    this._activateTile(p.col, p.row);
+                    this._activateTile(p.col, p.row, false);
                 }
             } else {
-                this._seedTileActives(cols, rows);
+                const midC = Math.floor(cols / 2);
+                const midR = Math.floor(rows / 2);
+                for (let row = 0; row < rows; row++) {
+                    for (let col = 0; col < cols; col++) {
+                        const tc = col - midC;
+                        const tr = row - midR;
+                        this._activateTile(tc, tr, false);
+                    }
+                }
             }
 
             this._areaBindings = [];
             this._areaTransforms = [];
 
-            const incomingBindings = Array.isArray(tilemapState.bindings) ? tilemapState.bindings : [];
-            for (let i = 0; i < incomingBindings.length; i++) {
-                const b = incomingBindings[i];
-                if (!b || typeof b !== 'object') continue;
+            this._ensureLayerState();
+            this._tileLayers = [];
 
-                let idx = null;
-                if (Number.isFinite(b.col) && Number.isFinite(b.row)) {
-                    idx = this._getAreaIndexForCoord(Number(b.col), Number(b.row));
-                    this._activateTile(Number(b.col), Number(b.row));
-                } else if (Number.isFinite(b.areaIndex)) {
-                    // Legacy fallback (index-based payload)
-                    idx = Number(b.areaIndex);
-                } else if (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[i]) {
-                    idx = i;
+            const incomingLayers = this._normalizeIncomingTileLayers(tilemapState.tileLayers);
+            if (incomingLayers.length > 0) {
+                for (let li = 0; li < incomingLayers.length; li++) {
+                    const srcRaw = incomingLayers[li];
+                    const srcLayer = (srcRaw && typeof srcRaw === 'object') ? srcRaw : { name: String(srcRaw || '') };
+                    const outLayer = {
+                        name: String(srcLayer.name || ('Tile Layer ' + (li + 1))),
+                        visibility: this._normalizeTileLayerVisibility(srcLayer.visibility, 0),
+                        bindings: [],
+                        transforms: []
+                    };
+
+                    const layerBindings = Array.isArray(srcLayer.bindings) ? srcLayer.bindings : [];
+                    for (const b of layerBindings) {
+                        if (!b || typeof b !== 'object') continue;
+                        let idx = null;
+                        if (Number.isFinite(b.col) && Number.isFinite(b.row)) {
+                            idx = this._getAreaIndexForCoord(Number(b.col), Number(b.row));
+                            this._activateTile(Number(b.col), Number(b.row), false);
+                        } else if (Number.isFinite(b.areaIndex)) {
+                            idx = Number(b.areaIndex);
+                        }
+                        if (!Number.isFinite(idx)) continue;
+                        const mf = Array.isArray(b.multiFrames)
+                            ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
+                            : null;
+                        outLayer.bindings[idx | 0] = {
+                            anim: b.anim,
+                            index: Number(b.index),
+                            multiFrames: (mf && mf.length > 0) ? mf : null
+                        };
+                    }
+
+                    const layerTransforms = Array.isArray(srcLayer.transforms) ? srcLayer.transforms : [];
+                    for (const t of layerTransforms) {
+                        if (!t || typeof t !== 'object') continue;
+                        let idx = null;
+                        if (Number.isFinite(t.col) && Number.isFinite(t.row)) {
+                            idx = this._getAreaIndexForCoord(Number(t.col), Number(t.row));
+                            this._activateTile(Number(t.col), Number(t.row), false);
+                        } else if (Number.isFinite(t.areaIndex)) {
+                            idx = Number(t.areaIndex);
+                        }
+                        if (!Number.isFinite(idx)) continue;
+                        outLayer.transforms[idx | 0] = {
+                            rot: Number(t.rot || 0),
+                            flipH: !!t.flipH
+                        };
+                    }
+
+                    this._tileLayers.push(outLayer);
                 }
-                if (!Number.isFinite(idx)) continue;
 
-                const mf = Array.isArray(b.multiFrames)
-                    ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
-                    : null;
-                this._setAreaBindingAtIndex(idx, {
-                    anim: b.anim,
-                    index: Number(b.index),
-                    multiFrames: (mf && mf.length > 0) ? mf : null
-                }, false);
+                if (this._tileLayers.length <= 0) {
+                    this._tileLayers = [{ name: 'Tile Layer 1', visibility: 0, bindings: [], transforms: [] }];
+                }
+                this._activeTileLayerIndex = this._resolveTileLayerIndex(tilemapState.activeTileLayerIndex, false);
+                this._syncActiveTileLayerReferences();
             }
 
-            const incomingTransforms = Array.isArray(tilemapState.transforms) ? tilemapState.transforms : [];
-            for (let i = 0; i < incomingTransforms.length; i++) {
-                const t = incomingTransforms[i];
-                if (!t || typeof t !== 'object') continue;
+            if (incomingLayers.length <= 0) {
+                const incomingBindings = Array.isArray(tilemapState.bindings) ? tilemapState.bindings : [];
+                for (let i = 0; i < incomingBindings.length; i++) {
+                    const b = incomingBindings[i];
+                    if (!b || typeof b !== 'object') continue;
 
-                let idx = null;
-                if (Number.isFinite(t.col) && Number.isFinite(t.row)) {
-                    idx = this._getAreaIndexForCoord(Number(t.col), Number(t.row));
-                    this._activateTile(Number(t.col), Number(t.row));
-                } else if (Number.isFinite(t.areaIndex)) {
-                    // Legacy fallback (index-based payload)
-                    idx = Number(t.areaIndex);
-                } else if (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[i]) {
-                    idx = i;
+                    let idx = null;
+                    if (Number.isFinite(b.col) && Number.isFinite(b.row)) {
+                        idx = this._getAreaIndexForCoord(Number(b.col), Number(b.row));
+                        this._activateTile(Number(b.col), Number(b.row), false);
+                    } else if (Number.isFinite(b.areaIndex)) {
+                        // Legacy fallback (index-based payload)
+                        idx = Number(b.areaIndex);
+                    } else if (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[i]) {
+                        idx = i;
+                    }
+                    if (!Number.isFinite(idx)) continue;
+
+                    const mf = Array.isArray(b.multiFrames)
+                        ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
+                        : null;
+                    this._setAreaBindingAtIndex(idx, {
+                        anim: b.anim,
+                        index: Number(b.index),
+                        multiFrames: (mf && mf.length > 0) ? mf : null
+                    }, false);
                 }
-                if (!Number.isFinite(idx)) continue;
 
-                this._setAreaTransformAtIndex(idx, {
-                    rot: Number(t.rot || 0),
-                    flipH: !!t.flipH
-                }, false);
+                const incomingTransforms = Array.isArray(tilemapState.transforms) ? tilemapState.transforms : [];
+                for (let i = 0; i < incomingTransforms.length; i++) {
+                    const t = incomingTransforms[i];
+                    if (!t || typeof t !== 'object') continue;
+
+                    let idx = null;
+                    if (Number.isFinite(t.col) && Number.isFinite(t.row)) {
+                        idx = this._getAreaIndexForCoord(Number(t.col), Number(t.row));
+                        this._activateTile(Number(t.col), Number(t.row), false);
+                    } else if (Number.isFinite(t.areaIndex)) {
+                        // Legacy fallback (index-based payload)
+                        idx = Number(t.areaIndex);
+                    } else if (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[i]) {
+                        idx = i;
+                    }
+                    if (!Number.isFinite(idx)) continue;
+
+                    this._setAreaTransformAtIndex(idx, {
+                        rot: Number(t.rot || 0),
+                        flipH: !!t.flipH
+                    }, false);
+                }
+
+                this._adoptCurrentTileArraysIntoActiveLayer();
             }
 
             const waypointKeys = [];
@@ -1961,13 +2176,16 @@ export class SpriteScene extends Scene {
                 waypointKeys.push(this._tileKey(c | 0, r | 0));
             }
             this._setWaypointKeys(waypointKeys, false, true);
+            this._adoptCurrentTileArraysIntoActiveLayer();
 
             this.modifyState(this.tilemode, false, false, ['tilemap', 'enabled']);
             this.modifyState(this.tileCols, false, false, ['tilemap', 'cols']);
             this.modifyState(this.tileRows, false, false, ['tilemap', 'rows']);
+            this.modifyState(Math.max(0, Number(this._activeTileLayerIndex) | 0), false, false, ['tilemap', 'activeTileLayerIndex']);
             this.modifyState(Array.from(this._tileActive.values()), false, false, ['tilemap', 'activeTiles']);
             this.modifyState(this._areaBindings, false, false, ['tilemap', 'bindings']);
             this.modifyState(this._areaTransforms, false, false, ['tilemap', 'transforms']);
+            this.modifyState(Array.isArray(this._tileLayers) ? this._tileLayers : [], false, false, ['tilemap', 'tileLayers']);
             this.modifyState(this._getWaypointCoords(false).map((wp) => ({ col: wp.col, row: wp.row })), false, false, ['tilemap', 'waypoints']);
             return true;
         } catch (e) {
@@ -2275,10 +2493,45 @@ export class SpriteScene extends Scene {
         }
     }
 
+    _isTileLayerIgnoredForCollision(layerName) {
+        try {
+            const name = String(layerName || '').toLowerCase();
+            return name.includes('--ignore');
+        } catch (e) {
+            return false;
+        }
+    }
+
     _isSolidTileForSim(col, row) {
         try {
             if (!this.tilemode) return false;
-            return !!this._isTileActive(col, row);
+            if (!this._isTileActive(col, row)) return false;
+
+            this._ensureLayerState();
+            const idx = this._getAreaIndexForCoord(col, row);
+            if (!Number.isFinite(idx) || idx < 0) return false;
+
+            const hasValidBinding = (b) => !!(b && b.anim !== undefined && b.index !== undefined);
+            let anyLayerHasBinding = false;
+            let anyNonIgnoredLayerHasBinding = false;
+
+            for (let i = 0; i < this._tileLayers.length; i++) {
+                const layer = this._tileLayers[i] || {};
+                const b = Array.isArray(layer.bindings) ? layer.bindings[idx | 0] : null;
+                if (!hasValidBinding(b)) continue;
+                anyLayerHasBinding = true;
+                const layerName = String(layer.name || ('Tile Layer ' + (i + 1)));
+                if (!this._isTileLayerIgnoredForCollision(layerName)) {
+                    anyNonIgnoredLayerHasBinding = true;
+                    break;
+                }
+            }
+
+            // If explicit bindings exist, only non-ignored layers contribute collision.
+            if (anyLayerHasBinding) return anyNonIgnoredLayerHasBinding;
+
+            // Backward compatibility for older maps without bindings.
+            return true;
         } catch (e) {
             return false;
         }
@@ -2532,6 +2785,7 @@ export class SpriteScene extends Scene {
             if (mode.active) {
                 const pass = mode.passcode || '';
                 if (!(this.keys.released(' ', pass) || this.keys.released('Space', pass) || this.keys.released('Spacebar', pass))) return false;
+                
                 mode.active = false;
                 mode.player = null;
                 try { this._clearPlayerSimBroadcast(); } catch (e) {}
@@ -2546,6 +2800,8 @@ export class SpriteScene extends Scene {
                         if (mode.prevOffset && mode.prevZoom) this._startCameraOffsetTween(mode.prevOffset.clone(), 0.35, mode.prevZoom.clone());
                     }
                 } catch (e) {}
+                this.keys.pause(0.5)
+                this.keys.clearState()
                 return true;
             }
 
@@ -2940,7 +3196,7 @@ export class SpriteScene extends Scene {
 
             const anim = this.selectedSpriteAnimation || null;
             if (!anim) return false;
-            this._deactivateTile(col, row, true);
+            this._clearTileOnActiveLayer(col, row, true);
             const created = this._addSpriteEntityAt(col, row, anim, true);
             if (!created) return false;
             this.modifyState(created.id, false, false, ['spriteLayer', 'selectedEntityId']);
@@ -2957,6 +3213,7 @@ export class SpriteScene extends Scene {
         this._sceneTime = (this._sceneTime || 0) + (tickDelta || 0);
         this.mouse.update(tickDelta)
         this.keys.update(tickDelta)
+        try { this._installPixelLayerHooks(); } catch (e) {}
         try { this._updateRemotePlayerSims(tickDelta); } catch (e) {}
         if (!this._playerSimMode) {
             this._playerSimMode = {
@@ -3735,6 +3992,7 @@ export class SpriteScene extends Scene {
     _handleRenderOnlyTilePaint(pos) {
         try {
             if (!this.tilemode) return;
+            this._adoptCurrentTileArraysIntoActiveLayer();
             const center = (() => {
                 if (pos && pos.tileCol !== null && pos.tileCol !== undefined && pos.tileRow !== null && pos.tileRow !== undefined) {
                     return { col: pos.tileCol, row: pos.tileRow };
@@ -3789,7 +4047,6 @@ export class SpriteScene extends Scene {
             const baseTransform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
 
             if (this.mouse.held('left')) {
-                if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
                 for (const t of tiles) {
                     const idx = (typeof t.areaIndex === 'number') ? t.areaIndex : this._getAreaIndexForCoord(t.col, t.row);
                     if (idx === null || idx === undefined) continue;
@@ -3827,14 +4084,13 @@ export class SpriteScene extends Scene {
                     for (const t of tiles) {
                         const idx = (typeof t.areaIndex === 'number') ? t.areaIndex : this._getAreaIndexForCoord(t.col, t.row);
                         if (idx === null || idx === undefined) continue;
-                        try { this._deactivateTile(t.col, t.row); } catch (e) { /* ignore */ }
                         // capture old binding anim so neighbors of same animation can be updated
                         let oldAnim = null;
                         try {
-                            if (Array.isArray(this._areaBindings) && this._areaBindings[idx] && this._areaBindings[idx].anim) oldAnim = this._areaBindings[idx].anim;
+                            const oldBinding = this.getAreaBinding(idx);
+                            if (oldBinding && oldBinding.anim) oldAnim = oldBinding.anim;
                         } catch(e){}
-                        this._setAreaBindingAtIndex(idx, null, true);
-                        this._setAreaTransformAtIndex(idx, null, true);
+                        try { this._clearTileOnActiveLayer(t.col, t.row, true); } catch (e) { /* ignore */ }
                         // update neighbors if autotile enabled
                         try { if (this.autotile) this._updateAutotileNeighbors(t.col, t.row, oldAnim || this.selectedAnimation); } catch(e){}
                     }
@@ -7924,6 +8180,34 @@ export class SpriteScene extends Scene {
                     }
                 } catch (e) { /* ignore frames save errors */ }
 
+                // Save non-base pixel-layer frame canvases separately.
+                try {
+                    this._ensureLayerState();
+                    this._ensurePixelLayerStore();
+                    const animEntries = (sprite && sprite._frames && typeof sprite._frames.entries === 'function')
+                        ? Array.from(sprite._frames.entries())
+                        : [];
+                    for (let li = 1; li < (this._pixelLayers?.length || 0); li++) {
+                        for (const [anim, arr] of animEntries) {
+                            if (!Array.isArray(arr)) continue;
+                            let logical = 0;
+                            for (let i = 0; i < arr.length; i++) {
+                                const entry = arr[i];
+                                if (!entry || entry.__groupStart || entry.__groupEnd) continue;
+                                const c = this._ensurePixelLayerFrameCanvas(li, anim, logical, false);
+                                logical++;
+                                if (!c || !c.toDataURL) continue;
+                                let frameDataUrl = null;
+                                try { frameDataUrl = c.toDataURL('image/png'); } catch (e) { frameDataUrl = null; }
+                                if (!frameDataUrl || typeof this.saver.setImage !== 'function') continue;
+                                try {
+                                    this.saver.setImage('sprites/' + keyName + '/pixelLayers/' + li + '/frames/' + encodeURIComponent(anim) + '/' + (logical - 1), frameDataUrl);
+                                } catch (e) {}
+                            }
+                        }
+                    }
+                } catch (e) { /* ignore pixel-layer frame save errors */ }
+
                 // Minimal metadata: slice size, animations and frame counts, groups, tile layout
                 const meta = { name: keyName, slicePx: (sprite && sprite.slicePx) || null, animations: {} };
                 try {
@@ -7962,6 +8246,14 @@ export class SpriteScene extends Scene {
                     layout.tilemode = !!this.tilemode;
                     layout.tileCols = Math.max(1, (this.tileCols|0) || 3);
                     layout.tileRows = Math.max(1, (this.tileRows|0) || 3);
+                    this._ensureLayerState();
+                    layout.pixelLayers = (this._pixelLayers || []).map((l, i) => ({
+                        name: String((l && l.name) || ('Pixel Layer ' + (i + 1))),
+                        visibility: this._normalizePixelLayerVisibility(l && l.visibility, 0)
+                    }));
+                    layout.activePixelLayerIndex = this.getActiveLayerIndex('pixel');
+                    layout.activeTileLayerIndex = this.getActiveLayerIndex('tile');
+                    layout.tileLayers = [];
                     layout.bindings = [];
                     layout.transforms = [];
                     layout.activeTiles = [];
@@ -7985,6 +8277,48 @@ export class SpriteScene extends Scene {
                             layout.bindings.push(entry);
                         }
                     }
+
+                    const layersForSave = this._normalizeIncomingTileLayers(this._tileLayers);
+                    if (Array.isArray(layersForSave)) {
+                        for (let li = 0; li < layersForSave.length; li++) {
+                            const layer = layersForSave[li] || {};
+                            const layerBindings = [];
+                            const layerTransforms = [];
+                            const srcBindings = Array.isArray(layer.bindings) ? layer.bindings : [];
+                            const srcTransforms = Array.isArray(layer.transforms) ? layer.transforms : [];
+
+                            for (let i = 0; i < srcBindings.length; i++) {
+                                const b = srcBindings[i];
+                                if (!b || b.anim === undefined || b.index === undefined) continue;
+                                const coord = (this._tileIndexToCoord && this._tileIndexToCoord[i]) ? this._tileIndexToCoord[i] : null;
+                                const entry = { areaIndex: i, anim: b.anim, index: Number(b.index) };
+                                if (coord) { entry.col = coord.col; entry.row = coord.row; }
+                                if (Array.isArray(b.multiFrames) && b.multiFrames.length > 0) entry.multiFrames = b.multiFrames.map(v => Number(v));
+                                layerBindings.push(entry);
+                            }
+
+                            for (let i = 0; i < srcTransforms.length; i++) {
+                                const t = srcTransforms[i];
+                                if (!t) continue;
+                                const rot = (t.rot || 0);
+                                const flipH = !!t.flipH;
+                                if (rot !== 0 || flipH) {
+                                    const coord = (this._tileIndexToCoord && this._tileIndexToCoord[i]) ? this._tileIndexToCoord[i] : null;
+                                    const tx = { areaIndex: i, rot, flipH };
+                                    if (coord) { tx.col = coord.col; tx.row = coord.row; }
+                                    layerTransforms.push(tx);
+                                }
+                            }
+
+                            layout.tileLayers.push({
+                                name: String(layer.name || ('Tile Layer ' + (li + 1))),
+                                visibility: this._normalizeTileLayerVisibility(layer && layer.visibility, 0),
+                                bindings: layerBindings,
+                                transforms: layerTransforms
+                            });
+                        }
+                    }
+
                     if (Array.isArray(this._areaTransforms)) {
                         for (let i = 0; i < this._areaTransforms.length; i++) {
                             const t = this._areaTransforms[i];
@@ -8265,8 +8599,8 @@ export class SpriteScene extends Scene {
                     const binding = this.getAreaBinding(idx);
                     const transform = (Array.isArray(this._areaTransforms) && this._areaTransforms[idx]) ? this._areaTransforms[idx] : null;
                     entries.push({ col: c.col, row: c.row, binding: binding ? { ...binding } : null, transform: transform ? { rot: transform.rot || 0, flipH: !!transform.flipH } : null });
-                    // deactivate also clears binding/transform and emits synced tile op
-                    this._deactivateTile(c.col, c.row);
+                    // Cut is layer-dependent: clear only active tile layer at this coord.
+                    this._clearTileOnActiveLayer(c.col, c.row, true);
                 }
                 if (entries.length > 0) {
                     const minCol = Math.min(...entries.map(e => e.col));
@@ -8807,13 +9141,19 @@ export class SpriteScene extends Scene {
 
             for (const [key, pending] of this._tileOpPending.entries()) {
                 if (!pending || typeof pending !== 'object') continue;
-                const parts = String(key).split(',');
+                let rawKey = String(key);
+                if (rawKey.startsWith('l')) {
+                    const sep = rawKey.indexOf(':');
+                    if (sep > 1) rawKey = rawKey.slice(sep + 1);
+                }
+                const parts = rawKey.split(',');
                 if (parts.length !== 2) continue;
                 const col = Number(parts[0]);
                 const row = Number(parts[1]);
                 if (!Number.isFinite(col) || !Number.isFinite(row)) continue;
 
                 const compact = { c: col|0, r: row|0 };
+                if (pending.layer !== undefined && Number.isFinite(Number(pending.layer))) compact.l = Number(pending.layer) | 0;
 
                 if (pending.active !== undefined) compact.a = pending.active ? 1 : 0;
 
@@ -8865,6 +9205,36 @@ export class SpriteScene extends Scene {
         }
     }
 
+    _queueTileStateOp(tileState = null) {
+        try {
+            if (this._suppressOutgoing) return false;
+            const payload = tileState && typeof tileState === 'object' ? tileState : this._serializeTilemapState();
+            if (!payload || typeof payload !== 'object') return false;
+            this._tileStatePending = {
+                type: 'tileState',
+                client: this.clientId,
+                time: Date.now(),
+                tilemap: payload
+            };
+            this._scheduleSend && this._scheduleSend();
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _flushPendingTileStateToBuffer() {
+        try {
+            if (!this._tileStatePending) return false;
+            if (!this._opBuffer) this._opBuffer = [];
+            this._opBuffer.push(this._tileStatePending);
+            this._tileStatePending = null;
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     _flushPendingSpriteOpsToBuffer() {
         try {
             if (!this._spriteOpPending || this._spriteOpPending.size === 0) return 0;
@@ -8900,6 +9270,11 @@ export class SpriteScene extends Scene {
                 // WebRTC with handshake-only signaling.
                 return;
             }
+
+            // Full tile-state blob sync is disabled in favor of granular layer-aware tile ops.
+            // Clear any stale pending state blob (e.g. from older runtime state) to avoid
+            // oversized payloads that can block transport updates.
+            this._tileStatePending = null;
 
             // Coalesce queued per-tile mutations into compact tileBlob ops.
             this._flushPendingTileOpsToBuffer();
@@ -8985,11 +9360,13 @@ export class SpriteScene extends Scene {
                                 // add frames
                                 for (let k = 0; k < (targetCount - logical); k++) {
                                     try { this.currentSprite.insertFrame(anim); } catch(e){}
+                                    try { this._syncPixelLayerAnimationStructure('insert', anim, null); } catch (e) {}
                                 }
                             } else if (logical > targetCount) {
                                 // remove frames (from the end when no struct ops are present)
                                 for (let k = 0; k < (logical - targetCount); k++) {
                                     try { this.currentSprite.popFrame(anim); } catch(e){}
+                                    try { this._syncPixelLayerAnimationStructure('delete', anim, null); } catch (e) {}
                                 }
                             }
                         } catch(e){}
@@ -9090,10 +9467,12 @@ export class SpriteScene extends Scene {
                             else if (op.action === 'insertFrame') {
                                 const idx = (typeof op.index === 'number' && op.index >= 0) ? Number(op.index) : undefined;
                                 try { this._suppressOutgoing = true; this.currentSprite.insertFrame(op.anim, idx); } finally { this._suppressOutgoing = false; }
+                                try { this._syncPixelLayerAnimationStructure('insert', op.anim, idx); } catch (e) {}
                                 applied++;
                             } else if (op.action === 'deleteFrame') {
                                 const idx = (typeof op.index === 'number' && op.index >= 0) ? Number(op.index) : undefined;
                                 try { this._suppressOutgoing = true; this.currentSprite.popFrame(op.anim, idx); } finally { this._suppressOutgoing = false; }
+                                try { this._syncPixelLayerAnimationStructure('delete', op.anim, idx); } catch (e) {}
                                 applied++;
                             } else if (op.action === 'renameAnimation') {
                                 const from = String(op.from || '').trim();
@@ -9112,12 +9491,20 @@ export class SpriteScene extends Scene {
                                     } finally {
                                         this._suppressOutgoing = false;
                                     }
+                                    try { this._syncPixelLayerAnimationStructure('rename', from, null, to); } catch (e) {}
                                     try { this._remapAnimationReferences(from, to); } catch (e) {}
                                     try { this._onAnimationRenamed(from, to); } catch (e) {}
                                     applied++;
                                 }
                             }
                         } catch (e) { /* ignore struct op errors */ }
+                    } else if (op.type === 'tileState' && op.tilemap && typeof op.tilemap === 'object') {
+                        try {
+                            this._suppressOutgoing = true;
+                            this._applyTilemapState(op.tilemap);
+                            applied++;
+                        } catch (e) { /* ignore tile state op errors */ }
+                        finally { this._suppressOutgoing = false; }
                     } else if (op.type === 'tile') {
                         try {
                             const col = Number(op.col);
@@ -9129,6 +9516,9 @@ export class SpriteScene extends Scene {
                             this._suppressOutgoing = true;
                             const c = col|0;
                             const r = row|0;
+                            const layerIndex = Number.isFinite(Number(op.layer))
+                                ? this._ensureTileLayerIndex(Number(op.layer))
+                                : this._resolveTileLayerIndex(op.layer, false);
                             if (op.action === 'activate') {
                                 this._activateTile(c, r, false);
                             } else if (op.action === 'deactivate') {
@@ -9139,21 +9529,21 @@ export class SpriteScene extends Scene {
                                 const mf = Array.isArray(op.multiFrames)
                                     ? op.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
                                     : null;
-                                this._setAreaBindingAtIndex(idx, {
+                                this._setAreaBindingAtIndexForLayer(idx, layerIndex, {
                                     anim: op.anim || this.selectedAnimation,
                                     index: Number(op.index) || 0,
                                     multiFrames: (mf && mf.length > 0) ? mf : null
-                                }, false);
+                                });
                             } else if (op.action === 'clearBinding') {
                                 const idx = this._getAreaIndexForCoord(c, r);
-                                this._setAreaBindingAtIndex(idx, null, false);
+                                this._setAreaBindingAtIndexForLayer(idx, layerIndex, null);
                             } else if (op.action === 'setTransform') {
                                 const idx = this._getAreaIndexForCoord(c, r);
                                 this._activateTile(c, r, false);
-                                this._setAreaTransformAtIndex(idx, { rot: Number(op.rot || 0), flipH: !!op.flipH }, false);
+                                this._setAreaTransformAtIndexForLayer(idx, layerIndex, { rot: Number(op.rot || 0), flipH: !!op.flipH });
                             } else if (op.action === 'clearTransform') {
                                 const idx = this._getAreaIndexForCoord(c, r);
-                                this._setAreaTransformAtIndex(idx, null, false);
+                                this._setAreaTransformAtIndexForLayer(idx, layerIndex, null);
                             } else if (op.action === 'setWaypoint') {
                                 this._setWaypointAtTile(c, r, false);
                             } else if (op.action === 'clearWaypoint') {
@@ -9172,6 +9562,10 @@ export class SpriteScene extends Scene {
                                 if (!Number.isFinite(c) || !Number.isFinite(r)) continue;
                                 const col = c | 0;
                                 const row = r | 0;
+                                const rawLayer = (tile.l !== undefined ? tile.l : tile.layer);
+                                const layerIndex = Number.isFinite(Number(rawLayer))
+                                    ? this._ensureTileLayerIndex(Number(rawLayer))
+                                    : this._resolveTileLayerIndex(rawLayer, false);
                                 const idx = this._getAreaIndexForCoord(col, row);
 
                                 if (tile.a !== undefined) {
@@ -9180,30 +9574,30 @@ export class SpriteScene extends Scene {
                                 }
 
                                 if (tile.b !== undefined) {
-                                    if (tile.b === 0) this._setAreaBindingAtIndex(idx, null, false);
+                                    if (tile.b === 0) this._setAreaBindingAtIndexForLayer(idx, layerIndex, null);
                                     else {
                                         const b = tile.b || {};
                                         const mf = Array.isArray(b.m)
                                             ? b.m.filter(v => Number.isFinite(v)).map(v => Number(v))
                                             : (Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null);
                                         this._activateTile(col, row, false);
-                                        this._setAreaBindingAtIndex(idx, {
+                                        this._setAreaBindingAtIndexForLayer(idx, layerIndex, {
                                             anim: b.a || b.anim || this.selectedAnimation,
                                             index: Number(b.i !== undefined ? b.i : b.index) || 0,
                                             multiFrames: (mf && mf.length > 0) ? mf : null
-                                        }, false);
+                                        });
                                     }
                                 }
 
                                 if (tile.t !== undefined) {
-                                    if (tile.t === 0) this._setAreaTransformAtIndex(idx, null, false);
+                                    if (tile.t === 0) this._setAreaTransformAtIndexForLayer(idx, layerIndex, null);
                                     else {
                                         const t = tile.t || {};
                                         this._activateTile(col, row, false);
-                                        this._setAreaTransformAtIndex(idx, {
+                                        this._setAreaTransformAtIndexForLayer(idx, layerIndex, {
                                             rot: Number(t.r !== undefined ? t.r : t.rot) || 0,
                                             flipH: !!(t.f !== undefined ? Number(t.f) : t.flipH)
-                                        }, false);
+                                        });
                                     }
                                 }
 
@@ -9260,12 +9654,21 @@ export class SpriteScene extends Scene {
                             } catch (e) { continue; }
                         }
                         if (toApply.length) {
-                            if (typeof sheet.drawPixels === 'function') {
-                                try { this._suppressOutgoing = true; sheet.drawPixels(op.anim, op.frame, toApply); } catch (e) {
-                                    for (const px of toApply) { try { sheet.setPixel(op.anim, op.frame, px.x, px.y, px.color, 'replace'); } catch (er) {} }
-                                } finally { this._suppressOutgoing = false; }
-                            } else {
-                                try { this._suppressOutgoing = true; for (const px of toApply) { try { sheet.setPixel(op.anim, op.frame, px.x, px.y, px.color, 'replace'); } catch (er) {} } } finally { this._suppressOutgoing = false; }
+                            const prevLayer = this._activePixelLayerIndex | 0;
+                            const opLayer = Number.isFinite(Number(op.pixelLayer))
+                                ? Math.max(0, Math.min(Number(op.pixelLayer) | 0, Math.max(0, (this._pixelLayers?.length || 1) - 1)))
+                                : prevLayer;
+                            try {
+                                this._activePixelLayerIndex = opLayer;
+                                if (typeof sheet.drawPixels === 'function') {
+                                    try { this._suppressOutgoing = true; sheet.drawPixels(op.anim, op.frame, toApply); } catch (e) {
+                                        for (const px of toApply) { try { sheet.setPixel(op.anim, op.frame, px.x, px.y, px.color, 'replace'); } catch (er) {} }
+                                    } finally { this._suppressOutgoing = false; }
+                                } else {
+                                    try { this._suppressOutgoing = true; for (const px of toApply) { try { sheet.setPixel(op.anim, op.frame, px.x, px.y, px.color, 'replace'); } catch (er) {} } } finally { this._suppressOutgoing = false; }
+                                }
+                            } finally {
+                                this._activePixelLayerIndex = prevLayer;
                             }
                             // mark applied pixels as modified at remote op time
                             try { const t = op.time || Date.now(); for (const a of toApply) { try { this._markPixelModified(op.anim, op.frame, a.x, a.y, t); } catch(e){} } } catch(e){}
@@ -9441,8 +9844,13 @@ export class SpriteScene extends Scene {
                 client: this.clientId,
                 frames: {},
                 animations: {},
+                activePixelLayerIndex: Math.max(0, Number(this._activePixelLayerIndex) | 0),
+                pixelLayers: [],
+                pixelLayerFrames: {},
                 tileCols: this.tileCols,
                 tileRows: this.tileRows,
+                activeTileLayerIndex: Math.max(0, Number(this._activeTileLayerIndex) | 0),
+                tileLayers: [],
                 spriteLayer: null,
             };
             if (Array.isArray(this._areaBindings)) {
@@ -9458,6 +9866,54 @@ export class SpriteScene extends Scene {
             }
             snap.waypoints = this._getWaypointCoords(false).map((wp) => ({ col: wp.col, row: wp.row }));
             if (Array.isArray(this._areaTransforms)) snap.transforms = this._areaTransforms.slice();
+            this._ensureLayerState();
+            if (Array.isArray(this._tileLayers)) {
+                for (let li = 0; li < this._tileLayers.length; li++) {
+                    const layer = this._tileLayers[li] || {};
+                    const out = {
+                        name: String(layer.name || ('Tile Layer ' + (li + 1))),
+                        visibility: this._normalizeTileLayerVisibility(layer && layer.visibility, 0),
+                        bindings: [],
+                        transforms: []
+                    };
+                    const srcBindings = Array.isArray(layer.bindings) ? layer.bindings : [];
+                    for (let i = 0; i < srcBindings.length; i++) {
+                        const b = srcBindings[i];
+                        if (!b || typeof b !== 'object') continue;
+                        const coord = (this._tileIndexToCoord && this._tileIndexToCoord[i]) ? this._tileIndexToCoord[i] : null;
+                        if (!coord) continue;
+                        const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
+                        out.bindings.push({
+                            anim: b.anim,
+                            index: Number(b.index),
+                            multiFrames: (mf && mf.length > 0) ? mf.slice() : null,
+                            col: Number(coord.col),
+                            row: Number(coord.row)
+                        });
+                    }
+                    const srcTransforms = Array.isArray(layer.transforms) ? layer.transforms : [];
+                    for (let i = 0; i < srcTransforms.length; i++) {
+                        const t = srcTransforms[i];
+                        if (!t || typeof t !== 'object') continue;
+                        const coord = (this._tileIndexToCoord && this._tileIndexToCoord[i]) ? this._tileIndexToCoord[i] : null;
+                        if (!coord) continue;
+                        out.transforms.push({
+                            rot: Number(t.rot || 0),
+                            flipH: !!t.flipH,
+                            col: Number(coord.col),
+                            row: Number(coord.row)
+                        });
+                    }
+                    snap.tileLayers.push(out);
+                }
+            }
+            if (Array.isArray(this._pixelLayers)) {
+                snap.pixelLayers = this._pixelLayers.map((l, i) => ({
+                    name: String((l && l.name) || ('Pixel Layer ' + (i + 1))),
+                    visibility: this._normalizePixelLayerVisibility(l && l.visibility, 0)
+                }));
+            }
+            this._ensurePixelLayerStore();
             try {
                 const layer = this._normalizeSpriteLayerState();
                 if (layer) {
@@ -9487,7 +9943,7 @@ export class SpriteScene extends Scene {
                 for (let i = 0; i < arr.length; i++) {
                     const entry = arr[i];
                     if (!entry || entry.__groupStart || entry.__groupEnd) continue;
-                    const frameCanvas = sheet.getFrame(name, logical);
+                    const frameCanvas = this._rawSheetGetFrame(name, logical);
                     let dataUrl = null;
                     try { dataUrl = frameCanvas && frameCanvas.toDataURL ? frameCanvas.toDataURL('image/png') : null; } catch (e) { dataUrl = null; }
                     frames.push(dataUrl);
@@ -9496,6 +9952,22 @@ export class SpriteScene extends Scene {
                 snap.frames[name] = frames;
                 snap.animations[name] = { row, frames: frames.length };
                 row++;
+            }
+
+            for (let li = 1; li < (this._pixelLayers?.length || 0); li++) {
+                const outByAnim = {};
+                for (const name of animNames) {
+                    const frameCount = (snap.frames && Array.isArray(snap.frames[name])) ? snap.frames[name].length : 0;
+                    const arr = [];
+                    for (let fi = 0; fi < frameCount; fi++) {
+                        const frameCanvas = this._ensurePixelLayerFrameCanvas(li, name, fi, false);
+                        let dataUrl = null;
+                        try { dataUrl = frameCanvas && frameCanvas.toDataURL ? frameCanvas.toDataURL('image/png') : null; } catch (e) { dataUrl = null; }
+                        arr.push(dataUrl);
+                    }
+                    outByAnim[name] = arr;
+                }
+                snap.pixelLayerFrames[String(li)] = outByAnim;
             }
             return snap;
         } catch (e) {
@@ -9536,6 +10008,36 @@ export class SpriteScene extends Scene {
                 sheet.animations.set(name, { row, frameCount: arr.length });
                 row++;
             }
+            this._pixelLayers = (Array.isArray(snapshot.pixelLayers) && snapshot.pixelLayers.length > 0)
+                ? snapshot.pixelLayers.map((src, i) => {
+                    const l = (src && typeof src === 'object') ? src : { name: String(src || '') };
+                    return {
+                        name: String(l.name || ('Pixel Layer ' + (i + 1))).trim() || ('Pixel Layer ' + (i + 1)),
+                        visibility: this._normalizePixelLayerVisibility(l.visibility, 0)
+                    };
+                })
+                : [{ name: 'Pixel Layer 1', visibility: 0 }];
+            this._activePixelLayerIndex = Math.max(0, Math.min(Number(snapshot.activePixelLayerIndex) | 0, this._pixelLayers.length - 1));
+            this._pixelLayerStores = [];
+            this._ensurePixelLayerStore();
+
+            const plFrames = (snapshot && snapshot.pixelLayerFrames && typeof snapshot.pixelLayerFrames === 'object') ? snapshot.pixelLayerFrames : {};
+            for (let li = 1; li < this._pixelLayers.length; li++) {
+                const byAnim = plFrames[String(li)] || {};
+                for (const name of animNames) {
+                    const urls = Array.isArray(byAnim[name]) ? byAnim[name] : [];
+                    for (let fi = 0; fi < urls.length; fi++) {
+                        const dataUrl = urls[fi];
+                        if (!dataUrl) continue;
+                        const c = this._ensurePixelLayerFrameCanvas(li, name, fi, true);
+                        if (!c) continue;
+                        const ctx = c.getContext('2d');
+                        try { ctx.clearRect(0, 0, c.width, c.height); } catch (e) {}
+                        try { await this._drawDataUrlToCanvas(ctx, dataUrl, c.width, c.height); } catch (e) {}
+                    }
+                }
+            }
+            this._installPixelLayerHooks();
             try { sheet._rebuildSheetCanvas(); } catch (e) {}
             if (this.stateController) this.stateController.setActiveSelection(animNames[0] || this.selectedAnimation || 'idle', 0);
             else {
@@ -9562,10 +10064,18 @@ export class SpriteScene extends Scene {
                     if (!t) continue;
                     const c = Number(t.col);
                     const r = Number(t.row);
-                    if (Number.isFinite(c) && Number.isFinite(r)) this._activateTile(c, r);
+                    if (Number.isFinite(c) && Number.isFinite(r)) this._activateTile(c, r, false);
                 }
             } else {
-                this._seedTileActives(this.tileCols, this.tileRows);
+                const cols = Math.max(1, Number(this.tileCols) | 0);
+                const rows = Math.max(1, Number(this.tileRows) | 0);
+                const midC = Math.floor(cols / 2);
+                const midR = Math.floor(rows / 2);
+                for (let row = 0; row < rows; row++) {
+                    for (let col = 0; col < cols; col++) {
+                        this._activateTile(col - midC, row - midR, false);
+                    }
+                }
             }
             if (Array.isArray(snapshot.waypoints)) {
                 const waypointKeys = [];
@@ -9580,7 +10090,10 @@ export class SpriteScene extends Scene {
             } else {
                 this._setWaypointKeys([], false, true);
             }
-            if (Array.isArray(snapshot.bindings)) {
+            const snapshotTileLayers = this._normalizeIncomingTileLayers(snapshot.tileLayers);
+            const hasLayeredSnapshot = Array.isArray(snapshotTileLayers) && snapshotTileLayers.length > 0;
+
+            if (!hasLayeredSnapshot && Array.isArray(snapshot.bindings)) {
                 this._areaBindings = [];
                 for (let i = 0; i < snapshot.bindings.length; i++) {
                     const b = snapshot.bindings[i];
@@ -9588,13 +10101,13 @@ export class SpriteScene extends Scene {
                     let idx = i;
                     if (Number.isFinite(b.col) && Number.isFinite(b.row)) {
                         idx = this._getAreaIndexForCoord(Number(b.col), Number(b.row));
-                        this._activateTile(Number(b.col), Number(b.row));
+                        this._activateTile(Number(b.col), Number(b.row), false);
                     }
                     const mf = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
                     this._setAreaBindingAtIndex(idx, { anim: b.anim, index: Number(b.index), multiFrames: (mf && mf.length > 0) ? mf.slice() : null }, false);
                 }
             }
-            if (Array.isArray(snapshot.transforms)) {
+            if (!hasLayeredSnapshot && Array.isArray(snapshot.transforms)) {
                 this._areaTransforms = [];
                 for (let i = 0; i < snapshot.transforms.length; i++) {
                     const t = snapshot.transforms[i];
@@ -9602,11 +10115,60 @@ export class SpriteScene extends Scene {
                     let idx = i;
                     if (Number.isFinite(t.col) && Number.isFinite(t.row)) {
                         idx = this._getAreaIndexForCoord(Number(t.col), Number(t.row));
-                        this._activateTile(Number(t.col), Number(t.row));
+                        this._activateTile(Number(t.col), Number(t.row), false);
                     }
                     this._setAreaTransformAtIndex(idx, { rot: Number(t.rot || 0), flipH: !!t.flipH }, false);
                 }
             }
+
+            if (hasLayeredSnapshot) {
+                this._tileLayers = [];
+                for (let li = 0; li < snapshotTileLayers.length; li++) {
+                    const srcRaw = snapshotTileLayers[li];
+                    const srcLayer = (srcRaw && typeof srcRaw === 'object') ? srcRaw : { name: String(srcRaw || '') };
+                    const outLayer = {
+                        name: String(srcLayer.name || ('Tile Layer ' + (li + 1))),
+                        visibility: this._normalizeTileLayerVisibility(srcLayer.visibility, 0),
+                        bindings: [],
+                        transforms: []
+                    };
+                    const layerBindings = Array.isArray(srcLayer.bindings) ? srcLayer.bindings : [];
+                    for (const b of layerBindings) {
+                        if (!b || typeof b !== 'object') continue;
+                        let idx = null;
+                        if (Number.isFinite(b.col) && Number.isFinite(b.row)) {
+                            idx = this._getAreaIndexForCoord(Number(b.col), Number(b.row));
+                            this._activateTile(Number(b.col), Number(b.row), false);
+                        }
+                        if (!Number.isFinite(idx)) continue;
+                        const mf = Array.isArray(b.multiFrames)
+                            ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
+                            : null;
+                        outLayer.bindings[idx | 0] = {
+                            anim: b.anim,
+                            index: Number(b.index),
+                            multiFrames: (mf && mf.length > 0) ? mf.slice() : null
+                        };
+                    }
+                    const layerTransforms = Array.isArray(srcLayer.transforms) ? srcLayer.transforms : [];
+                    for (const t of layerTransforms) {
+                        if (!t || typeof t !== 'object') continue;
+                        let idx = null;
+                        if (Number.isFinite(t.col) && Number.isFinite(t.row)) {
+                            idx = this._getAreaIndexForCoord(Number(t.col), Number(t.row));
+                            this._activateTile(Number(t.col), Number(t.row), false);
+                        }
+                        if (!Number.isFinite(idx)) continue;
+                        outLayer.transforms[idx | 0] = { rot: Number(t.rot || 0), flipH: !!t.flipH };
+                    }
+                    this._tileLayers.push(outLayer);
+                }
+                if (this._tileLayers.length <= 0) this._tileLayers = [{ name: 'Tile Layer 1', visibility: 0, bindings: [], transforms: [] }];
+                this._activeTileLayerIndex = this._resolveTileLayerIndex(snapshot.activeTileLayerIndex, false);
+                this._syncActiveTileLayerReferences();
+            }
+
+            this._adoptCurrentTileArraysIntoActiveLayer();
             if (snapshot.spriteLayer && typeof snapshot.spriteLayer === 'object') {
                 const incoming = snapshot.spriteLayer;
                 const layer = this._normalizeSpriteLayerState();
@@ -9655,6 +10217,7 @@ export class SpriteScene extends Scene {
     // --- Undo / Redo helpers ---
     _captureTileUndoState() {
         try {
+            this._ensureLayerState();
             const activeTiles = [];
             if (this._tileActive && this._tileActive.size > 0) {
                 const keys = Array.from(this._tileActive).sort();
@@ -9716,10 +10279,45 @@ export class SpriteScene extends Scene {
 
             const waypoints = this._getWaypointCoords(false).map((wp) => ({ col: wp.col | 0, row: wp.row | 0 }));
 
+            const tileLayers = Array.isArray(this._tileLayers)
+                ? this._tileLayers.map((layer, li) => {
+                    const srcBindings = (layer && Array.isArray(layer.bindings)) ? layer.bindings : [];
+                    const srcTransforms = (layer && Array.isArray(layer.transforms)) ? layer.transforms : [];
+                    const outBindings = [];
+                    const outTransforms = [];
+
+                    for (let i = 0; i < srcBindings.length; i++) {
+                        const b = srcBindings[i];
+                        if (!b || typeof b !== 'object') continue;
+                        outBindings.push({
+                            i,
+                            anim: String(b.anim || ''),
+                            index: Number.isFinite(Number(b.index)) ? (Number(b.index) | 0) : 0,
+                            multiFrames: Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v) | 0) : null
+                        });
+                    }
+
+                    for (let i = 0; i < srcTransforms.length; i++) {
+                        const t = srcTransforms[i];
+                        if (!t || typeof t !== 'object') continue;
+                        outTransforms.push({ i, rot: Number(t.rot || 0) | 0, flipH: !!t.flipH });
+                    }
+
+                    return {
+                        name: String((layer && layer.name) || ('Tile Layer ' + (li + 1))),
+                        visibility: this._normalizeTileLayerVisibility(layer && layer.visibility, 0),
+                        bindings: outBindings,
+                        transforms: outTransforms
+                    };
+                })
+                : [];
+
             return {
                 tilemode: !!this.tilemode,
                 tileCols: Number(this.tileCols) | 0,
                 tileRows: Number(this.tileRows) | 0,
+                activeTileLayerIndex: Math.max(0, Number(this._activeTileLayerIndex) | 0),
+                tileLayers,
                 activeTiles,
                 bindings,
                 transforms,
@@ -9898,6 +10496,110 @@ export class SpriteScene extends Scene {
             if (this._suppressOutgoing || !this._canSendCollab || !this._canSendCollab()) return false;
             if (!fromState || !toState) return false;
 
+            if (Array.isArray(toState.tileLayers) && toState.tileLayers.length > 0) {
+                const fromTiles = new Set((Array.isArray(fromState.activeTiles) ? fromState.activeTiles : [])
+                    .map((t) => this._tileKey(Number(t && t.col) | 0, Number(t && t.row) | 0)));
+                const toTiles = new Set((Array.isArray(toState.activeTiles) ? toState.activeTiles : [])
+                    .map((t) => this._tileKey(Number(t && t.col) | 0, Number(t && t.row) | 0)));
+
+                for (const key of fromTiles) {
+                    if (toTiles.has(key)) continue;
+                    const c = this._parseTileKey(key);
+                    if (!c) continue;
+                    this._queueTileOp('deactivate', { col: c.col | 0, row: c.row | 0 });
+                }
+
+                for (const key of toTiles) {
+                    const c = this._parseTileKey(key);
+                    if (!c) continue;
+                    this._queueTileOp('activate', { col: c.col | 0, row: c.row | 0 });
+                }
+
+                const fromLayers = Array.isArray(fromState.tileLayers) ? fromState.tileLayers : [];
+                const toLayers = Array.isArray(toState.tileLayers) ? toState.tileLayers : [];
+                const maxLayers = Math.max(fromLayers.length, toLayers.length);
+
+                const mapByIndex = (arr = []) => {
+                    const out = new Map();
+                    for (const item of arr) {
+                        if (!item || !Number.isFinite(Number(item.i))) continue;
+                        out.set(Number(item.i) | 0, item);
+                    }
+                    return out;
+                };
+
+                for (let li = 0; li < maxLayers; li++) {
+                    const fromLayer = fromLayers[li] || null;
+                    const toLayer = toLayers[li] || null;
+                    const fromBindingMap = mapByIndex(fromLayer && Array.isArray(fromLayer.bindings) ? fromLayer.bindings : []);
+                    const toBindingMap = mapByIndex(toLayer && Array.isArray(toLayer.bindings) ? toLayer.bindings : []);
+                    const fromTransformMap = mapByIndex(fromLayer && Array.isArray(fromLayer.transforms) ? fromLayer.transforms : []);
+                    const toTransformMap = mapByIndex(toLayer && Array.isArray(toLayer.transforms) ? toLayer.transforms : []);
+
+                    const indexSet = new Set();
+                    for (const i of fromBindingMap.keys()) indexSet.add(i);
+                    for (const i of toBindingMap.keys()) indexSet.add(i);
+                    for (const i of fromTransformMap.keys()) indexSet.add(i);
+                    for (const i of toTransformMap.keys()) indexSet.add(i);
+
+                    for (const idx of indexSet) {
+                        const coord = (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[idx | 0]) ? this._tileIndexToCoord[idx | 0] : null;
+                        if (!coord) continue;
+                        const col = Number(coord.col) | 0;
+                        const row = Number(coord.row) | 0;
+
+                        const b = toBindingMap.get(idx | 0) || null;
+                        if (b) {
+                            this._queueTileOp('bind', {
+                                col,
+                                row,
+                                layer: li,
+                                anim: String(b.anim || this.selectedAnimation || 'idle'),
+                                index: Number.isFinite(Number(b.index)) ? (Number(b.index) | 0) : 0,
+                                multiFrames: Array.isArray(b.multiFrames)
+                                    ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v) | 0)
+                                    : null
+                            });
+                        } else {
+                            this._queueTileOp('clearBinding', { col, row, layer: li });
+                        }
+
+                        const t = toTransformMap.get(idx | 0) || null;
+                        if (t) {
+                            this._queueTileOp('setTransform', {
+                                col,
+                                row,
+                                layer: li,
+                                rot: Number(t.rot || 0) | 0,
+                                flipH: !!t.flipH
+                            });
+                        } else {
+                            this._queueTileOp('clearTransform', { col, row, layer: li });
+                        }
+                    }
+                }
+
+                const fromWaypoints = new Set((Array.isArray(fromState.waypoints) ? fromState.waypoints : [])
+                    .map((w) => this._tileKey(Number(w && w.col) | 0, Number(w && w.row) | 0)));
+                const toWaypoints = new Set((Array.isArray(toState.waypoints) ? toState.waypoints : [])
+                    .map((w) => this._tileKey(Number(w && w.col) | 0, Number(w && w.row) | 0)));
+
+                for (const key of fromWaypoints) {
+                    if (toWaypoints.has(key)) continue;
+                    const c = this._parseTileKey(key);
+                    if (!c) continue;
+                    this._queueTileOp('clearWaypoint', { col: c.col | 0, row: c.row | 0 });
+                }
+
+                for (const key of toWaypoints) {
+                    const c = this._parseTileKey(key);
+                    if (!c) continue;
+                    this._queueTileOp('setWaypoint', { col: c.col | 0, row: c.row | 0 });
+                }
+
+                return true;
+            }
+
             const fromTiles = new Set((Array.isArray(fromState.activeTiles) ? fromState.activeTiles : [])
                 .map((t) => this._tileKey(Number(t && t.col) | 0, Number(t && t.row) | 0)));
             const toTiles = new Set((Array.isArray(toState.activeTiles) ? toState.activeTiles : [])
@@ -9987,6 +10689,7 @@ export class SpriteScene extends Scene {
         try {
             if (!state || typeof state !== 'object') return false;
 
+            this._ensureLayerState();
             this.tilemode = !!state.tilemode;
             this.tileCols = Math.max(1, Number(state.tileCols) | 0 || this.tileCols || 3);
             this.tileRows = Math.max(1, Number(state.tileRows) | 0 || this.tileRows || this.tileCols || 3);
@@ -10004,24 +10707,57 @@ export class SpriteScene extends Scene {
                 this._activateTile(c | 0, r | 0, false);
             }
 
-            this._areaBindings = [];
-            const bindings = Array.isArray(state.bindings) ? state.bindings : [];
-            for (const b of bindings) {
-                if (!b || !Number.isFinite(Number(b.i))) continue;
-                const idx = Number(b.i) | 0;
-                this._areaBindings[idx] = {
-                    anim: String(b.anim || ''),
-                    index: Number.isFinite(Number(b.index)) ? (Number(b.index) | 0) : 0,
-                    multiFrames: Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v) | 0) : null
-                };
-            }
+            const hasLayered = Array.isArray(state.tileLayers) && state.tileLayers.length > 0;
+            if (hasLayered) {
+                this._tileLayers = state.tileLayers.map((src, li) => {
+                    const layer = {
+                        name: String((src && src.name) || ('Tile Layer ' + (li + 1))),
+                        visibility: this._normalizeTileLayerVisibility(src && src.visibility, 0),
+                        bindings: [],
+                        transforms: []
+                    };
+                    const bindings = (src && Array.isArray(src.bindings)) ? src.bindings : [];
+                    for (const b of bindings) {
+                        if (!b || !Number.isFinite(Number(b.i))) continue;
+                        const idx = Number(b.i) | 0;
+                        layer.bindings[idx] = {
+                            anim: String(b.anim || ''),
+                            index: Number.isFinite(Number(b.index)) ? (Number(b.index) | 0) : 0,
+                            multiFrames: Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v) | 0) : null
+                        };
+                    }
+                    const transforms = (src && Array.isArray(src.transforms)) ? src.transforms : [];
+                    for (const t of transforms) {
+                        if (!t || !Number.isFinite(Number(t.i))) continue;
+                        const idx = Number(t.i) | 0;
+                        layer.transforms[idx] = { rot: Number(t.rot || 0) | 0, flipH: !!t.flipH };
+                    }
+                    return layer;
+                });
+                const maxLayer = Math.max(0, this._tileLayers.length - 1);
+                this._activeTileLayerIndex = Math.max(0, Math.min(Number(state.activeTileLayerIndex) | 0, maxLayer));
+                this._syncActiveTileLayerReferences();
+            } else {
+                this._areaBindings = [];
+                const bindings = Array.isArray(state.bindings) ? state.bindings : [];
+                for (const b of bindings) {
+                    if (!b || !Number.isFinite(Number(b.i))) continue;
+                    const idx = Number(b.i) | 0;
+                    this._areaBindings[idx] = {
+                        anim: String(b.anim || ''),
+                        index: Number.isFinite(Number(b.index)) ? (Number(b.index) | 0) : 0,
+                        multiFrames: Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v) | 0) : null
+                    };
+                }
 
-            this._areaTransforms = [];
-            const transforms = Array.isArray(state.transforms) ? state.transforms : [];
-            for (const t of transforms) {
-                if (!t || !Number.isFinite(Number(t.i))) continue;
-                const idx = Number(t.i) | 0;
-                this._areaTransforms[idx] = { rot: Number(t.rot || 0) | 0, flipH: !!t.flipH };
+                this._areaTransforms = [];
+                const transforms = Array.isArray(state.transforms) ? state.transforms : [];
+                for (const t of transforms) {
+                    if (!t || !Number.isFinite(Number(t.i))) continue;
+                    const idx = Number(t.i) | 0;
+                    this._areaTransforms[idx] = { rot: Number(t.rot || 0) | 0, flipH: !!t.flipH };
+                }
+                this._adoptCurrentTileArraysIntoActiveLayer();
             }
 
             const waypointKeys = [];
@@ -10073,7 +10809,7 @@ export class SpriteScene extends Scene {
         this._redoStack = [];
     }
 
-    _recordUndoPixels(anim, frameIdx, changes) {
+    _recordUndoPixels(anim, frameIdx, changes, pixelLayer = null) {
         if (this._ignoreUndoCapture) return;
         const sheet = this.currentSprite;
         if (!sheet || !sheet.getFrame) return;
@@ -10123,8 +10859,9 @@ export class SpriteScene extends Scene {
         if (!samples.length) return;
 
         const now = Date.now();
+        const layerIndex = Number.isFinite(Number(pixelLayer)) ? (Number(pixelLayer) | 0) : (this._activePixelLayerIndex | 0);
         const last = this._undoStack[this._undoStack.length - 1];
-        const canMerge = last && last.type === 'pixels' && last.anim === anim && last.frame === Number(frameIdx) && (now - last.time) <= this._undoMergeMs;
+        const canMerge = last && last.type === 'pixels' && last.anim === anim && last.frame === Number(frameIdx) && (last.pixelLayer | 0) === (layerIndex | 0) && (now - last.time) <= this._undoMergeMs;
         if (canMerge) {
             // Merge into last entry while preserving original prev colors
             const map = new Map();
@@ -10146,20 +10883,25 @@ export class SpriteScene extends Scene {
             last.time = now;
             this._redoStack = []; // new edits invalidate redo even when merged
         } else {
-            this._pushUndo({ type: 'pixels', anim, frame: Number(frameIdx) || 0, pixels: samples, time: now });
+            this._pushUndo({ type: 'pixels', anim, frame: Number(frameIdx) || 0, pixelLayer: layerIndex | 0, pixels: samples, time: now });
         }
     }
 
-    _applyPixelBatch(anim, frameIdx, pixels, useNext) {
+    _applyPixelBatch(anim, frameIdx, pixels, useNext, pixelLayer = null) {
         if (!pixels || pixels.length === 0) return;
         const sheet = this.currentSprite;
         if (!sheet) return;
+        const prevLayer = this._activePixelLayerIndex | 0;
+        const targetLayer = Number.isFinite(Number(pixelLayer)) ? (Number(pixelLayer) | 0) : prevLayer;
+        this._activePixelLayerIndex = Math.max(0, Math.min(targetLayer, Math.max(0, (this._pixelLayers?.length || 1) - 1)));
         const changes = pixels.map(p => ({ x: p.x, y: p.y, color: useNext ? p.next : p.prev, blendType: 'replace' }));
         try { sheet.modifyFrame(anim, frameIdx, changes); } catch (e) {
             // fallback per-pixel
             for (const p of changes) {
                 try { sheet.setPixel(anim, frameIdx, p.x, p.y, p.color, 'replace'); } catch (er) { /* ignore */ }
             }
+        } finally {
+            this._activePixelLayerIndex = prevLayer;
         }
         try { if (sheet._rebuildSheetCanvas) sheet._rebuildSheetCanvas(); } catch (e) { /* ignore */ }
     }
@@ -10180,7 +10922,7 @@ export class SpriteScene extends Scene {
         this._ignoreUndoCapture = true;
         try {
             if (entry.type === 'pixels') {
-                this._applyPixelBatch(entry.anim, entry.frame, entry.pixels, false);
+                this._applyPixelBatch(entry.anim, entry.frame, entry.pixels, false, entry.pixelLayer);
             } else if (entry.type === 'delete-frame') {
                 this._restoreDeletedFrame(entry);
             } else if (entry.type === 'tile-state') {
@@ -10209,7 +10951,7 @@ export class SpriteScene extends Scene {
         this._ignoreUndoCapture = true;
         try {
             if (entry.type === 'pixels') {
-                this._applyPixelBatch(entry.anim, entry.frame, entry.pixels, true);
+                this._applyPixelBatch(entry.anim, entry.frame, entry.pixels, true, entry.pixelLayer);
             } else if (entry.type === 'delete-frame') {
                 // redo delete: re-apply removal
                 try { this.currentSprite && this.currentSprite.popFrame(entry.anim, entry.index); } catch (e) { /* ignore */ }
@@ -10991,6 +11733,101 @@ export class SpriteScene extends Scene {
         } catch (e) { /* ignore */ }
     }
 
+    _hasAnyTileLayerBindingAtIndex(areaIndex) {
+        try {
+            this._ensureLayerState();
+            if (!Number.isFinite(areaIndex) || areaIndex < 0) return false;
+            const idx = areaIndex | 0;
+            for (const layer of (this._tileLayers || [])) {
+                if (!layer || !Array.isArray(layer.bindings)) continue;
+                const b = layer.bindings[idx];
+                if (b && b.anim !== undefined && b.index !== undefined) return true;
+            }
+            return false;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _clearTileOnActiveLayer(col, row, syncOp = true) {
+        this._queueDeferredTileUndoCapture(syncOp);
+        try {
+            this._adoptCurrentTileArraysIntoActiveLayer();
+            const idx = this._getAreaIndexForCoord(col, row);
+            this._setAreaBindingAtIndex(idx, null, syncOp);
+            this._setAreaTransformAtIndex(idx, null, syncOp);
+
+            // Keep tile active if any other tile layer still has content at this coord.
+            if (!this._hasAnyTileLayerBindingAtIndex(idx)) {
+                this._deactivateTile(col, row, syncOp);
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _resolveTileLayerIndex(rawLayer = null, fallbackToActive = true) {
+        try {
+            this._ensureLayerState();
+            const max = Math.max(0, (Array.isArray(this._tileLayers) ? this._tileLayers.length : 1) - 1);
+            if (!Number.isFinite(Number(rawLayer))) return fallbackToActive ? (this._activeTileLayerIndex | 0) : 0;
+            return Math.max(0, Math.min((Number(rawLayer) | 0), max));
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    _ensureTileLayerIndex(rawLayer = 0) {
+        try {
+            this._ensureLayerState();
+            let idx = Number(rawLayer);
+            if (!Number.isFinite(idx)) idx = 0;
+            idx = Math.max(0, idx | 0);
+            while (this._tileLayers.length <= idx) {
+                const n = this._tileLayers.length + 1;
+                this._tileLayers.push({ name: 'Tile Layer ' + n, visibility: 0, bindings: [], transforms: [] });
+            }
+            return idx;
+        } catch (e) {
+            return this._resolveTileLayerIndex(rawLayer, false);
+        }
+    }
+
+    _setAreaBindingAtIndexForLayer(areaIndex, layerIndex, bindingEntry) {
+        try {
+            this._ensureLayerState();
+            if (!Number.isFinite(areaIndex) || areaIndex < 0) return false;
+            const idx = areaIndex | 0;
+            const li = this._resolveTileLayerIndex(layerIndex, false);
+            const layer = this._tileLayers[li];
+            if (!layer) return false;
+            if (!Array.isArray(layer.bindings)) layer.bindings = [];
+            layer.bindings[idx] = bindingEntry;
+            if ((this._activeTileLayerIndex | 0) === li) this._areaBindings = layer.bindings;
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _setAreaTransformAtIndexForLayer(areaIndex, layerIndex, transformEntry) {
+        try {
+            this._ensureLayerState();
+            if (!Number.isFinite(areaIndex) || areaIndex < 0) return false;
+            const idx = areaIndex | 0;
+            const li = this._resolveTileLayerIndex(layerIndex, false);
+            const layer = this._tileLayers[li];
+            if (!layer) return false;
+            if (!Array.isArray(layer.transforms)) layer.transforms = [];
+            layer.transforms[idx] = transformEntry;
+            if ((this._activeTileLayerIndex | 0) === li) this._areaTransforms = layer.transforms;
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     _queueTileOp(action, payload = {}) {
         try {
             if (this._suppressOutgoing) return false;
@@ -10999,15 +11836,21 @@ export class SpriteScene extends Scene {
             if (!Number.isFinite(col) || !Number.isFinite(row)) return false;
             if (!this._tileOpPending) this._tileOpPending = new Map();
 
-            const key = this._tileKey(col, row);
+            const isLayerScoped = (action === 'bind' || action === 'clearBinding' || action === 'setTransform' || action === 'clearTransform');
+            const layerForTileData = Number.isFinite(Number(payload.layer))
+                ? this._resolveTileLayerIndex(Number(payload.layer), false)
+                : this._resolveTileLayerIndex(null, true);
+
+            const key = isLayerScoped
+                ? ('l' + String(layerForTileData) + ':' + this._tileKey(col, row))
+                : this._tileKey(col, row);
             const pending = this._tileOpPending.get(key) || {};
+            if (isLayerScoped) pending.layer = layerForTileData;
 
             if (action === 'activate') {
                 pending.active = true;
             } else if (action === 'deactivate') {
                 pending.active = false;
-                pending.binding = null;
-                pending.transform = null;
             } else if (action === 'bind') {
                 pending.active = true;
                 pending.binding = {
@@ -11464,7 +12307,7 @@ export class SpriteScene extends Scene {
                 const k = `${anim || ''}::${Number(frameIdx) || 0}`;
                 if (frameCache.has(k)) return frameCache.get(k);
                 let fr = null;
-                try { fr = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null; } catch (e) { fr = null; }
+                try { fr = this._getCompositedPixelFrame(anim, frameIdx, false, true); } catch (e) { fr = null; }
                 frameCache.set(k, fr || null);
                 return fr;
             };
@@ -11475,7 +12318,14 @@ export class SpriteScene extends Scene {
             const by = basePos.y;
             const scaleX = (this.Draw && this.Draw.Scale && Number.isFinite(this.Draw.Scale.x)) ? this.Draw.Scale.x : 1;
             const scaleY = (this.Draw && this.Draw.Scale && Number.isFinite(this.Draw.Scale.y)) ? this.Draw.Scale.y : 1;
-            const bindings = Array.isArray(this._areaBindings) ? this._areaBindings : [];
+            const entryCache = new Map();
+            const entriesForIdx = (idx) => {
+                const key = idx | 0;
+                if (entryCache.has(key)) return entryCache.get(key);
+                const list = this._getTileLayerDrawEntries(key) || [];
+                entryCache.set(key, list);
+                return list;
+            };
 
             const prevSmooth = ctx.imageSmoothingEnabled;
             try { ctx.imageSmoothingEnabled = false; } catch (e) {}
@@ -11499,12 +12349,30 @@ export class SpriteScene extends Scene {
                 }
 
                 const idx = this._getAreaIndexForCoord(col, row);
-                const binding = bindings[idx] || null;
-                const effAnim = (binding && binding.anim !== undefined) ? binding.anim : this.selectedAnimation;
-                const effFrame = (binding && binding.index !== undefined) ? binding.index : this.selectedFrame;
-                const fr = frameFor(effAnim, effFrame);
-                if (!fr) return;
-                ctx.drawImage(fr, dx, dy, dw, dh);
+                const entries = entriesForIdx(idx);
+                if (!entries || entries.length === 0) return;
+                for (const entry of entries) {
+                    if (!entry || !entry.binding) continue;
+                    const b = entry.binding;
+                    const anim = b.anim;
+                    const multi = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
+                    const frameList = (multi && multi.length > 0) ? multi : [Number(b.index) || 0];
+                    ctx.save();
+                    ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
+                    for (const fi of frameList) {
+                        const fr = frameFor(anim, fi);
+                        if (!fr) continue;
+                        ctx.drawImage(fr, dx, dy, dw, dh);
+                    }
+                    ctx.restore();
+                    if ((Number(entry.darken) || 0) > 0) {
+                        ctx.save();
+                        ctx.globalAlpha = Math.max(0, Math.min(1, Number(entry.darken) || 0));
+                        ctx.fillStyle = '#000000';
+                        ctx.fillRect(dx, dy, dw, dh);
+                        ctx.restore();
+                    }
+                }
             };
 
             if (iterateVisibleWindow) {
@@ -11749,9 +12617,675 @@ export class SpriteScene extends Scene {
         }
     }
 
+    _normalizePixelLayerVisibility(value, fallback = 0) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return Math.max(0, Math.min(2, Number(fallback) | 0));
+        return Math.max(0, Math.min(2, n | 0)); // 0=half,1=full,2=hidden
+    }
+
+    _ensurePixelLayerStore() {
+        if (!Array.isArray(this._pixelLayerStores)) this._pixelLayerStores = [];
+        const targetLen = Math.max(1, Array.isArray(this._pixelLayers) ? this._pixelLayers.length : 1);
+        while (this._pixelLayerStores.length < targetLen) this._pixelLayerStores.push({ byAnim: new Map() });
+        if (this._pixelLayerStores.length > targetLen) this._pixelLayerStores.length = targetLen;
+        for (let i = 0; i < this._pixelLayerStores.length; i++) {
+            const e = this._pixelLayerStores[i];
+            if (!e || !(e.byAnim instanceof Map)) this._pixelLayerStores[i] = { byAnim: new Map() };
+        }
+    }
+
+    _rawSheetGetFrame(anim, frameIdx) {
+        try {
+            const sheet = this.currentSprite;
+            if (!sheet) return null;
+            if (sheet.__pixelLayerRawGetFrame) return sheet.__pixelLayerRawGetFrame(anim, frameIdx);
+            if (typeof sheet.getFrame === 'function') return sheet.getFrame(anim, frameIdx);
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _ensurePixelLayerFrameCanvas(layerIndex, anim, frameIdx, create = true) {
+        try {
+            const li = Math.max(0, Number(layerIndex) | 0);
+            const a = String(anim || this.selectedAnimation || 'idle');
+            const fi = Math.max(0, Number(frameIdx) | 0);
+            const sheet = this.currentSprite;
+            if (!sheet) return null;
+            if (li === 0) {
+                return this._rawSheetGetFrame(a, fi);
+            }
+
+            this._ensurePixelLayerStore();
+            const store = this._pixelLayerStores[li];
+            if (!store || !(store.byAnim instanceof Map)) return null;
+            let arr = store.byAnim.get(a);
+            if (!Array.isArray(arr)) {
+                if (!create) return null;
+                arr = [];
+                store.byAnim.set(a, arr);
+            }
+            if (!create && !arr[fi]) return null;
+            while (arr.length <= fi) arr.push(null);
+            if (!arr[fi] && create) {
+                const ref = this._rawSheetGetFrame(a, fi);
+                const c = document.createElement('canvas');
+                c.width = (ref && ref.width) ? ref.width : (sheet.slicePx || 16);
+                c.height = (ref && ref.height) ? ref.height : (sheet.slicePx || 16);
+                const cx = c.getContext('2d');
+                try { cx.clearRect(0, 0, c.width, c.height); } catch (e) {}
+                arr[fi] = c;
+            }
+            return arr[fi] || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _applyPixelsToPixelLayer(anim, frameIdx, pixels, layerIndex = null) {
+        try {
+            const li = Number.isFinite(Number(layerIndex))
+                ? Math.max(0, Math.min(Number(layerIndex) | 0, Math.max(0, (this._pixelLayers?.length || 1) - 1)))
+                : (this._activePixelLayerIndex | 0);
+            if (!Array.isArray(pixels) || pixels.length <= 0) return false;
+            const frame = this._ensurePixelLayerFrameCanvas(li, anim, frameIdx, true);
+            if (!frame || !frame.getContext) return false;
+            const ctx = frame.getContext('2d');
+            const parseColor = (raw) => {
+                try {
+                    const colorObj = Color.convertColor(raw);
+                    const rgb = (colorObj && typeof colorObj.toRgb === 'function') ? colorObj.toRgb() : colorObj;
+
+                    const rRaw = (rgb && rgb.a !== undefined) ? rgb.a : rgb?.r;
+                    const gRaw = (rgb && rgb.b !== undefined) ? rgb.b : rgb?.g;
+                    const bRaw = (rgb && rgb.c !== undefined) ? rgb.c : rgb?.b;
+                    const aRaw = (rgb && rgb.d !== undefined) ? rgb.d : rgb?.a;
+
+                    const rr = Math.max(0, Math.min(255, Number(rRaw) | 0));
+                    const gg = Math.max(0, Math.min(255, Number(gRaw) | 0));
+                    const bb = Math.max(0, Math.min(255, Number(bRaw) | 0));
+                    let aa = Number(aRaw);
+                    if (!Number.isFinite(aa)) aa = 1;
+                    // Accept 0..255 alpha too.
+                    if (aa > 1) aa = aa / 255;
+                    aa = Math.max(0, Math.min(1, aa));
+                    return { r: rr, g: gg, b: bb, a: aa };
+                } catch (e) {
+                    return { r: 0, g: 0, b: 0, a: 0 };
+                }
+            };
+            for (const p of pixels) {
+                if (!p) continue;
+                const x = Math.floor(Number(p.x));
+                const y = Math.floor(Number(p.y));
+                if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                if (x < 0 || y < 0 || x >= frame.width || y >= frame.height) continue;
+                const color = (p.color !== undefined) ? p.color : ((p.col !== undefined) ? p.col : ((p.c !== undefined) ? p.c : '#00000000'));
+                const rgba = parseColor(color);
+
+                if (rgba.a <= 0) {
+                    ctx.clearRect(x, y, 1, 1);
+                    continue;
+                }
+
+                ctx.fillStyle = `rgba(${rgba.r},${rgba.g},${rgba.b},${rgba.a})`;
+                ctx.fillRect(x, y, 1, 1);
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _getCompositedPixelFrame(anim, frameIdx, includeHidden = false, forceDimFullVisibility = false) {
+        try {
+            this._ensureLayerState();
+            this._ensurePixelLayerStore();
+            const a = String(anim || this.selectedAnimation || 'idle');
+            const fi = Math.max(0, Number(frameIdx) | 0);
+            const layers = Array.isArray(this._pixelLayers) ? this._pixelLayers : [{ name: 'Pixel Layer 1', visibility: 0 }];
+            const active = Math.max(0, Math.min((this._activePixelLayerIndex | 0), layers.length - 1));
+
+            let width = 0;
+            let height = 0;
+            const refs = [];
+            for (let i = 0; i < layers.length; i++) {
+                const layer = layers[i] || {};
+                const vis = this._normalizePixelLayerVisibility(layer.visibility, 0);
+                if (!includeHidden && vis === 2) continue;
+                const frame = this._ensurePixelLayerFrameCanvas(i, a, fi, false);
+                if (!frame) continue;
+                width = Math.max(width, Number(frame.width) || 0);
+                height = Math.max(height, Number(frame.height) || 0);
+                refs.push({ i, frame, vis });
+            }
+
+            if (refs.length === 0) {
+                const fallback = this._ensurePixelLayerFrameCanvas(active, a, fi, true);
+                return fallback || null;
+            }
+
+            const c = document.createElement('canvas');
+            c.width = Math.max(1, width);
+            c.height = Math.max(1, height);
+            const ctx = c.getContext('2d');
+            try { ctx.imageSmoothingEnabled = false; } catch (e) {}
+
+            const previewActive = !!(this._playerSimMode && this._playerSimMode.active);
+            for (const ref of refs) {
+                const rel = ref.i - active;
+                let alpha = 1;
+                if (!previewActive) {
+                    if (ref.vis === 1) alpha = 1;
+                    else if (ref.vis === 0) {
+                        alpha = forceDimFullVisibility ? 1 : (rel > 0 ? Math.max(0.06, 0.22 - (rel - 1) * 0.08) : 1);
+                    }
+                }
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+                ctx.drawImage(ref.frame, 0, 0);
+                ctx.restore();
+                if (!previewActive && !forceDimFullVisibility && ref.vis === 0 && rel < 0) {
+                    const dark = Math.min(0.9, 0.55 + (Math.abs(rel) - 1) * 0.18);
+                    ctx.save();
+                    ctx.globalAlpha = dark;
+                    ctx.fillStyle = '#000000';
+                    ctx.fillRect(0, 0, c.width, c.height);
+                    ctx.restore();
+                }
+            }
+            return c;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _syncPixelLayerAnimationStructure(action, anim, index = null, extra = null) {
+        try {
+            this._ensureLayerState();
+            this._ensurePixelLayerStore();
+            const name = String(anim || '');
+            if (!name) return;
+            const liMax = (this._pixelLayerStores && this._pixelLayerStores.length) ? this._pixelLayerStores.length : 0;
+            for (let li = 1; li < liMax; li++) {
+                const store = this._pixelLayerStores[li];
+                if (!store || !(store.byAnim instanceof Map)) continue;
+                if (action === 'rename') {
+                    const to = String(extra || '').trim();
+                    if (!to || to === name) continue;
+                    if (store.byAnim.has(name)) {
+                        const arr = store.byAnim.get(name);
+                        store.byAnim.set(to, arr);
+                        store.byAnim.delete(name);
+                    }
+                    continue;
+                }
+                if (action === 'removeAnim') {
+                    store.byAnim.delete(name);
+                    continue;
+                }
+                let arr = store.byAnim.get(name);
+                if (!Array.isArray(arr)) {
+                    if (action === 'insert' || action === 'addAnim') {
+                        arr = [];
+                        store.byAnim.set(name, arr);
+                    } else {
+                        continue;
+                    }
+                }
+                if (action === 'addAnim') {
+                    const count = Math.max(0, Number(index) | 0);
+                    while (arr.length < count) arr.push(null);
+                } else if (action === 'insert') {
+                    const at = Number.isFinite(Number(index)) ? Math.max(0, Math.min(Number(index) | 0, arr.length)) : arr.length;
+                    arr.splice(at, 0, null);
+                } else if (action === 'delete') {
+                    if (arr.length <= 0) continue;
+                    const at = Number.isFinite(Number(index)) ? Math.max(0, Math.min(Number(index) | 0, arr.length - 1)) : (arr.length - 1);
+                    arr.splice(at, 1);
+                }
+                store.byAnim.set(name, arr);
+            }
+        } catch (e) {}
+    }
+
+    _installPixelLayerHooks() {
+        try {
+            this._ensureLayerState();
+            const sheet = this.currentSprite;
+            if (!sheet) return false;
+            this._ensurePixelLayerStore();
+
+            if (sheet.__pixelLayerHookInstalled && sheet.__pixelLayerHookOwner === this) return true;
+            if (typeof sheet.getFrame !== 'function' || typeof sheet.setPixel !== 'function' || typeof sheet.modifyFrame !== 'function') return false;
+
+            const scene = this;
+            const rawGetFrame = sheet.getFrame.bind(sheet);
+            const rawSetPixel = sheet.setPixel.bind(sheet);
+            const rawModifyFrame = sheet.modifyFrame.bind(sheet);
+
+            sheet.__pixelLayerRawGetFrame = rawGetFrame;
+            sheet.__pixelLayerRawSetPixel = rawSetPixel;
+            sheet.__pixelLayerRawModifyFrame = rawModifyFrame;
+
+            sheet.getFrame = function(anim, frameIdx) {
+                const li = Math.max(0, Math.min((scene._activePixelLayerIndex | 0), Math.max(0, (scene._pixelLayers?.length || 1) - 1)));
+                if (li === 0) return rawGetFrame(anim, frameIdx);
+                return scene._ensurePixelLayerFrameCanvas(li, anim, frameIdx, true);
+            };
+
+            sheet.setPixel = function(anim, frameIdx, x, y, color, blendType = 'replace') {
+                const li = Math.max(0, Math.min((scene._activePixelLayerIndex | 0), Math.max(0, (scene._pixelLayers?.length || 1) - 1)));
+                if (li === 0) return rawSetPixel(anim, frameIdx, x, y, color, blendType);
+                return scene._applyPixelsToPixelLayer(anim, frameIdx, [{ x, y, color }], li);
+            };
+
+            sheet.modifyFrame = function(anim, frameIdx, changes) {
+                const li = Math.max(0, Math.min((scene._activePixelLayerIndex | 0), Math.max(0, (scene._pixelLayers?.length || 1) - 1)));
+                if (li === 0) return rawModifyFrame(anim, frameIdx, changes);
+                const arr = Array.isArray(changes) ? changes : [changes];
+                return scene._applyPixelsToPixelLayer(anim, frameIdx, arr, li);
+            };
+
+            sheet.__pixelLayerHookInstalled = true;
+            sheet.__pixelLayerHookOwner = this;
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _normalizeLayerType(type) {
+        return String(type || '').toLowerCase() === 'tile' ? 'tile' : 'pixel';
+    }
+
+    _normalizeTileLayerVisibility(value, fallback = 0) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return Math.max(0, Math.min(2, Number(fallback) | 0));
+        return Math.max(0, Math.min(2, n | 0)); // 0=half,1=full,2=hidden
+    }
+
+    _tileLayerHasMeaningfulContent(layer) {
+        try {
+            if (!layer || typeof layer !== 'object') return false;
+            const bindings = Array.isArray(layer.bindings) ? layer.bindings : [];
+            for (const b of bindings) {
+                if (!b || typeof b !== 'object') continue;
+                if (b.anim !== undefined && b.index !== undefined) return true;
+                if (Array.isArray(b.multiFrames) && b.multiFrames.length > 0) return true;
+            }
+            const transforms = Array.isArray(layer.transforms) ? layer.transforms : [];
+            for (const t of transforms) {
+                if (!t || typeof t !== 'object') continue;
+                if ((Number(t.rot || 0) !== 0) || !!t.flipH) return true;
+            }
+            return false;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _normalizeIncomingTileLayers(rawLayers) {
+        try {
+            const layers = Array.isArray(rawLayers) ? rawLayers.slice() : [];
+            if (layers.length <= 1) return layers;
+
+            // Remove a stray auto-created default layer if empty and other layers are present.
+            const defaultIdx = layers.findIndex((l) => {
+                const nm = (l && typeof l === 'object') ? l.name : l;
+                return String(nm || '').trim().toLowerCase() === 'tile layer 1';
+            });
+            if (defaultIdx < 0) return layers;
+
+            const defaultLayer = layers[defaultIdx];
+            if (this._tileLayerHasMeaningfulContent(defaultLayer)) return layers;
+
+            let hasOtherMeaningful = false;
+            let hasOtherNamedLayer = false;
+            for (let i = 0; i < layers.length; i++) {
+                if (i === defaultIdx) continue;
+                const l = layers[i];
+                const nm = String((l && l.name) || '').trim().toLowerCase();
+                if (nm && nm !== 'tile layer 1') hasOtherNamedLayer = true;
+                if (this._tileLayerHasMeaningfulContent(l)) {
+                    hasOtherMeaningful = true;
+                    break;
+                }
+            }
+
+            if (hasOtherMeaningful || hasOtherNamedLayer) {
+                layers.splice(defaultIdx, 1);
+            }
+            return layers;
+        } catch (e) {
+            return Array.isArray(rawLayers) ? rawLayers : [];
+        }
+    }
+
+    _ensureLayerState() {
+        try {
+            if (!Array.isArray(this._pixelLayers) || this._pixelLayers.length === 0) {
+                this._pixelLayers = [{ name: 'Pixel Layer 1', visibility: 0 }];
+            }
+            this._pixelLayers = this._pixelLayers.map((l, i) => {
+                const src = (l && typeof l === 'object') ? l : { name: String(l || '') };
+                return {
+                    name: String(src.name || ('Pixel Layer ' + (i + 1))).trim() || ('Pixel Layer ' + (i + 1)),
+                    visibility: this._normalizePixelLayerVisibility(src.visibility, 0)
+                };
+            });
+            if (!Number.isFinite(this._activePixelLayerIndex)) this._activePixelLayerIndex = 0;
+            this._activePixelLayerIndex = Math.max(0, Math.min(this._activePixelLayerIndex | 0, this._pixelLayers.length - 1));
+            this._ensurePixelLayerStore();
+
+            const seedBindings = Array.isArray(this._areaBindings) ? this._areaBindings : [];
+            const seedTransforms = Array.isArray(this._areaTransforms) ? this._areaTransforms : [];
+            if (!Array.isArray(this._tileLayers) || this._tileLayers.length === 0) {
+                this._tileLayers = [{ name: 'Tile Layer 1', visibility: 0, bindings: seedBindings, transforms: seedTransforms }];
+            }
+            for (let i = 0; i < this._tileLayers.length; i++) {
+                const l = this._tileLayers[i] || {};
+                l.name = String(l.name || ('Tile Layer ' + (i + 1))).trim() || ('Tile Layer ' + (i + 1));
+                l.visibility = this._normalizeTileLayerVisibility(l.visibility, 0);
+                if (!Array.isArray(l.bindings)) l.bindings = [];
+                if (!Array.isArray(l.transforms)) l.transforms = [];
+                this._tileLayers[i] = l;
+            }
+            // Guard against accidental shared references between layers.
+            // Shared arrays would cause edits on one selected layer to mutate another.
+            const seenBindings = new Set();
+            const seenTransforms = new Set();
+            for (let i = 0; i < this._tileLayers.length; i++) {
+                const l = this._tileLayers[i];
+                if (seenBindings.has(l.bindings)) l.bindings = Array.isArray(l.bindings) ? l.bindings.slice() : [];
+                if (seenTransforms.has(l.transforms)) l.transforms = Array.isArray(l.transforms) ? l.transforms.slice() : [];
+                seenBindings.add(l.bindings);
+                seenTransforms.add(l.transforms);
+            }
+            if (!Number.isFinite(this._activeTileLayerIndex)) this._activeTileLayerIndex = 0;
+            this._activeTileLayerIndex = Math.max(0, Math.min(this._activeTileLayerIndex | 0, this._tileLayers.length - 1));
+            this._syncActiveTileLayerReferences();
+        } catch (e) {}
+    }
+
+    _syncActiveTileLayerReferences() {
+        try {
+            if (!Array.isArray(this._tileLayers) || this._tileLayers.length === 0) return;
+            const idx = Math.max(0, Math.min((this._activeTileLayerIndex | 0), this._tileLayers.length - 1));
+            const layer = this._tileLayers[idx] || null;
+            if (!layer) return;
+            if (!Array.isArray(layer.bindings)) layer.bindings = [];
+            if (!Array.isArray(layer.transforms)) layer.transforms = [];
+            this._activeTileLayerIndex = idx;
+            this._areaBindings = layer.bindings;
+            this._areaTransforms = layer.transforms;
+            try {
+                this.modifyState(this._areaBindings, false, false, ['tilemap', 'bindings']);
+                this.modifyState(this._areaTransforms, false, false, ['tilemap', 'transforms']);
+            } catch (e) {}
+        } catch (e) {}
+    }
+
+    _adoptCurrentTileArraysIntoActiveLayer() {
+        try {
+            this._ensureLayerState();
+            const idx = Math.max(0, Math.min((this._activeTileLayerIndex | 0), this._tileLayers.length - 1));
+            const layer = this._tileLayers[idx] || null;
+            if (!layer) return null;
+            if (Array.isArray(this._areaBindings) && this._areaBindings !== layer.bindings) layer.bindings = this._areaBindings;
+            if (Array.isArray(this._areaTransforms) && this._areaTransforms !== layer.transforms) layer.transforms = this._areaTransforms;
+            this._syncActiveTileLayerReferences();
+            return this._tileLayers[this._activeTileLayerIndex] || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    getLayerNames(type = 'pixel') {
+        this._ensureLayerState();
+        const kind = this._normalizeLayerType(type);
+        const arr = (kind === 'tile') ? this._tileLayers : this._pixelLayers;
+        return arr.map((l, i) => String((l && l.name) || ((kind === 'tile' ? 'Tile Layer ' : 'Pixel Layer ') + (i + 1))));
+    }
+
+    getActiveLayerIndex(type = 'pixel') {
+        this._ensureLayerState();
+        return this._normalizeLayerType(type) === 'tile' ? (this._activeTileLayerIndex | 0) : (this._activePixelLayerIndex | 0);
+    }
+
+    getLayerVisibilityState(type = 'pixel', index = 0) {
+        this._ensureLayerState();
+        const kind = this._normalizeLayerType(type);
+        if (kind === 'pixel') {
+            const i = index | 0;
+            if (i < 0 || i >= this._pixelLayers.length) return 0;
+            return this._normalizePixelLayerVisibility(this._pixelLayers[i] && this._pixelLayers[i].visibility, 0);
+        }
+        const i = index | 0;
+        if (i < 0 || i >= this._tileLayers.length) return 0;
+        return this._normalizeTileLayerVisibility(this._tileLayers[i] && this._tileLayers[i].visibility, 0);
+    }
+
+    cycleLayerVisibility(type = 'pixel', index = 0) {
+        this._ensureLayerState();
+        const kind = this._normalizeLayerType(type);
+        if (kind === 'pixel') {
+            const i = index | 0;
+            if (i < 0 || i >= this._pixelLayers.length) return 0;
+            const cur = this._normalizePixelLayerVisibility(this._pixelLayers[i] && this._pixelLayers[i].visibility, 0);
+            const next = (cur + 1) % 3;
+            this._pixelLayers[i].visibility = next;
+            return next;
+        }
+        const i = index | 0;
+        if (i < 0 || i >= this._tileLayers.length) return 0;
+        const cur = this._normalizeTileLayerVisibility(this._tileLayers[i] && this._tileLayers[i].visibility, 0);
+        const next = (cur + 1) % 3;
+        this._tileLayers[i].visibility = next;
+        return next;
+    }
+
+    setActiveLayerIndex(type = 'pixel', index = 0) {
+        this._ensureLayerState();
+        const kind = this._normalizeLayerType(type);
+        if (kind === 'tile') {
+            // Persist any in-flight edits into the currently selected layer before switching.
+            this._adoptCurrentTileArraysIntoActiveLayer();
+            const max = Math.max(0, this._tileLayers.length - 1);
+            this._activeTileLayerIndex = Math.max(0, Math.min((index | 0), max));
+            this._syncActiveTileLayerReferences();
+            return this._activeTileLayerIndex;
+        }
+        const max = Math.max(0, this._pixelLayers.length - 1);
+        this._activePixelLayerIndex = Math.max(0, Math.min((index | 0), max));
+        return this._activePixelLayerIndex;
+    }
+
+    addLayer(type = 'pixel', name = null) {
+        this._ensureLayerState();
+        const kind = this._normalizeLayerType(type);
+        if (kind === 'tile') {
+            const n = this._tileLayers.length + 1;
+            const entry = {
+                name: String((name || ('Tile Layer ' + n))).trim() || ('Tile Layer ' + n),
+                visibility: 0,
+                bindings: [],
+                transforms: []
+            };
+            this._tileLayers.push(entry);
+            this._activeTileLayerIndex = this._tileLayers.length - 1;
+            this._syncActiveTileLayerReferences();
+            return this._activeTileLayerIndex;
+        }
+        const n = this._pixelLayers.length + 1;
+        this._pixelLayers.push({ name: String((name || ('Pixel Layer ' + n))).trim() || ('Pixel Layer ' + n), visibility: 0 });
+        this._activePixelLayerIndex = this._pixelLayers.length - 1;
+        this._ensurePixelLayerStore();
+        return this._activePixelLayerIndex;
+    }
+
+    renameLayer(type = 'pixel', index = 0, nextName = '') {
+        this._ensureLayerState();
+        const kind = this._normalizeLayerType(type);
+        const arr = (kind === 'tile') ? this._tileLayers : this._pixelLayers;
+        const i = index | 0;
+        if (i < 0 || i >= arr.length) return false;
+        const v = String(nextName || '').trim();
+        if (!v) return false;
+        arr[i].name = v;
+        return true;
+    }
+
+    removeLayer(type = 'pixel', index = 0) {
+        this._ensureLayerState();
+        const kind = this._normalizeLayerType(type);
+        if (kind === 'tile') {
+            if (this._tileLayers.length <= 1) return false;
+            const i = index | 0;
+            if (i < 0 || i >= this._tileLayers.length) return false;
+            this._tileLayers.splice(i, 1);
+            this._activeTileLayerIndex = Math.max(0, Math.min(this._activeTileLayerIndex, this._tileLayers.length - 1));
+            this._syncActiveTileLayerReferences();
+            return true;
+        }
+        if (this._pixelLayers.length <= 1) return false;
+        const i = index | 0;
+        if (i < 0 || i >= this._pixelLayers.length) return false;
+        this._pixelLayers.splice(i, 1);
+        if (Array.isArray(this._pixelLayerStores) && this._pixelLayerStores.length > i) this._pixelLayerStores.splice(i, 1);
+        this._activePixelLayerIndex = Math.max(0, Math.min(this._activePixelLayerIndex, this._pixelLayers.length - 1));
+        return true;
+    }
+
+    _getTileLayerDrawEntries(areaIndex) {
+        try {
+            this._ensureLayerState();
+            if (!Number.isFinite(areaIndex) || areaIndex < 0) return [];
+            const idx = areaIndex | 0;
+            const active = Math.max(0, Math.min((this._activeTileLayerIndex | 0), this._tileLayers.length - 1));
+            const hasValidBinding = (b) => !!(b && b.anim !== undefined && b.index !== undefined);
+            const layerVisibility = (layer) => this._normalizeTileLayerVisibility(layer && layer.visibility, 0);
+            let anyBound = false;
+            for (let i = 0; i < this._tileLayers.length; i++) {
+                const l = this._tileLayers[i];
+                if (layerVisibility(l) === 2) continue;
+                if (l && Array.isArray(l.bindings) && hasValidBinding(l.bindings[idx])) { anyBound = true; break; }
+            }
+
+            const buildVisual = (layerIndex) => {
+                const previewActive = !!(this._playerSimMode && this._playerSimMode.active);
+                if (previewActive) {
+                    return { alpha: 1, darken: 0 };
+                }
+                const v = layerVisibility(this._tileLayers[layerIndex]);
+                if (v === 1) return { alpha: 1, darken: 0 }; // full visible
+                const rel = layerIndex - active;
+                // Exaggerated separation:
+                // - Layers above active are very faint.
+                // - Layers below active are strongly darkened.
+                const alpha = rel > 0 ? Math.max(0.06, 0.22 - (rel - 1) * 0.08) : 1;
+                const darken = rel < 0 ? Math.min(0.9, 0.55 + (Math.abs(rel) - 1) * 0.18) : 0;
+                return { alpha, darken };
+            };
+
+            const out = [];
+            if (!anyBound) {
+                const activeLayer = this._tileLayers[active] || { transforms: [] };
+                if (layerVisibility(activeLayer) === 2) return [];
+                const t = Array.isArray(activeLayer.transforms) ? (activeLayer.transforms[idx] || null) : null;
+                out.push({
+                    layerIndex: active,
+                    binding: { anim: this.selectedAnimation, index: this.selectedFrame, multiFrames: null },
+                    transform: t,
+                    ...buildVisual(active)
+                });
+                return out;
+            }
+
+            for (let i = 0; i < this._tileLayers.length; i++) {
+                const l = this._tileLayers[i] || {};
+                if (layerVisibility(l) === 2) continue;
+                const b = Array.isArray(l.bindings) ? l.bindings[idx] : null;
+                if (!hasValidBinding(b)) continue;
+                const t = Array.isArray(l.transforms) ? (l.transforms[idx] || null) : null;
+                out.push({ layerIndex: i, binding: b, transform: t, ...buildVisual(i) });
+            }
+            return out;
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _drawTileLayerStackToArea(dstPos, dstW, dstH, areaIndex, frameResolver, renderOnly = false) {
+        try {
+            const entries = this._getTileLayerDrawEntries(areaIndex);
+            if (!entries || entries.length === 0) return false;
+            const drawCtx = this.Draw && this.Draw.ctx;
+            if (!drawCtx) return false;
+
+            for (const entry of entries) {
+                if (!entry || !entry.binding) continue;
+                const b = entry.binding;
+                const anim = b.anim;
+                const multi = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
+                const frameList = (multi && multi.length > 0) ? multi : [Number(b.index) || 0];
+
+                const composeCanvas = document.createElement('canvas');
+                composeCanvas.width = Math.max(1, Math.floor(dstW));
+                composeCanvas.height = Math.max(1, Math.floor(dstH));
+                const cctx = composeCanvas.getContext('2d');
+                try { cctx.imageSmoothingEnabled = false; } catch (e) {}
+
+                for (const fi of frameList) {
+                    const fr = frameResolver(anim, fi);
+                    if (!fr) continue;
+                    cctx.drawImage(fr, 0, 0, fr.width, fr.height, 0, 0, composeCanvas.width, composeCanvas.height);
+                }
+
+                const hasTransform = !!(entry.transform && ((entry.transform.rot || 0) !== 0 || entry.transform.flipH));
+                let drawable = composeCanvas;
+                if (hasTransform && !renderOnly) {
+                    try {
+                        const t = entry.transform;
+                        const tcanvas = document.createElement('canvas');
+                        tcanvas.width = composeCanvas.width;
+                        tcanvas.height = composeCanvas.height;
+                        const tctx = tcanvas.getContext('2d');
+                        try { tctx.imageSmoothingEnabled = false; } catch (e) {}
+                        tctx.save();
+                        tctx.translate(tcanvas.width / 2, tcanvas.height / 2);
+                        if (t.flipH) tctx.scale(-1, 1);
+                        tctx.rotate((Number(t.rot || 0) * Math.PI) / 180);
+                        tctx.drawImage(composeCanvas, -tcanvas.width / 2, -tcanvas.height / 2);
+                        tctx.restore();
+                        drawable = tcanvas;
+                    } catch (e) {}
+                }
+
+                drawCtx.save();
+                drawCtx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
+                this.Draw.image(drawable, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
+                drawCtx.restore();
+
+                if ((Number(entry.darken) || 0) > 0) {
+                    drawCtx.save();
+                    drawCtx.globalAlpha = Math.max(0, Math.min(1, Number(entry.darken) || 0));
+                    drawCtx.fillStyle = '#000000';
+                    drawCtx.fillRect(dstPos.x, dstPos.y, dstW, dstH);
+                    drawCtx.restore();
+                }
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     _setAreaBindingAtIndex(areaIndex, bindingEntry, syncOp = true) {
         this._queueDeferredTileUndoCapture(syncOp);
         try {
+            this._adoptCurrentTileArraysIntoActiveLayer();
             if (!Number.isFinite(areaIndex) || areaIndex < 0) return false;
             areaIndex = areaIndex | 0;
             if (!Array.isArray(this._areaBindings)) this._areaBindings = [];
@@ -11759,13 +13293,14 @@ export class SpriteScene extends Scene {
             if (!syncOp) return true;
             const coord = (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[areaIndex]) ? this._tileIndexToCoord[areaIndex] : null;
             if (!coord) return true;
-            if (!bindingEntry) return this._queueTileOp('clearBinding', { col: coord.col|0, row: coord.row|0 });
+            if (!bindingEntry) return this._queueTileOp('clearBinding', { col: coord.col|0, row: coord.row|0, layer: this._activeTileLayerIndex | 0 });
             const mf = Array.isArray(bindingEntry.multiFrames)
                 ? bindingEntry.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v))
                 : null;
             return this._queueTileOp('bind', {
                 col: coord.col|0,
                 row: coord.row|0,
+                layer: this._activeTileLayerIndex | 0,
                 anim: bindingEntry.anim || this.selectedAnimation,
                 index: Number(bindingEntry.index) || 0,
                 multiFrames: (mf && mf.length > 0) ? mf : null
@@ -11778,6 +13313,7 @@ export class SpriteScene extends Scene {
     _setAreaTransformAtIndex(areaIndex, transformEntry, syncOp = true) {
         this._queueDeferredTileUndoCapture(syncOp);
         try {
+            this._adoptCurrentTileArraysIntoActiveLayer();
             if (!Number.isFinite(areaIndex) || areaIndex < 0) return false;
             areaIndex = areaIndex | 0;
             if (!Array.isArray(this._areaTransforms)) this._areaTransforms = [];
@@ -11785,10 +13321,11 @@ export class SpriteScene extends Scene {
             if (!syncOp) return true;
             const coord = (Array.isArray(this._tileIndexToCoord) && this._tileIndexToCoord[areaIndex]) ? this._tileIndexToCoord[areaIndex] : null;
             if (!coord) return true;
-            if (!transformEntry) return this._queueTileOp('clearTransform', { col: coord.col|0, row: coord.row|0 });
+            if (!transformEntry) return this._queueTileOp('clearTransform', { col: coord.col|0, row: coord.row|0, layer: this._activeTileLayerIndex | 0 });
             return this._queueTileOp('setTransform', {
                 col: coord.col|0,
                 row: coord.row|0,
+                layer: this._activeTileLayerIndex | 0,
                 rot: Number(transformEntry.rot || 0),
                 flipH: !!transformEntry.flipH
             });
@@ -11932,6 +13469,7 @@ export class SpriteScene extends Scene {
     }
 
     getAreaBinding(areaIndex) {
+        this._adoptCurrentTileArraysIntoActiveLayer();
         if (!Array.isArray(this._areaBindings)) return null;
         return this._areaBindings[areaIndex] || null;
     }
@@ -12163,7 +13701,7 @@ export class SpriteScene extends Scene {
             // draw the frame image centered inside the box with some padding
             if (sheet) {
                 // determine effective animation/frame for this area (respect bindings only in tilemode)
-                const binding = (this.tilemode && typeof areaIndex === 'number' && Array.isArray(this._areaBindings)) ? this._areaBindings[areaIndex] : null;
+                const binding = (this.tilemode && typeof areaIndex === 'number') ? this.getAreaBinding(areaIndex) : null;
                 const coordForArea = (typeof areaIndex === 'number' && Array.isArray(this._tileIndexToCoord)) ? this._tileIndexToCoord[areaIndex] : null;
                 const tileIsActive = (!this.tilemode) || (coordForArea && this._isTileActive(coordForArea.col, coordForArea.row));
                 if (this.tilemode && !tileIsActive) {
@@ -12174,23 +13712,41 @@ export class SpriteScene extends Scene {
                     }
                     return;
                 }
+
+                const padding = 0;
+                const dstW = Math.max(1, size.x - padding * 2);
+                const dstH = Math.max(1, size.y - padding * 2);
+                const dstPos = new Vector(pos.x + (size.x - dstW) / 2, pos.y + (size.y - dstH) / 2);
+
+                if (this.tilemode) {
+                    const effAnim = (binding && binding.anim !== undefined) ? binding.anim : this.selectedAnimation;
+                    const effFrame = (binding && binding.index !== undefined) ? binding.index : this.selectedFrame;
+                    if (modeBase) {
+                        const frameFor = (animName, frameIdx) => {
+                            try { return this._getCompositedPixelFrame(animName, frameIdx, false, !!renderOnly); } catch (e) { return null; }
+                        };
+                        this._drawTileLayerStackToArea(dstPos, dstW, dstH, areaIndex, frameFor, renderOnly);
+                    }
+                    if (modeOverlay && (!renderOnly || this.tilemode)) {
+                        this.displayCursor(dstPos, dstW, dstH, binding, effAnim, effFrame, areaIndex, renderOnly);
+                    }
+                    return;
+                }
+
                 let effAnim = null;
                 let effFrame = null;
-                let isMirrored = false;
                 if (binding && binding.anim !== undefined && binding.index !== undefined) {
                     effAnim = binding.anim;
                     effFrame = binding.index;
                 } else {
-                    // Unbound: visually mirror the selected frame when in tilemode
                     effAnim = this.selectedAnimation;
                     effFrame = this.selectedFrame;
-                    isMirrored = !!this.tilemode;
                 }
 
                 // Fast path for tiny on-screen tiles: skip expensive compositing/transforms.
                 if (renderOnly && modeBase && effAnim !== null && sheet && typeof this.Draw.sheet === 'function') {
                     try {
-                        const simpleFrame = (typeof sheet.getFrame === 'function') ? sheet.getFrame(effAnim, effFrame) : null;
+                        const simpleFrame = this._getCompositedPixelFrame(effAnim, effFrame, false, true);
                         if (simpleFrame && typeof this.Draw.image === 'function') {
                             // Snap tile bounds to outward screen-pixel edges so neighboring tiles
                             // can't round in opposite directions and leave seams.
@@ -12219,18 +13775,14 @@ export class SpriteScene extends Scene {
                         }
                     } catch (e) {
                         try {
-                            const simpleFrame = (typeof sheet.getFrame === 'function') ? sheet.getFrame(effAnim, effFrame) : null;
+                            const simpleFrame = this._getCompositedPixelFrame(effAnim, effFrame, false, true);
                             if (simpleFrame) this.Draw.image(simpleFrame, pos, size, null, 0, 1, false);
                         } catch (e2) { /* ignore simplified render fallback errors */ }
                     }
                     return;
                 }
 
-                const frameCanvas = (effAnim !== null && typeof sheet.getFrame === 'function') ? sheet.getFrame(effAnim, effFrame) : null;
-                const padding = 0;
-                const dstW = Math.max(1, size.x - padding * 2);
-                const dstH = Math.max(1, size.y - padding * 2);
-                const dstPos = new Vector(pos.x + (size.x - dstW) / 2, pos.y + (size.y - dstH) / 2);
+                const frameCanvas = (effAnim !== null) ? this._getCompositedPixelFrame(effAnim, effFrame) : null;
                 // Prefer Draw.sheet which understands SpriteSheet metadata (rows/frames).
                 let layeredCanvas = null;
                 if (modeBase && effAnim !== null && sheet && typeof this.Draw.sheet === 'function') {
@@ -12269,7 +13821,7 @@ export class SpriteScene extends Scene {
                                         const alphaPerLayer = layerAlpha;
                                         for (const ii of compositeIdxs) {
                                             try {
-                                                const fCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(effAnim, ii) : null;
+                                                const fCanvas = this._getCompositedPixelFrame(effAnim, ii);
                                                 if (!fCanvas) continue;
                                                 tctx.save();
                                                 tctx.globalAlpha = alphaPerLayer;
@@ -12294,7 +13846,7 @@ export class SpriteScene extends Scene {
                                     if (off === 0) continue;
                                     try {
                                         const idx = effFrame + off;
-                                        const fCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(effAnim, idx) : null;
+                                        const fCanvas = this._getCompositedPixelFrame(effAnim, idx);
                                         if (!fCanvas) continue;
                                         drawCtx.save();
                                         // Fade more for frames further away
@@ -12327,12 +13879,15 @@ export class SpriteScene extends Scene {
                                 tctx.restore();
                                 this.Draw.image(tmp, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
                             } catch (e) {
-                                // fallback to sheet if transform draw fails
-                                if (!layeredCanvas) this.Draw.sheet(sheet, dstPos, new Vector(dstW, dstH), effAnim, effFrame, null, 1, false);
-                                else this.Draw.image(layeredCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
+                                // fallback to composited frame if transform draw fails
+                                if (layeredCanvas) this.Draw.image(layeredCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
+                                else if (frameCanvas) this.Draw.image(frameCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
+                                else this.Draw.sheet(sheet, dstPos, new Vector(dstW, dstH), effAnim, effFrame, null, 1, false);
                             }
                         } else if (layeredCanvas) {
                             this.Draw.image(layeredCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
+                        } else if (frameCanvas) {
+                            this.Draw.image(frameCanvas, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
                         } else {
                             this.Draw.sheet(sheet, dstPos, new Vector(dstW, dstH), effAnim, effFrame, null, 1, false);
                         }
