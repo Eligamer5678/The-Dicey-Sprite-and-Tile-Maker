@@ -12772,6 +12772,140 @@ export class SpriteScene extends Scene {
         }
     }
 
+    _remapAnimationFrameReferences(animName, oldToNew, options = {}) {
+        try {
+            const anim = String(animName || '').trim();
+            if (!anim || !oldToNew || typeof oldToNew !== 'object') return false;
+            const skipSelection = !!(options && options.skipSelection);
+
+            const hasMapped = (idx) => Object.prototype.hasOwnProperty.call(oldToNew, String(idx));
+            const mapIndex = (idx) => {
+                if (!Number.isFinite(Number(idx))) return null;
+                const key = String(Number(idx) | 0);
+                if (!hasMapped(key)) return null;
+                const mapped = Number(oldToNew[key]);
+                if (!Number.isFinite(mapped) || mapped < 0) return null;
+                return mapped | 0;
+            };
+
+            const frameCount = Math.max(0, Number(this._getAnimationFrameCountSafe(anim)) || 0);
+            const fallbackFrame = frameCount > 0 ? (frameCount - 1) : 0;
+
+            if (!skipSelection && this.selectedAnimation === anim && Number.isFinite(Number(this.selectedFrame))) {
+                const mappedSelected = mapIndex(this.selectedFrame);
+                this.selectedFrame = Number.isFinite(mappedSelected)
+                    ? mappedSelected
+                    : Math.max(0, Math.min(fallbackFrame, Number(this.selectedFrame) | 0));
+            }
+
+            if (this._tileBrushBinding && this._tileBrushBinding.anim === anim) {
+                const mappedBrush = mapIndex(this._tileBrushBinding.index);
+                if (Number.isFinite(mappedBrush)) {
+                    this._tileBrushBinding = { ...this._tileBrushBinding, index: mappedBrush };
+                } else if (frameCount > 0) {
+                    this._tileBrushBinding = { ...this._tileBrushBinding, index: fallbackFrame };
+                } else {
+                    this._tileBrushBinding = null;
+                }
+            }
+
+            const remapBindingArray = (arr) => {
+                if (!Array.isArray(arr)) return;
+                for (let i = 0; i < arr.length; i++) {
+                    const binding = arr[i];
+                    if (!binding || typeof binding !== 'object') continue;
+                    if (binding.anim !== anim) continue;
+
+                    const mappedPrimary = mapIndex(binding.index);
+                    let mappedMulti = null;
+                    if (Array.isArray(binding.multiFrames)) {
+                        const next = [];
+                        const seen = new Set();
+                        for (const v of binding.multiFrames) {
+                            const m = mapIndex(v);
+                            if (!Number.isFinite(m)) continue;
+                            if (seen.has(m)) continue;
+                            seen.add(m);
+                            next.push(m);
+                        }
+                        mappedMulti = next;
+                    }
+
+                    if (Number.isFinite(mappedPrimary)) {
+                        binding.index = mappedPrimary;
+                    } else if (mappedMulti && mappedMulti.length > 0) {
+                        binding.index = mappedMulti[0];
+                    } else {
+                        arr[i] = null;
+                        continue;
+                    }
+
+                    if (Array.isArray(binding.multiFrames)) {
+                        binding.multiFrames = (mappedMulti && mappedMulti.length > 0) ? mappedMulti : null;
+                    }
+                }
+            };
+
+            const seenBindingArrays = new Set();
+            if (Array.isArray(this._areaBindings)) {
+                seenBindingArrays.add(this._areaBindings);
+                remapBindingArray(this._areaBindings);
+            }
+            if (Array.isArray(this._tileLayers)) {
+                for (const layer of this._tileLayers) {
+                    if (!layer || !Array.isArray(layer.bindings)) continue;
+                    if (seenBindingArrays.has(layer.bindings)) continue;
+                    seenBindingArrays.add(layer.bindings);
+                    remapBindingArray(layer.bindings);
+                }
+            }
+
+            if (this._selectionKeyframeTrack && this._selectionKeyframeTrack.anim === anim && Array.isArray(this._selectionKeyframeTrack.frames)) {
+                const nextFrames = [];
+                const srcFrames = this._selectionKeyframeTrack.frames;
+                for (let oldIdx = 0; oldIdx < srcFrames.length; oldIdx++) {
+                    const mapped = mapIndex(oldIdx);
+                    if (!Number.isFinite(mapped)) continue;
+                    nextFrames[mapped] = srcFrames[oldIdx];
+                }
+                this._selectionKeyframeTrack.frames = nextFrames;
+            }
+
+            if (!skipSelection && this._selectionKeyframeLastAnim === anim) {
+                const mappedLast = mapIndex(this._selectionKeyframeLastFrame);
+                this._selectionKeyframeLastFrame = Number.isFinite(mappedLast)
+                    ? mappedLast
+                    : Math.max(0, Math.min(fallbackFrame, Number(this._selectionKeyframeLastFrame) | 0));
+            }
+
+            if (this._tileConnMap && typeof this._tileConnMap === 'object') {
+                const nextConnMap = {};
+                for (const key of Object.keys(this._tileConnMap)) {
+                    const value = this._tileConnMap[key];
+                    const splitAt = key.lastIndexOf('::');
+                    if (splitAt <= 0) {
+                        nextConnMap[key] = value;
+                        continue;
+                    }
+                    const keyAnim = key.slice(0, splitAt);
+                    if (keyAnim !== anim) {
+                        nextConnMap[key] = value;
+                        continue;
+                    }
+                    const keyIndex = Number(key.slice(splitAt + 2));
+                    const mapped = mapIndex(keyIndex);
+                    if (!Number.isFinite(mapped)) continue;
+                    nextConnMap[keyAnim + '::' + mapped] = value;
+                }
+                this._tileConnMap = nextConnMap;
+            }
+
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     _normalizePixelLayerVisibility(value, fallback = 0) {
         const n = Number(value);
         if (!Number.isFinite(n)) return Math.max(0, Math.min(2, Number(fallback) | 0));

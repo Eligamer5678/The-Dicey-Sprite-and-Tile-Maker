@@ -140,6 +140,63 @@ export default class FrameSelect {
         } catch (e) {}
     }
 
+    _snapshotLogicalFrameRefs(anim){
+        try {
+            if (!this.sprite || !this.sprite._frames || !this.sprite._frames.has(anim)) return [];
+            const arr = this.sprite._frames.get(anim) || [];
+            let logicalCount = 0;
+            for (let i = 0; i < arr.length; i++) {
+                const entry = arr[i];
+                if (!entry || entry.__groupStart || entry.__groupEnd) continue;
+                logicalCount++;
+            }
+            const refs = [];
+            for (let i = 0; i < logicalCount; i++) {
+                refs.push((typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, i) : (arr[i] || null));
+            }
+            return refs;
+        } catch (e) {
+            return [];
+        }
+    }
+
+    _buildLogicalFrameIndexMap(beforeRefs, afterRefs){
+        const mapping = {};
+        try {
+            const buckets = new Map();
+            for (let i = 0; i < afterRefs.length; i++) {
+                const ref = afterRefs[i];
+                if (!ref) continue;
+                const list = buckets.get(ref) || [];
+                list.push(i);
+                buckets.set(ref, list);
+            }
+            for (let oldIdx = 0; oldIdx < beforeRefs.length; oldIdx++) {
+                const ref = beforeRefs[oldIdx];
+                if (!ref) continue;
+                const list = buckets.get(ref);
+                if (!list || list.length === 0) continue;
+                mapping[String(oldIdx)] = list.shift();
+            }
+        } catch (e) {}
+        return mapping;
+    }
+
+    _syncFrameReferenceRemap(anim, beforeRefs, options = {}){
+        try {
+            if (!this.scene || typeof this.scene._remapAnimationFrameReferences !== 'function') return;
+            const before = Array.isArray(beforeRefs) ? beforeRefs : [];
+            const after = this._snapshotLogicalFrameRefs(anim);
+            if (before.length === 0 && after.length === 0) return;
+            const indexMap = this._buildLogicalFrameIndexMap(before, after);
+            this.scene._remapAnimationFrameReferences(anim, indexMap, {
+                oldCount: before.length,
+                newCount: after.length,
+                skipSelection: options && options.skipSelection === false ? false : true
+            });
+        } catch (e) {}
+    }
+
     _getFrameConnHitRects(slotPos){
         const frame = {
             x: slotPos.x,
@@ -2417,7 +2474,9 @@ export default class FrameSelect {
                     const sel = this.scene.selectedFrame;
                     const arr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
                     if (anim && sel !== null && arr.length > 0 && sel >= 0 && sel < arr.length) {
+                        const beforeRefs = this._snapshotLogicalFrameRefs(anim);
                         this.sprite.popFrame(anim, sel);
+                        this._syncFrameReferenceRemap(anim, beforeRefs);
                         // clamp selectedFrame to new range
                         const newLen = (this.sprite._frames.get(anim) || []).length;
                         if (newLen === 0) this.scene.selectedFrame = 0;
@@ -2566,6 +2625,8 @@ export default class FrameSelect {
                     try {
                         if (!anim || !arr) { /* nothing */ }
                         else {
+                            const beforeRefs = this._snapshotLogicalFrameRefs(anim);
+                            let didReorder = false;
                             const groups = this._getFrameGroups(anim);
                             const selIdxs = Array.from(this._multiSelected || []).filter(i=>typeof i === 'number' && i>=0 && i < arr.length).map(Number).sort((a,b)=>a-b);
                             if (selIdxs.length === 0) {
@@ -2577,6 +2638,7 @@ export default class FrameSelect {
                                     arr[sel] = prev;
                                     if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
                                     if (this.scene) this.scene.selectedFrame = sel - 1;
+                                    didReorder = true;
                                     try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                 }
@@ -2616,6 +2678,7 @@ export default class FrameSelect {
                                         for (const ni of newIndices) this._multiSelected.add(ni);
                                         if (this.scene) this.scene.selectedFrame = newIndices[0];
                                         if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                        didReorder = true;
                                         try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                         try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                     }
@@ -2661,10 +2724,12 @@ export default class FrameSelect {
                                         if (ni !== -1) this._multiSelected.add(ni);
                                     }
                                     if (this.scene) this.scene.selectedFrame = Math.min(...Array.from(this._multiSelected));
+                                    didReorder = true;
                                     try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                 }
                             }
+                            if (didReorder) this._syncFrameReferenceRemap(anim, beforeRefs);
                         }
                     } catch (e) { console.warn('FrameSelect move up failed', e); }
                 }
@@ -2674,6 +2739,8 @@ export default class FrameSelect {
                     try {
                         if (!anim || !arr) { /* nothing */ }
                         else {
+                            const beforeRefs = this._snapshotLogicalFrameRefs(anim);
+                            let didReorder = false;
                             const groups = this._getFrameGroups(anim);
                             const selIdxs = Array.from(this._multiSelected || []).filter(i=>typeof i === 'number' && i>=0 && i < arr.length).map(Number).sort((a,b)=>a-b);
                             if (selIdxs.length === 0) {
@@ -2685,6 +2752,7 @@ export default class FrameSelect {
                                     arr[sel] = next;
                                     if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
                                     if (this.scene) this.scene.selectedFrame = sel + 1;
+                                    didReorder = true;
                                     try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                 }
@@ -2725,6 +2793,7 @@ export default class FrameSelect {
                                         for (const ni of newIndices) this._multiSelected.add(ni);
                                         if (this.scene) this.scene.selectedFrame = newIndices[0];
                                         if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                                        didReorder = true;
                                         try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                         try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                     }
@@ -2765,10 +2834,12 @@ export default class FrameSelect {
                                         if (ni !== -1) this._multiSelected.add(ni);
                                     }
                                     if (this.scene) this.scene.selectedFrame = Math.min(...Array.from(this._multiSelected));
+                                    didReorder = true;
                                     try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
                                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
                                 }
                             }
+                            if (didReorder) this._syncFrameReferenceRemap(anim, beforeRefs);
                         }
                     } catch (e) { console.warn('FrameSelect move down failed', e); }
                 }
