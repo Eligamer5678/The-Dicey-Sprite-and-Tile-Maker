@@ -13313,6 +13313,45 @@ export class SpriteScene extends Scene {
         return true;
     }
 
+    moveLayerDown(type = 'pixel', index = 0) {
+        this._ensureLayerState();
+        const kind = this._normalizeLayerType(type);
+        const i = index | 0;
+        if (kind === 'tile') {
+            if (!Array.isArray(this._tileLayers) || this._tileLayers.length <= 1) return false;
+            if (i < 0 || i >= this._tileLayers.length - 1) return false;
+            // Preserve in-flight active tile edits before reordering.
+            this._adoptCurrentTileArraysIntoActiveLayer();
+            const arr = this._tileLayers;
+            const tmp = arr[i];
+            arr[i] = arr[i + 1];
+            arr[i + 1] = tmp;
+
+            if ((this._activeTileLayerIndex | 0) === i) this._activeTileLayerIndex = i + 1;
+            else if ((this._activeTileLayerIndex | 0) === (i + 1)) this._activeTileLayerIndex = i;
+
+            this._syncActiveTileLayerReferences();
+            return true;
+        }
+
+        if (!Array.isArray(this._pixelLayers) || this._pixelLayers.length <= 1) return false;
+        if (i < 0 || i >= this._pixelLayers.length - 1) return false;
+        const arr = this._pixelLayers;
+        const tmp = arr[i];
+        arr[i] = arr[i + 1];
+        arr[i + 1] = tmp;
+
+        if (Array.isArray(this._pixelLayerStores) && this._pixelLayerStores.length > (i + 1)) {
+            const s = this._pixelLayerStores[i];
+            this._pixelLayerStores[i] = this._pixelLayerStores[i + 1];
+            this._pixelLayerStores[i + 1] = s;
+        }
+
+        if ((this._activePixelLayerIndex | 0) === i) this._activePixelLayerIndex = i + 1;
+        else if ((this._activePixelLayerIndex | 0) === (i + 1)) this._activePixelLayerIndex = i;
+        return true;
+    }
+
     _getTileLayerDrawEntries(areaIndex) {
         try {
             this._ensureLayerState();

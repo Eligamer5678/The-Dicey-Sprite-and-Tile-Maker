@@ -378,6 +378,19 @@ export default class FrameSelect {
         return true;
     }
 
+    moveAnimationDown(name){
+        if (!this.sprite || !this.sprite._frames || !name || !this.sprite._frames.has(name)) return false;
+        const entries = Array.from(this.sprite._frames.entries());
+        const idx = entries.findIndex(([k]) => k === name);
+        if (idx < 0 || idx >= entries.length - 1) return false;
+        const tmp = entries[idx];
+        entries[idx] = entries[idx + 1];
+        entries[idx + 1] = tmp;
+        this.sprite._frames = new Map(entries);
+        try { if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas(); } catch (e) {}
+        return true;
+    }
+
     _spawnTextInputFor(animName){
         // place input roughly under preview area (draw uses same calc)
         const outerPos = new Vector(1920-this._previewBuffer*3-this._previewSize, this._previewBuffer);
@@ -2808,6 +2821,24 @@ export default class FrameSelect {
                     const ry = listY + i * rowH;
                     const rpos = new Vector(listX, ry);
                     const rsize = new Vector(contentSize.x, rowH - 2);
+                    const moveRect = new Vector(rpos.x + rsize.x + 4, rpos.y + 4);
+                    const moveSize = new Vector(24, rsize.y - 8);
+
+                    if (Geometry.pointInRect(this.mouse.pos, moveRect, moveSize)) {
+                        if (this._rightListMode === 'layers') {
+                            try {
+                                const layerType = this._resolveLayerListType();
+                                if (this.scene && typeof this.scene.moveLayerDown === 'function') {
+                                    this.scene.moveLayerDown(layerType, i);
+                                }
+                            } catch (e) {}
+                        } else {
+                            try { this.moveAnimationDown(name); } catch (e) {}
+                        }
+                        try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                        break;
+                    }
+
                     if (Geometry.pointInRect(this.mouse.pos, rpos, rsize)){
                         // determine button hit areas (right side)
                         const visRect = new Vector(rpos.x + rsize.x - 120, rpos.y + 4);
@@ -3102,11 +3133,15 @@ export default class FrameSelect {
                 const renameSize = new Vector(36, rsize.y - 8);
                 const removePos = new Vector(rpos.x + rsize.x - 40, rpos.y + 4);
                 const removeSize = new Vector(36, rsize.y - 8);
+                const movePos = new Vector(rpos.x + rsize.x + 4, rpos.y + 4);
+                const moveSize = new Vector(24, rsize.y - 8);
                 const disabled = false;
                 this.UIDraw.rect(renamePos, renameSize, disabled ? '#444444' : '#666666');
                 this.UIDraw.text('R', new Vector(renamePos.x + renameSize.x/2, renamePos.y + renameSize.y/2 + 6), '#FFFFFF', 0, 12, { align: 'center', font: 'monospace' });
                 this.UIDraw.rect(removePos, removeSize, disabled ? '#444444' : '#AA4444');
                 this.UIDraw.text('X', new Vector(removePos.x + removeSize.x/2, removePos.y + removeSize.y/2 + 6), '#FFFFFF', 0, 12, { align: 'center', font: 'monospace' });
+                this.UIDraw.rect(movePos, moveSize, disabled ? '#444444' : '#446688');
+                this.UIDraw.text('v', new Vector(movePos.x + moveSize.x/2, movePos.y + moveSize.y/2 + 6), '#FFFFFF', 0, 12, { align: 'center', font: 'monospace' });
             }
             // add button
             const addY = listY + names.length * rowH + 6;
