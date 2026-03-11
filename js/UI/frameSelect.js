@@ -459,6 +459,148 @@ export default class FrameSelect {
             .replace(/'/g, '&apos;');
     }
 
+    _getAllValidOpenConnKeys(){
+        const out = [];
+        for (let mask = 0; mask < 256; mask++) {
+            const bits = mask.toString(2).padStart(8, '0');
+            if (this._normalizeOpenConnKey(bits) === bits) out.push(bits);
+        }
+        return out;
+    }
+
+    _getBase47ConnectionOrder(){
+        try {
+            const sceneMap = (this.scene && this.scene._availableTileConn && typeof this.scene._availableTileConn === 'object')
+                ? this.scene._availableTileConn
+                : null;
+            const ordered = [];
+            if (sceneMap) {
+                const byIndex = [];
+                for (const key of Object.keys(sceneMap)) {
+                    const idx = Number(sceneMap[key]);
+                    if (!Number.isFinite(idx)) continue;
+                    byIndex.push({ key: this._normalizeOpenConnKey(key), idx: idx | 0 });
+                }
+                byIndex.sort((a, b) => a.idx - b.idx);
+                for (const e of byIndex) {
+                    if (!ordered.includes(e.key)) ordered.push(e.key);
+                }
+            }
+
+            const all = this._getAllValidOpenConnKeys();
+            const missing = all.filter(k => !ordered.includes(k)).sort((a, b) => parseInt(a, 2) - parseInt(b, 2));
+            const full = ordered.concat(missing);
+            return full.slice(0, 47);
+        } catch (e) {
+            return this._getAllValidOpenConnKeys().sort((a, b) => parseInt(a, 2) - parseInt(b, 2)).slice(0, 47);
+        }
+    }
+
+    _base47SlotFromOrderIndex(orderIndex){
+        if (!Number.isFinite(orderIndex)) return -1;
+        const i = orderIndex | 0;
+        if (i < 0 || i >= 47) return -1;
+        return i < 42 ? i : (i + 2); // 7x7 grid with bottom-left two slots reserved blank
+    }
+
+    _isImageCellFullyTransparent(imgSource, slice, col, row){
+        try {
+            const s = Math.max(1, Number(slice) | 0);
+            const c = document.createElement('canvas');
+            c.width = s;
+            c.height = s;
+            const ctx = c.getContext('2d');
+            if (!ctx) return false;
+            ctx.clearRect(0, 0, s, s);
+            ctx.drawImage(imgSource, (col | 0) * s, (row | 0) * s, s, s, 0, 0, s, s);
+            const data = ctx.getImageData(0, 0, s, s).data;
+            for (let i = 3; i < data.length; i += 4) {
+                if (data[i] !== 0) return false;
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _detectBase47Layout(imgSource, slice, cols, rows){
+        try {
+            if ((cols | 0) !== 7 || (rows | 0) !== 7) return false;
+            const blankA = this._isImageCellFullyTransparent(imgSource, slice, 0, 6);
+            const blankB = this._isImageCellFullyTransparent(imgSource, slice, 1, 6);
+            return !!(blankA && blankB);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _buildBase47ExportCanvas(anim){
+        try {
+            const scene = this.scene;
+            const sprite = this.sprite;
+            if (!scene || !sprite || typeof sprite.getFrame !== 'function') return null;
+            const animName = String(anim || scene.selectedAnimation || 'idle');
+            const slice = Math.max(1, Number(sprite.slicePx) || 16);
+            const canvas = document.createElement('canvas');
+            canvas.width = 7 * slice;
+            canvas.height = 7 * slice;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return null;
+            try { ctx.imageSmoothingEnabled = false; } catch (e) {}
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const order = this._getBase47ConnectionOrder();
+            const keyToFrame = new Map();
+            const frameCount = (scene && typeof scene._getAnimationLogicalFrameCount === 'function')
+                ? Math.max(0, Number(scene._getAnimationLogicalFrameCount(animName)) | 0)
+                : Math.max(0, ((sprite._frames && sprite._frames.get(animName)) || []).length | 0);
+            for (let i = 0; i < frameCount; i++) {
+                const k = String(animName) + '::' + i;
+                const raw = scene && scene._tileConnMap ? scene._tileConnMap[k] : null;
+                if (typeof raw !== 'string') continue;
+                const norm = this._normalizeOpenConnKey(raw);
+                if (!keyToFrame.has(norm)) keyToFrame.set(norm, i);
+            }
+
+            for (let i = 0; i < order.length; i++) {
+                const key = order[i];
+                const slot = this._base47SlotFromOrderIndex(i);
+                if (slot < 0) continue;
+                const frameIdx = keyToFrame.has(key) ? keyToFrame.get(key) : null;
+                if (!Number.isFinite(frameIdx)) continue;
+                const fr = sprite.getFrame(animName, frameIdx);
+                if (!fr) continue;
+                const col = slot % 7;
+                const row = Math.floor(slot / 7);
+                ctx.drawImage(fr, 0, 0, fr.width, fr.height, col * slice, row * slice, slice, slice);
+            }
+            return canvas;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _buildBase47SpriteSheetFromImage(imgSource, slice){
+        const s = Math.max(1, Number(slice) | 0);
+        const ss = new SpriteSheet(imgSource, s);
+        ss._frames = new Map();
+        const anim = 'anim0';
+        const order = this._getBase47ConnectionOrder();
+        const frames = [];
+        for (let i = 0; i < order.length; i++) {
+            const slot = this._base47SlotFromOrderIndex(i);
+            if (slot < 0) continue;
+            const col = slot % 7;
+            const row = Math.floor(slot / 7);
+            frames.push({ __lazy: true, src: imgSource, sx: col * s, sy: row * s, w: s, h: s });
+        }
+        ss._frames.set(anim, frames);
+        try { ss._rebuildSheetCanvas(); } catch (e) {}
+        const connByIndex = {};
+        for (let i = 0; i < order.length; i++) connByIndex[i] = order[i];
+        return { ss, anim, connByIndex };
+    }
+
     async _getJsZipCtor(){
         if (this._jsZipCtor) return this._jsZipCtor;
         if (typeof window !== 'undefined' && window.JSZip) {
@@ -911,10 +1053,11 @@ export default class FrameSelect {
             let importMode = 'spritesheet';
             try {
                 try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                const choice = window.prompt('Import as? 1 = spritesheet, 2 = tilesheet', '1');
+                const choice = window.prompt('Import as? 1 = spritesheet, 2 = tilesheet, 3 = base47 (aseprite png)', '1');
                 if (choice !== null) {
                     const v = String(choice).trim();
                     if (v === '2') importMode = 'tilesheet';
+                    else if (v === '3') importMode = 'base47';
                     else importMode = 'spritesheet';
                 }
             } catch (e) { /* ignore and fall back to spritesheet */ }
@@ -956,30 +1099,42 @@ export default class FrameSelect {
             const srcH = bitmap ? bitmap.height : img.height;
             const cols = Math.max(1, Math.floor(srcW / slice));
             const rows = Math.max(1, Math.floor(srcH / slice));
+
+            const autoDetectedBase47 = this._detectBase47Layout(bitmap || img, slice, cols, rows);
+            const useBase47 = (importMode === 'base47') || (importMode === 'tilesheet' && autoDetectedBase47);
+            let base47Meta = null;
             console.log('Importing spritesheet:', file.name, 'img', srcW + 'x' + srcH, 'slice', slice, 'cols', cols, 'rows', rows, 'mode', importMode);
             // Build SpriteSheet
-            const ss = new SpriteSheet(img, slice);
-            ss._frames = new Map();
-            let counter = 0;
-            for (let r = 0; r < rows; r++){
-                const frames = [];
-                for (let c = 0; c < cols; c++){
-                    // create a lazy descriptor pointing to the source image/bitmap
-                    const desc = {
-                        __lazy: true,
-                        src: bitmap || img,
-                        sx: c * slice,
-                        sy: r * slice,
-                        w: slice,
-                        h: slice
-                    };
-                    frames.push(desc);
+            let ss = null;
+            if (useBase47) {
+                const built = this._buildBase47SpriteSheetFromImage(bitmap || img, slice);
+                ss = built && built.ss ? built.ss : null;
+                base47Meta = built || null;
+                if (!ss) throw new Error('Failed to build base47 sprite sheet from image.');
+            } else {
+                ss = new SpriteSheet(img, slice);
+                ss._frames = new Map();
+                let counter = 0;
+                for (let r = 0; r < rows; r++){
+                    const frames = [];
+                    for (let c = 0; c < cols; c++){
+                        // create a lazy descriptor pointing to the source image/bitmap
+                        const desc = {
+                            __lazy: true,
+                            src: bitmap || img,
+                            sx: c * slice,
+                            sy: r * slice,
+                            w: slice,
+                            h: slice
+                        };
+                        frames.push(desc);
+                    }
+                    // generate a simple name (anim0, anim1, ...)
+                    let name = 'anim' + counter;
+                    while (ss._frames.has(name)) { counter++; name = 'anim' + counter; }
+                    counter++;
+                    ss._frames.set(name, frames);
                 }
-                // generate a simple name (anim0, anim1, ...)
-                let name = 'anim' + counter;
-                while (ss._frames.has(name)) { counter++; name = 'anim' + counter; }
-                counter++;
-                ss._frames.set(name, frames);
             }
             ss._rebuildSheetCanvas();
             // Some browsers may delay bitmap availability in the rendering pipeline; force a short refresh
@@ -1005,6 +1160,7 @@ export default class FrameSelect {
                     try {
                         const existingNames = new Set(existing._frames ? existing._frames.keys() : []);
                         const addedNames = [];
+                        const animNameRemap = new Map();
                         for (const [name, frames] of ss._frames.entries()){
                             let newName = name;
                             let suffix = 1;
@@ -1015,6 +1171,18 @@ export default class FrameSelect {
                             const clonedFrames = Array.isArray(frames) ? frames.map(f => (f && f.__lazy === true ? { ...f } : f)) : [];
                             existing._frames.set(newName, clonedFrames);
                             addedNames.push(newName);
+                            animNameRemap.set(name, newName);
+                        }
+                        if (useBase47 && base47Meta && targetScene) {
+                            if (!targetScene._tileConnMap || typeof targetScene._tileConnMap !== 'object') targetScene._tileConnMap = {};
+                            const srcAnim = String(base47Meta.anim || 'anim0');
+                            const dstAnim = String(animNameRemap.get(srcAnim) || addedNames[0] || srcAnim);
+                            const connByIndex = base47Meta.connByIndex || {};
+                            for (const idxRaw of Object.keys(connByIndex)) {
+                                const idx = Number(idxRaw) | 0;
+                                const key = this._normalizeOpenConnKey(connByIndex[idxRaw]);
+                                targetScene._tileConnMap[dstAnim + '::' + idx] = key;
+                            }
                         }
                         if (typeof existing._rebuildSheetCanvas === 'function') existing._rebuildSheetCanvas();
                         this.sprite = existing;
@@ -1041,7 +1209,7 @@ export default class FrameSelect {
                     this.scene.selectedFrame = 0;
 
                     // If importing as a tilesheet, enable tilemode and mirror the grid.
-                    if (importMode === 'tilesheet') {
+                    if (importMode === 'tilesheet' && !useBase47) {
                         try {
                             const scene = this.scene;
                             scene.tileCols = cols;
@@ -1069,6 +1237,21 @@ export default class FrameSelect {
                             }
                         } catch (e) { console.warn('tilesheet import tilemode setup failed', e); }
                     }
+
+                    if (useBase47) {
+                        try {
+                            if (!this.scene._tileConnMap || typeof this.scene._tileConnMap !== 'object') this.scene._tileConnMap = {};
+                            const anim = String((base47Meta && base47Meta.anim) || firstAnim || 'anim0');
+                            const connByIndex = (base47Meta && base47Meta.connByIndex) ? base47Meta.connByIndex : {};
+                            for (const idxRaw of Object.keys(connByIndex)) {
+                                const idx = Number(idxRaw) | 0;
+                                const key = this._normalizeOpenConnKey(connByIndex[idxRaw]);
+                                this.scene._tileConnMap[anim + '::' + idx] = key;
+                            }
+                            this.scene.selectedAnimation = anim;
+                            this.scene.selectedFrame = 0;
+                        } catch (e) { console.warn('base47 connection assignment failed', e); }
+                    }
                 }
                 this.sprite = ss;
             }
@@ -1084,21 +1267,24 @@ export default class FrameSelect {
         try{
             const sheet = this.sprite && this.sprite.sheet ? this.sprite.sheet : null;
             if (!sheet) { alert('No sprite sheet to export'); return; }
-            // Ask whether to export as spritesheet, tilesheet, or Tiled map package.
+            // Ask whether to export as spritesheet, tilesheet, Tiled map package, or base47 tilesheet PNG.
             let exportMode = 'spritesheet';
             try {
                 try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
-                const choice = window.prompt('Export as? 1 = spritesheet, 2 = tilesheet, 3 = tiled (.zip package)', '1');
+                const choice = window.prompt('Export as? 1 = spritesheet, 2 = tilesheet, 3 = tiled (.zip package), 4 = base47 tilesheet (aseprite png)', '1');
                 if (choice !== null) {
                     const v = String(choice).trim();
                     if (v === '2') exportMode = 'tilesheet';
                     else if (v === '3') exportMode = 'tiled';
+                    else if (v === '4') exportMode = 'base47';
                     else exportMode = 'spritesheet';
                 }
             } catch (e) { /* ignore and keep spritesheet */ }
 
             let exportFormat = 'png';
-            if (exportMode !== 'tiled') {
+            if (exportMode === 'base47') {
+                exportFormat = 'png';
+            } else if (exportMode !== 'tiled') {
                 try {
                     try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                     const fmtChoice = window.prompt('Image format? 1 = PNG, 2 = JPEG, 3 = GIF', '1');
@@ -1110,7 +1296,7 @@ export default class FrameSelect {
             }
 
             let upscaleMultiplier = 1;
-            if (exportMode !== 'tiled' && (exportFormat === 'png' || exportFormat === 'gif')) {
+            if (exportMode !== 'tiled' && exportMode !== 'base47' && (exportFormat === 'png' || exportFormat === 'gif')) {
                 try {
                     try { if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(); if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(); } catch(e){}
                     const up = window.prompt('Upscale multiplier (PNG/GIF, integer >= 1)', '1');
@@ -1211,7 +1397,20 @@ export default class FrameSelect {
 
             // Build an export canvas depending on mode
             let exportCanvas = null;
-            if ((exportMode === 'tilesheet' || exportMode === 'tiled') && this.scene && this.scene.currentSprite) {
+            if (exportMode === 'base47') {
+                try {
+                    const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                    exportCanvas = this._buildBase47ExportCanvas(anim);
+                    if (!exportCanvas) {
+                        alert('Unable to build base47 tilesheet from current animation. Make sure connection keys are assigned.');
+                        return;
+                    }
+                } catch (e) {
+                    console.warn('base47 export build failed', e);
+                    alert('Failed to build base47 tilesheet PNG.');
+                    return;
+                }
+            } else if ((exportMode === 'tilesheet' || exportMode === 'tiled') && this.scene && this.scene.currentSprite) {
                 try {
                     const scene = this.scene;
                     const slice = scene.currentSprite.slicePx || (this.sprite && this.sprite.slicePx) || 16;

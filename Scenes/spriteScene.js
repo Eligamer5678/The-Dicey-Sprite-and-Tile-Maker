@@ -3409,19 +3409,44 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            // Toggle pixel-perfect drawing mode with 'a' (when not in tilemode).
-            // If in tilemode, toggle autotile instead.
+            // Ctrl+A: generate missing connection frames from three selected templates.
+            // Plain A keeps its previous toggle behavior.
             if (this.keys.released('a') || this.keys.released('A')) {
-                if (this.tilemode) {
-                    if (this.stateController) this.stateController.toggleAutotile();
-                    else this.autotile = !this.autotile;
-                    try { console.log('Autotile mode:', this.autotile); } catch (e) {}
-                    try { this._playSfx('toggle.autotile'); } catch (e) {}
+                const ctrlDown = !!(this.keys.held('Control') || this.keys.held('ControlLeft') || this.keys.held('ControlRight') || this.keys.held('Meta'));
+                if (ctrlDown) {
+                    try {
+                        const slicePx = Math.max(1, Number(this.currentSprite && this.currentSprite.slicePx) || 16);
+                        const defaultW = Math.max(1, Math.floor(slicePx / 4));
+                        try {
+                            if (this.keys && typeof this.keys.pause === 'function') this.keys.pause();
+                            if (this.keys && typeof this.keys.clearState === 'function') this.keys.clearState();
+                            if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause();
+                        } catch (e) {}
+                        const input = window.prompt('Connector width in pixels', String(defaultW));
+                        if (input !== null) {
+                            const parsed = Math.floor(Number(String(input).trim()));
+                            if (Number.isFinite(parsed) && parsed > 0) {
+                                const result = this._generateMissingConnectionFramesFromTemplates(parsed);
+                                if (!result || !result.ok) {
+                                    try { window.alert((result && result.reason) ? result.reason : 'Could not generate missing connection tiles.'); } catch (e) {}
+                                } else {
+                                    try { this._playSfx('frame.duplicate'); } catch (e) {}
+                                }
+                            }
+                        }
+                    } catch (e) {}
                 } else {
-                    if (this.stateController) this.stateController.togglePixelPerfect();
-                    else this.pixelPerfect = !this.pixelPerfect;
-                    try { console.log('Pixel-perfect mode:', this.pixelPerfect); } catch (e) {}
-                    try { this._playSfx('toggle.pixelPerfect'); } catch (e) {}
+                    if (this.tilemode) {
+                        if (this.stateController) this.stateController.toggleAutotile();
+                        else this.autotile = !this.autotile;
+                        try { console.log('Autotile mode:', this.autotile); } catch (e) {}
+                        try { this._playSfx('toggle.autotile'); } catch (e) {}
+                    } else {
+                        if (this.stateController) this.stateController.togglePixelPerfect();
+                        else this.pixelPerfect = !this.pixelPerfect;
+                        try { console.log('Pixel-perfect mode:', this.pixelPerfect); } catch (e) {}
+                        try { this._playSfx('toggle.pixelPerfect'); } catch (e) {}
+                    }
                 }
             }
 
@@ -4179,6 +4204,136 @@ export class SpriteScene extends Scene {
     _openConnectionToClosedKey(openKey) {
         const norm = this._normalizeOpenConnectionKey(openKey);
         return norm;
+    }
+
+    _getAllValidOpenConnectionKeys() {
+        const keys = [];
+        for (let mask = 0; mask < 256; mask++) {
+            const bits = mask.toString(2).padStart(8, '0');
+            const norm = this._normalizeOpenConnectionKey(bits);
+            if (norm === bits) keys.push(bits);
+        }
+        return keys;
+    }
+
+    _generateMissingConnectionFramesFromTemplates(widthPx = 2) {
+        try {
+            const frameSelect = this.FrameSelect;
+            const selected = Array.from((frameSelect && frameSelect._multiSelected) || [])
+                .filter(i => Number.isFinite(i))
+                .map(i => Number(i) | 0)
+                .sort((a, b) => a - b);
+            if (selected.length < 3) {
+                return { ok: false, reason: 'Select 3 template frames first: all connectors, none, and 4 corners.' };
+            }
+
+            const anim = String(this.selectedAnimation || 'idle');
+            const keyForFrame = (idx) => {
+                const raw = (this._tileConnMap && this._tileConnMap[anim + '::' + idx]) || '00000000';
+                return this._normalizeOpenConnectionKey(raw);
+            };
+
+            const allKey = '11111111';
+            const noneKey = '00000000';
+            const cornersKey = '00001111';
+
+            const allFrameIdx = selected.find(i => keyForFrame(i) === allKey);
+            const noneFrameIdx = selected.find(i => keyForFrame(i) === noneKey);
+            const cornersFrameIdx = selected.find(i => keyForFrame(i) === cornersKey);
+
+            if (allFrameIdx === undefined || noneFrameIdx === undefined || cornersFrameIdx === undefined) {
+                return { ok: false, reason: 'Multi-select must include frames tagged as 11111111, 00000000, and 00001111.' };
+            }
+
+            const sheet = this.currentSprite;
+            if (!sheet || typeof sheet.getFrame !== 'function' || typeof sheet.insertFrame !== 'function') {
+                return { ok: false, reason: 'Sprite sheet is not ready.' };
+            }
+
+            const frameAll = sheet.getFrame(anim, allFrameIdx);
+            const frameNone = sheet.getFrame(anim, noneFrameIdx);
+            const frameCorners = sheet.getFrame(anim, cornersFrameIdx);
+            if (!frameAll || !frameNone || !frameCorners) {
+                return { ok: false, reason: 'Could not read one or more selected template frames.' };
+            }
+
+            const px = Math.max(1, Number(sheet.slicePx) || Number(frameNone.width) || 16);
+            const edgeW = Math.max(1, Math.min(px, Math.floor(Number(widthPx) || 1)));
+
+            if (!this._tileConnMap || typeof this._tileConnMap !== 'object') this._tileConnMap = {};
+
+            const existing = new Set();
+            const logicalCount = Math.max(1, Number(this._getAnimationLogicalFrameCount(anim)) || 1);
+            for (let i = 0; i < logicalCount; i++) {
+                const raw = this._tileConnMap[anim + '::' + i];
+                if (typeof raw !== 'string') continue;
+                existing.add(this._normalizeOpenConnectionKey(raw));
+            }
+
+            const targetKeys = this._getAllValidOpenConnectionKeys();
+            const srcAreas = {
+                top: [0, 0, px, edgeW],
+                right: [px - edgeW, 0, edgeW, px],
+                bottom: [0, px - edgeW, px, edgeW],
+                left: [0, 0, edgeW, px],
+                tl: [0, 0, edgeW, edgeW],
+                tr: [px - edgeW, 0, edgeW, edgeW],
+                br: [px - edgeW, px - edgeW, edgeW, edgeW],
+                bl: [0, px - edgeW, edgeW, edgeW]
+            };
+
+            const copyRect = (dstCtx, srcCanvas, rect) => {
+                const [sx, sy, sw, sh] = rect;
+                dstCtx.drawImage(srcCanvas, sx, sy, sw, sh, sx, sy, sw, sh);
+            };
+
+            let created = 0;
+            for (const key of targetKeys) {
+                if (existing.has(key)) continue;
+                const bits = key.split('');
+
+                const out = document.createElement('canvas');
+                out.width = px;
+                out.height = px;
+                const octx = out.getContext('2d');
+                if (!octx) continue;
+
+                octx.clearRect(0, 0, px, px);
+                octx.drawImage(frameNone, 0, 0, px, px);
+
+                if (bits[0] === '1') copyRect(octx, frameAll, srcAreas.top);
+                if (bits[1] === '1') copyRect(octx, frameAll, srcAreas.right);
+                if (bits[2] === '1') copyRect(octx, frameAll, srcAreas.bottom);
+                if (bits[3] === '1') copyRect(octx, frameAll, srcAreas.left);
+
+                const drawCorner = (cornerBitIndex, edgeAIndex, edgeBIndex, area) => {
+                    if (bits[cornerBitIndex] !== '1') return;
+                    const neighborEdge = bits[edgeAIndex] === '1' || bits[edgeBIndex] === '1';
+                    copyRect(octx, neighborEdge ? frameAll : frameCorners, area);
+                };
+
+                drawCorner(4, 0, 3, srcAreas.tl);
+                drawCorner(5, 0, 1, srcAreas.tr);
+                drawCorner(6, 1, 2, srcAreas.br);
+                drawCorner(7, 2, 3, srcAreas.bl);
+
+                const insertAt = Math.max(0, Number(this._getAnimationLogicalFrameCount(anim)) || 0);
+                sheet.insertFrame(anim);
+                const dstFrame = sheet.getFrame(anim, insertAt);
+                const dctx = dstFrame && dstFrame.getContext ? dstFrame.getContext('2d') : null;
+                if (!dctx) continue;
+                dctx.clearRect(0, 0, px, px);
+                dctx.drawImage(out, 0, 0, px, px);
+                this._tileConnMap[anim + '::' + insertAt] = key;
+                existing.add(key);
+                created++;
+            }
+
+            try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
+            return { ok: true, created };
+        } catch (e) {
+            return { ok: false, reason: String((e && e.message) || e || 'Unknown error') };
+        }
     }
 
     _chooseBestFrameByConnections(desiredClosedKey, anim) {
