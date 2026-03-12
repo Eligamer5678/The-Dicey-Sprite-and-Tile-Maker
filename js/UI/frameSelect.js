@@ -650,6 +650,88 @@ export default class FrameSelect {
         }
     }
 
+    _isAnimationBase47(animName){
+        try {
+            const scene = this.scene;
+            const anim = String(animName || '').trim();
+            if (!scene || !anim) return false;
+            const count = (typeof scene._getAnimationLogicalFrameCount === 'function')
+                ? Math.max(0, Number(scene._getAnimationLogicalFrameCount(anim)) | 0)
+                : Math.max(0, (((this.sprite && this.sprite._frames) ? this.sprite._frames.get(anim) : null) || []).length | 0);
+            if (count < 47) return false;
+            const map = (scene._tileConnMap && typeof scene._tileConnMap === 'object') ? scene._tileConnMap : null;
+            if (!map) return false;
+            let seen = 0;
+            for (let i = 0; i < 47; i++) {
+                const k = anim + '::' + i;
+                if (typeof map[k] === 'string' && map[k].length > 0) seen++;
+            }
+            return seen >= 47;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _hydrateBase47ConnForAnim(animName, overwrite = false){
+        try {
+            const scene = this.scene;
+            const anim = String(animName || '').trim();
+            if (!scene || !anim) return 0;
+            const count = (typeof scene._getAnimationLogicalFrameCount === 'function')
+                ? Math.max(0, Number(scene._getAnimationLogicalFrameCount(anim)) | 0)
+                : Math.max(0, (((this.sprite && this.sprite._frames) ? this.sprite._frames.get(anim) : null) || []).length | 0);
+            if (count < 47) return 0;
+            if (!scene._tileConnMap || typeof scene._tileConnMap !== 'object') scene._tileConnMap = {};
+            const order = this._getBase47ConnectionOrder();
+            let wrote = 0;
+            for (let i = 0; i < 47; i++) {
+                const k = anim + '::' + i;
+                const existing = scene._tileConnMap[k];
+                if (!overwrite && typeof existing === 'string' && existing.length > 0) continue;
+                scene._tileConnMap[k] = this._normalizeOpenConnKey(order[i] || '00000000');
+                wrote++;
+            }
+            return wrote;
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    _hydrateMissingBase47Connections(preferredAnim = null){
+        try {
+            const scene = this.scene;
+            const sprite = this.sprite;
+            if (!scene || !sprite || !sprite._frames) return 0;
+            const names = Array.from(sprite._frames.keys()).map((n) => String(n || '').trim()).filter(Boolean);
+            let total = 0;
+            for (const anim of names) total += this._hydrateBase47ConnForAnim(anim, false);
+
+            // If a preferred anim exists and looks like base47, mirror to "idle" when idle is also 47 frames.
+            const preferred = String(preferredAnim || '').trim();
+            if (preferred && preferred !== 'idle') {
+                const idleCount = (typeof scene._getAnimationLogicalFrameCount === 'function')
+                    ? Math.max(0, Number(scene._getAnimationLogicalFrameCount('idle')) | 0)
+                    : Math.max(0, (((sprite && sprite._frames) ? sprite._frames.get('idle') : null) || []).length | 0);
+                if (idleCount === 47) {
+                    if (!scene._tileConnMap || typeof scene._tileConnMap !== 'object') scene._tileConnMap = {};
+                    for (let i = 0; i < 47; i++) {
+                        const src = scene._tileConnMap[preferred + '::' + i];
+                        const dstKey = 'idle::' + i;
+                        const dst = scene._tileConnMap[dstKey];
+                        if (typeof dst === 'string' && dst.length > 0) continue;
+                        if (typeof src === 'string' && src.length > 0) {
+                            scene._tileConnMap[dstKey] = this._normalizeOpenConnKey(src);
+                            total++;
+                        }
+                    }
+                }
+            }
+            return total;
+        } catch (e) {
+            return 0;
+        }
+    }
+
     _buildBase47SpriteSheetFromImage(imgSource, slice){
         const s = Math.max(1, Number(slice) | 0);
         const ss = new SpriteSheet(imgSource, s);
@@ -827,6 +909,7 @@ export default class FrameSelect {
 
         let mapWidth = 0, mapHeight = 0;
         let gids = [];
+        let tileLayerInfos = [];
         let spriteObjects = [];
         let tsxInfo = null;
         let mapBaseName = this._stripExtension(this._basenameFromPath(primaryFile && primaryFile.name ? primaryFile.name : ''));
@@ -853,13 +936,22 @@ export default class FrameSelect {
                 tsxInfo = this._extractTsxInfo(tsxDoc);
             }
 
-            const layerEl = mapEl.querySelector('layer');
-            if (!layerEl) throw new Error('Invalid TMX: missing <layer>');
-            gids = this._readTmxDataToGids(layerEl.querySelector('data'), mapWidth, mapHeight);
+            const layerEls = mapEl.querySelectorAll('layer');
+            if (!layerEls || layerEls.length === 0) throw new Error('Invalid TMX: missing <layer>');
+            tileLayerInfos = [];
+            let layerCounter = 1;
+            for (const layerEl of layerEls) {
+                const lname = String(layerEl.getAttribute('name') || ('Tile Layer ' + layerCounter)).trim() || ('Tile Layer ' + layerCounter);
+                const lgids = this._readTmxDataToGids(layerEl.querySelector('data'), mapWidth, mapHeight);
+                tileLayerInfos.push({ name: lname, gids: lgids });
+                layerCounter++;
+            }
+            gids = (tileLayerInfos[0] && Array.isArray(tileLayerInfos[0].gids)) ? tileLayerInfos[0].gids.slice() : [];
 
             const objLayers = mapEl.querySelectorAll('objectgroup');
             spriteObjects = [];
             for (const g of objLayers) {
+                const groupName = String(g.getAttribute('name') || '').trim();
                 const objs = g.querySelectorAll('object');
                 for (const o of objs) {
                     const x = Number(o.getAttribute('x') || 0);
@@ -876,7 +968,7 @@ export default class FrameSelect {
                     }
                     const nm = String(o.getAttribute('name') || '').trim();
                     const ty = String(o.getAttribute('type') || '').trim();
-                    spriteObjects.push({ x, y, name: nm, type: ty, props: p });
+                    spriteObjects.push({ x, y, name: nm, type: ty, props: p, layerName: groupName || '' });
                 }
             }
         } else {
@@ -884,6 +976,7 @@ export default class FrameSelect {
             mapWidth = Math.max(1, Number(tsxInfo.columns) || 1);
             mapHeight = Math.max(1, Math.ceil((Number(tsxInfo.tilecount) || 1) / mapWidth));
             gids = new Array(mapWidth * mapHeight).fill(0).map((_, i) => (i + 1));
+            tileLayerInfos = [{ name: 'Tile Layer 1', gids: gids.slice() }];
             spriteObjects = [];
             mapBaseName = this._stripExtension(this._basenameFromPath(primaryFile && primaryFile.name ? primaryFile.name : '')) || mapBaseName;
         }
@@ -898,7 +991,7 @@ export default class FrameSelect {
         const cols = Math.max(1, Number(tsxInfo.columns) || Math.floor((Number(tsxInfo.imageWidth) || slice) / slice) || 1);
         const rows = Math.max(1, Math.ceil((Number(tsxInfo.tilecount) || 1) / cols));
 
-        const ss = new SpriteSheet(imgSource, slice);
+        let ss = new SpriteSheet(imgSource, slice);
         ss._frames = new Map();
         const tilecount = Math.max(1, Number(tsxInfo.tilecount) || (rows * cols));
         const hasSourceAnimMeta = (() => {
@@ -912,6 +1005,30 @@ export default class FrameSelect {
 
         if (hasSourceAnimMeta) {
             const byAnim = new Map();
+        const looksLikeBase47Tileset = (() => {
+            try {
+                const iw = Math.max(1, Number(tsxInfo.imageWidth) || Number(imgSource.width) || (cols * slice));
+                const ih = Math.max(1, Number(tsxInfo.imageHeight) || Number(imgSource.height) || (rows * slice));
+                const gridCols = Math.max(1, Math.floor(iw / slice));
+                const gridRows = Math.max(1, Math.floor(ih / slice));
+                const byGrid = (gridCols === 7 && gridRows === 7);
+                const byAttrs = (cols === 7) && (Math.ceil(tilecount / Math.max(1, cols)) === 7);
+                const bySquarePixels = (iw === ih) && ((iw % 7) === 0);
+                return !!(byGrid || byAttrs || bySquarePixels);
+            } catch (e) {
+                return false;
+            }
+        })();
+        let implicitBase47 = false;
+        let implicitBase47Anim = 'anim0';
+            const base47ConnByAnim = new Map();
+            const base47Order = this._getBase47ConnectionOrder();
+            const base47SlotToConn = new Map();
+            for (let i = 0; i < base47Order.length; i++) {
+                const slot = this._base47SlotFromOrderIndex(i);
+                if (slot < 0) continue;
+                base47SlotToConn.set(slot, base47Order[i]);
+            }
             for (const [tidRaw, props] of tsxInfo.perTile.entries()) {
                 const tid = Number(tidRaw) | 0;
                 if (!Number.isFinite(tid) || tid < 0 || tid >= tilecount) continue;
@@ -925,6 +1042,42 @@ export default class FrameSelect {
                 const frameMap = byAnim.get(anim);
                 if (!frameMap.has(index)) {
                     frameMap.set(index, { __lazy: true, src: imgSource, sx, sy, w: slice, h: slice });
+                }
+
+                if (props && String(props.source_base47 || '').toLowerCase() === 'true') {
+                    let conn = String(props.source_base47_conn || '').trim();
+                    if (!conn) {
+                        const slot = Number(props.source_base47_slot);
+                        if (Number.isFinite(slot)) {
+                            const bySlot = base47SlotToConn.get(slot | 0);
+                            if (typeof bySlot === 'string' && bySlot.length > 0) conn = bySlot;
+                        }
+                    }
+                    if (!conn && Number.isFinite(index) && index >= 0 && index < base47Order.length) {
+                        const byIndex = base47Order[index | 0];
+                        if (typeof byIndex === 'string' && byIndex.length > 0) conn = byIndex;
+                    }
+                    if (conn) {
+                        if (!base47ConnByAnim.has(anim)) base47ConnByAnim.set(anim, {});
+                        base47ConnByAnim.get(anim)[index] = this._normalizeOpenConnKey(conn);
+                    }
+                }
+            }
+
+            // Compatibility fallback for TMX/TSX that preserved source_anim/source_index
+            // but dropped explicit base47 metadata.
+            if (looksLikeBase47Tileset) {
+                for (const [anim, frameMap] of byAnim.entries()) {
+                    if (base47ConnByAnim.has(anim)) continue;
+                    if (!frameMap || typeof frameMap.has !== 'function') continue;
+                    let contiguous = true;
+                    for (let i = 0; i < 47; i++) {
+                        if (!frameMap.has(i)) { contiguous = false; break; }
+                    }
+                    if (!contiguous) continue;
+                    const inferred = {};
+                    for (let i = 0; i < 47; i++) inferred[i] = this._normalizeOpenConnKey(base47Order[i]);
+                    base47ConnByAnim.set(anim, inferred);
                 }
             }
 
@@ -941,15 +1094,35 @@ export default class FrameSelect {
                 ss._frames.set(anim, frames);
             }
             if (ss._frames.size === 0) ss._frames.set('anim0', []);
+            ss._importedBase47ConnByAnim = base47ConnByAnim;
         } else {
-            for (let r = 0; r < rows; r++) {
-                const frames = [];
-                for (let c = 0; c < cols; c++) {
-                    const tid = r * cols + c;
-                    if (tid >= tilecount) break;
-                    frames.push({ __lazy: true, src: imgSource, sx: c * slice, sy: r * slice, w: slice, h: slice });
+            if (looksLikeBase47Tileset) {
+                const built = this._buildBase47SpriteSheetFromImage(imgSource, slice);
+                if (built && built.ss) {
+                    ss = built.ss;
+                    implicitBase47 = true;
+                    implicitBase47Anim = String(built.anim || 'anim0');
+                    const inferredConn = new Map();
+                    const byIndex = {};
+                    const src = (built.connByIndex && typeof built.connByIndex === 'object') ? built.connByIndex : {};
+                    for (const idxRaw of Object.keys(src)) {
+                        const idx = Number(idxRaw) | 0;
+                        byIndex[idx] = this._normalizeOpenConnKey(src[idxRaw]);
+                    }
+                    inferredConn.set(implicitBase47Anim, byIndex);
+                    ss._importedBase47ConnByAnim = inferredConn;
                 }
-                ss._frames.set('anim' + r, frames);
+            }
+            if (!implicitBase47) {
+                for (let r = 0; r < rows; r++) {
+                    const frames = [];
+                    for (let c = 0; c < cols; c++) {
+                        const tid = r * cols + c;
+                        if (tid >= tilecount) break;
+                        frames.push({ __lazy: true, src: imgSource, sx: c * slice, sy: r * slice, w: slice, h: slice });
+                    }
+                    ss._frames.set('anim' + r, frames);
+                }
             }
         }
 
@@ -972,6 +1145,28 @@ export default class FrameSelect {
                     if (!entry) continue;
                     const animName = String(entry.name || '').trim();
                     if (!animName) continue;
+                    const sheetName = String(entry.sheet || '').trim();
+                    const rowFromSheet = Number(entry.row);
+                    const framesFromSheet = Number(entry.frames);
+                    if (sheetName && Number.isFinite(rowFromSheet) && Number.isFinite(framesFromSheet) && framesFromSheet > 0) {
+                        const sheetKey = this._basenameFromPath(sheetName).toLowerCase();
+                        const sheetFile = byBase.get(sheetKey);
+                        if (sheetFile) {
+                            const sheetSource = await this._decodeImageFile(sheetFile);
+                            if (sheetSource) {
+                                const row = Math.max(0, rowFromSheet | 0);
+                                const frameCount = Math.max(0, framesFromSheet | 0);
+                                const frames = [];
+                                for (let i = 0; i < frameCount; i++) {
+                                    frames.push({ __lazy: true, src: sheetSource, sx: i * slice, sy: row * slice, w: slice, h: slice });
+                                }
+                                if (frames.length > 0) {
+                                    ss._frames.set(animName, frames);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     const frameNames = Array.isArray(entry.frames) ? entry.frames : [];
                     const frames = [];
                     for (const fn of frameNames) {
@@ -990,6 +1185,32 @@ export default class FrameSelect {
                     }
                     if (frames.length > 0) {
                         ss._frames.set(animName, frames);
+                    }
+                }
+
+                const sheetEntries = Array.isArray(parsed && parsed.spriteSheets) ? parsed.spriteSheets : [];
+                for (const sheetEntry of sheetEntries) {
+                    if (!sheetEntry) continue;
+                    const sheetFileName = String(sheetEntry.file || '').trim();
+                    if (!sheetFileName) continue;
+                    const key = this._basenameFromPath(sheetFileName).toLowerCase();
+                    const sheetFile = byBase.get(key);
+                    if (!sheetFile) continue;
+                    const sheetSource = await this._decodeImageFile(sheetFile);
+                    if (!sheetSource) continue;
+                    const rows = Array.isArray(sheetEntry.rows) ? sheetEntry.rows : [];
+                    for (const rowEntry of rows) {
+                        if (!rowEntry) continue;
+                        const animName = String(rowEntry.anim || '').trim();
+                        if (!animName) continue;
+                        const row = Math.max(0, Number(rowEntry.row) | 0);
+                        const frameCount = Math.max(0, Number(rowEntry.frames) | 0);
+                        if (frameCount <= 0) continue;
+                        const frames = [];
+                        for (let i = 0; i < frameCount; i++) {
+                            frames.push({ __lazy: true, src: sheetSource, sx: i * slice, sy: row * slice, w: slice, h: slice });
+                        }
+                        if (frames.length > 0) ss._frames.set(animName, frames);
                     }
                 }
             }
@@ -1012,6 +1233,7 @@ export default class FrameSelect {
             this.scene._tileIndexToCoord = [];
             this.scene._areaBindings = [];
             this.scene._areaTransforms = [];
+            this.scene._tileLayers = [];
 
             const midC = Math.floor(mapWidth / 2);
             const midR = Math.floor(mapHeight / 2);
@@ -1021,44 +1243,73 @@ export default class FrameSelect {
             const MASK = 0x1FFFFFFF;
             const defaultAnimForTileFallback = (animNames && animNames.length > 0) ? String(animNames[0]) : 'anim0';
 
-            for (let r = 0; r < mapHeight; r++) {
-                for (let c = 0; c < mapWidth; c++) {
-                    const idx1d = r * mapWidth + c;
-                    const raw = (gids[idx1d] >>> 0) || 0;
-                    if (!raw) continue;
-                    const gid = raw & MASK;
-                    if (!gid) continue;
-                    const tileId = Math.max(0, gid - 1);
-                    const col = c - midC;
-                    const row = r - midR;
-                    this.scene._activateTile(col, row);
-                    const areaIndex = this.scene._getAreaIndexForCoord(col, row);
-                    if (!Number.isFinite(areaIndex)) continue;
+            const importLayers = (Array.isArray(tileLayerInfos) && tileLayerInfos.length > 0)
+                ? tileLayerInfos
+                : [{ name: 'Tile Layer 1', gids: Array.isArray(gids) ? gids.slice() : [] }];
+            this.scene._tileLayers = importLayers.map((l, i) => ({
+                name: String((l && l.name) || ('Tile Layer ' + (i + 1))).trim() || ('Tile Layer ' + (i + 1)),
+                visibility: 0,
+                bindings: [],
+                transforms: []
+            }));
 
-                    const tileProps = tsxInfo.perTile.get(tileId) || {};
-                    const fallbackAnim = hasSourceAnimMeta ? defaultAnimForTileFallback : ('anim' + Math.floor(tileId / cols));
-                    const fallbackFrame = hasSourceAnimMeta ? 0 : (tileId % cols);
-                    const anim = String(tileProps.source_anim || fallbackAnim);
-                    const frameIndex = Number.isFinite(Number(tileProps.source_index)) ? (Number(tileProps.source_index) | 0) : fallbackFrame;
-                    let multiFrames = null;
-                    if (tileProps.source_multiFrames) {
-                        try {
-                            const parsed = JSON.parse(String(tileProps.source_multiFrames));
-                            if (Array.isArray(parsed) && parsed.length > 0) multiFrames = parsed.filter(n => Number.isFinite(Number(n))).map(n => Number(n) | 0);
-                        } catch (e) {}
-                    }
-                    this.scene._setAreaBindingAtIndex(areaIndex, { anim, index: frameIndex, multiFrames: (multiFrames && multiFrames.length > 0) ? multiFrames : null }, false);
+            for (let li = 0; li < importLayers.length; li++) {
+                const srcLayer = importLayers[li] || {};
+                const srcGids = Array.isArray(srcLayer.gids) ? srcLayer.gids : [];
+                const dstLayer = this.scene._tileLayers[li];
+                for (let r = 0; r < mapHeight; r++) {
+                    for (let c = 0; c < mapWidth; c++) {
+                        const idx1d = r * mapWidth + c;
+                        const raw = (srcGids[idx1d] >>> 0) || 0;
+                        if (!raw) continue;
+                        const gid = raw & MASK;
+                        if (!gid) continue;
+                        const tileId = Math.max(0, gid - 1);
+                        const col = c - midC;
+                        const row = r - midR;
+                        this.scene._activateTile(col, row);
+                        const areaIndex = this.scene._getAreaIndexForCoord(col, row);
+                        if (!Number.isFinite(areaIndex)) continue;
 
-                    const hasH = !!(raw & H_FLIP);
-                    const hasV = !!(raw & V_FLIP);
-                    const hasD = !!(raw & D_FLIP);
-                    const propRot = Number(tileProps.source_rot || 0);
-                    const propFlipH = String(tileProps.source_flipH || '').toLowerCase() === 'true';
-                    if (hasH || hasV || hasD || propRot || propFlipH) {
-                        this.scene._setAreaTransformAtIndex(areaIndex, { rot: propRot || 0, flipH: !!(propFlipH || hasH) }, false);
+                        const tileProps = tsxInfo.perTile.get(tileId) || {};
+                        let fallbackAnim = hasSourceAnimMeta ? defaultAnimForTileFallback : ('anim' + Math.floor(tileId / cols));
+                        let fallbackFrame = hasSourceAnimMeta ? 0 : (tileId % cols);
+                        if (!hasSourceAnimMeta && implicitBase47) {
+                            const slot = tileId | 0;
+                            // Bottom-left two slots are intentionally blank in base47 7x7 atlases.
+                            if (slot === 42 || slot === 43) continue;
+                            const orderIdx = slot >= 42 ? (slot - 2) : slot;
+                            if (orderIdx < 0 || orderIdx >= 47) continue;
+                            fallbackAnim = implicitBase47Anim;
+                            fallbackFrame = orderIdx;
+                        }
+                        const anim = String(tileProps.source_anim || fallbackAnim);
+                        const frameIndex = Number.isFinite(Number(tileProps.source_index)) ? (Number(tileProps.source_index) | 0) : fallbackFrame;
+                        let multiFrames = null;
+                        if (tileProps.source_multiFrames) {
+                            try {
+                                const parsed = JSON.parse(String(tileProps.source_multiFrames));
+                                if (Array.isArray(parsed) && parsed.length > 0) multiFrames = parsed.filter(n => Number.isFinite(Number(n))).map(n => Number(n) | 0);
+                            } catch (e) {}
+                        }
+                        dstLayer.bindings[areaIndex] = { anim, index: frameIndex, multiFrames: (multiFrames && multiFrames.length > 0) ? multiFrames : null };
+
+                        const hasH = !!(raw & H_FLIP);
+                        const hasV = !!(raw & V_FLIP);
+                        const hasD = !!(raw & D_FLIP);
+                        const propRot = Number(tileProps.source_rot || 0);
+                        const propFlipH = String(tileProps.source_flipH || '').toLowerCase() === 'true';
+                        if (hasH || hasV || hasD || propRot || propFlipH) {
+                            dstLayer.transforms[areaIndex] = { rot: propRot || 0, flipH: !!(propFlipH || hasH) };
+                        }
                     }
                 }
             }
+
+            this.scene._activeTileLayerIndex = 0;
+            if (typeof this.scene._syncActiveTileLayerReferences === 'function') this.scene._syncActiveTileLayerReferences();
+            this.scene._areaBindings = this.scene._tileLayers[0] ? this.scene._tileLayers[0].bindings : [];
+            this.scene._areaTransforms = this.scene._tileLayers[0] ? this.scene._tileLayers[0].transforms : [];
 
             try {
                 const layer = this.scene._normalizeSpriteLayerState();
@@ -1090,6 +1341,9 @@ export default class FrameSelect {
                             }
                         }
                         const created = this.scene._addSpriteEntityAt(col, row, anim, false);
+                        if (created && s && s.layerName && typeof this.scene._updateSpriteEntity === 'function') {
+                            this.scene._updateSpriteEntity(created.id, { layerName: String(s.layerName || '') }, false);
+                        }
                         if (created && s.props && Object.prototype.hasOwnProperty.call(s.props, 'fps')) {
                             const n = Number(s.props.fps);
                             if (Number.isFinite(n)) this.scene._updateSpriteEntity(created.id, { fps: n }, false);
@@ -1097,6 +1351,28 @@ export default class FrameSelect {
                     }
                 }
             } catch (e) {}
+
+            try {
+                const connByAnim = (ss && ss._importedBase47ConnByAnim instanceof Map) ? ss._importedBase47ConnByAnim : null;
+                if (connByAnim && connByAnim.size > 0) {
+                    if (!this.scene._tileConnMap || typeof this.scene._tileConnMap !== 'object') this.scene._tileConnMap = {};
+                    for (const [animName, byIndex] of connByAnim.entries()) {
+                        if (!byIndex || typeof byIndex !== 'object') continue;
+                        for (const idxRaw of Object.keys(byIndex)) {
+                            const idx = Number(idxRaw) | 0;
+                            const key = this._normalizeOpenConnKey(byIndex[idxRaw]);
+                            this.scene._tileConnMap[String(animName) + '::' + idx] = key;
+                        }
+                    }
+                }
+            } catch (e) {}
+
+            try {
+                const preferred = String(this.scene.selectedAnimation || '');
+                this._hydrateMissingBase47Connections(preferred);
+            } catch (e) {}
+
+            try { if (ss && Object.prototype.hasOwnProperty.call(ss, '_importedBase47ConnByAnim')) delete ss._importedBase47ConnByAnim; } catch (e) {}
 
             try { if (typeof ss._materializeAnimation === 'function') ss._materializeAnimation(this.scene.selectedAnimation); } catch (e) {}
         }
@@ -1167,22 +1443,35 @@ export default class FrameSelect {
             if (isNaN(slice) || slice <= 0) slice = defaultSlice;
             const srcW = bitmap ? bitmap.width : img.width;
             const srcH = bitmap ? bitmap.height : img.height;
-            const cols = Math.max(1, Math.floor(srcW / slice));
-            const rows = Math.max(1, Math.floor(srcH / slice));
+            const likelyBase47ByDimensions = (srcW === srcH) && ((srcW % 7) === 0);
+            // If the image strongly looks like a 7x7 atlas, prefer base47 import automatically.
+            if (likelyBase47ByDimensions && importMode !== 'base47') {
+                importMode = 'base47';
+            }
 
-            const autoDetectedBase47 = this._detectBase47Layout(bitmap || img, slice, cols, rows);
+            let effectiveSlice = slice;
+            // Base47 sheets are 7x7, so infer tile size from image dimensions when possible.
+            if (importMode === 'base47' && likelyBase47ByDimensions) {
+                const inferred = Math.max(1, Math.floor(srcW / 7));
+                if (Number.isFinite(inferred) && inferred > 0) effectiveSlice = inferred;
+            }
+
+            const cols = Math.max(1, Math.floor(srcW / effectiveSlice));
+            const rows = Math.max(1, Math.floor(srcH / effectiveSlice));
+
+            const autoDetectedBase47 = likelyBase47ByDimensions || this._detectBase47Layout(bitmap || img, effectiveSlice, cols, rows);
             const useBase47 = (importMode === 'base47') || (importMode === 'tilesheet' && autoDetectedBase47);
             let base47Meta = null;
-            console.log('Importing spritesheet:', file.name, 'img', srcW + 'x' + srcH, 'slice', slice, 'cols', cols, 'rows', rows, 'mode', importMode);
+            console.log('Importing spritesheet:', file.name, 'img', srcW + 'x' + srcH, 'slice', effectiveSlice, 'cols', cols, 'rows', rows, 'mode', importMode);
             // Build SpriteSheet
             let ss = null;
             if (useBase47) {
-                const built = this._buildBase47SpriteSheetFromImage(bitmap || img, slice);
+                const built = this._buildBase47SpriteSheetFromImage(bitmap || img, effectiveSlice);
                 ss = built && built.ss ? built.ss : null;
                 base47Meta = built || null;
                 if (!ss) throw new Error('Failed to build base47 sprite sheet from image.');
             } else {
-                ss = new SpriteSheet(img, slice);
+                ss = new SpriteSheet(img, effectiveSlice);
                 ss._frames = new Map();
                 let counter = 0;
                 for (let r = 0; r < rows; r++){
@@ -1192,10 +1481,10 @@ export default class FrameSelect {
                         const desc = {
                             __lazy: true,
                             src: bitmap || img,
-                            sx: c * slice,
-                            sy: r * slice,
-                            w: slice,
-                            h: slice
+                            sx: c * effectiveSlice,
+                            sy: r * effectiveSlice,
+                            w: effectiveSlice,
+                            h: effectiveSlice
                         };
                         frames.push(desc);
                     }
@@ -1322,6 +1611,7 @@ export default class FrameSelect {
                             this.scene.selectedFrame = 0;
                         } catch (e) { console.warn('base47 connection assignment failed', e); }
                     }
+                    try { this._hydrateMissingBase47Connections(this.scene.selectedAnimation || firstAnim || ''); } catch (e) {}
                 }
                 this.sprite = ss;
             }
@@ -1605,7 +1895,7 @@ export default class FrameSelect {
                                 const anim = (binding && binding.anim !== undefined) ? String(binding.anim) : fallbackAnim;
                                 const index = (binding && binding.index !== undefined && Number.isFinite(Number(binding.index))) ? (Number(binding.index) | 0) : fallbackIndex;
                                 const entry = { col: t.col, row: t.row, anim, index };
-                                if (Array.isArray(binding.multiFrames) && binding.multiFrames.length > 0) entry.multiFrames = binding.multiFrames.slice();
+                                if (binding && Array.isArray(binding.multiFrames) && binding.multiFrames.length > 0) entry.multiFrames = binding.multiFrames.slice();
                                 const transform = (Number.isFinite(idx) && Array.isArray(scene._areaTransforms)) ? scene._areaTransforms[idx] : null;
                                 if (transform && ((transform.rot||0)!==0 || transform.flipH)) entry.transform = { rot: transform.rot||0, flipH: !!transform.flipH };
                                 arr.push(entry);
@@ -1708,67 +1998,399 @@ export default class FrameSelect {
                 const baseName = this._stripExtension(baseInput) || defaultName || 'map';
                 const mapFileName = baseName + '.tmx';
                 const tilesetFileName = baseName + '.tsx';
-                const imageFileName = baseName + '.png';
+                const imageFileName = baseName + '.tileset.png';
                 const zipFileName = baseName + '.zip';
-
-                const pngBlob = await new Promise((res) => exportCanvas.toBlob((b) => res(b), 'image/png'));
-                if (!pngBlob) {
-                    alert('Failed to create tileset PNG for TMX export.');
-                    return;
-                }
 
                 const width = tiles.cols | 0;
                 const height = tiles.rows | 0;
                 const slice = tiles.slice | 0;
-                const gidGrid = new Array(Math.max(1, width * height)).fill(0);
                 const bindByLocal = new Map();
                 for (const b of (Array.isArray(tiles.bindings) ? tiles.bindings : [])) {
                     if (!b) continue;
                     const lc = (Number(b.col) | 0) - (tiles.minCol | 0);
                     const lr = (Number(b.row) | 0) - (tiles.minRow | 0);
                     if (lc < 0 || lr < 0 || lc >= width || lr >= height) continue;
-                    const localId = lr * width + lc;
-                    bindByLocal.set(localId, b);
+                    bindByLocal.set(lr * width + lc, b);
                 }
+
+                const usedTileAnims = new Set();
+                const addUsedTileAnim = (rawAnim) => {
+                    const anim = String(rawAnim || '').trim();
+                    if (!anim) return;
+                    if (this.sprite && this.sprite._frames && !this.sprite._frames.has(anim)) return;
+                    usedTileAnims.add(anim);
+                };
+                for (const b of bindByLocal.values()) {
+                    addUsedTileAnim(b && b.anim);
+                }
+
+                // Include bindings from all tile layers so non-active layers also contribute used tile animations.
+                if (this.scene && Array.isArray(this.scene._tileLayers)) {
+                    for (const layer of this.scene._tileLayers) {
+                        if (!layer || !Array.isArray(layer.bindings)) continue;
+                        for (const lb of layer.bindings) addUsedTileAnim(lb && lb.anim);
+                    }
+                }
+
+                // Keep base47 tile sets exportable even if current binding arrays are sparse.
+                if (this.scene && this.scene._tileConnMap && typeof this.scene._tileConnMap === 'object') {
+                    const base47Candidates = new Set();
+                    for (const k of Object.keys(this.scene._tileConnMap)) {
+                        const parts = String(k || '').split('::');
+                        if (parts.length !== 2) continue;
+                        const anim = String(parts[0] || '').trim();
+                        if (!anim) continue;
+                        const idx = Number(parts[1]);
+                        if (!Number.isFinite(idx)) continue;
+                        if (idx >= 0 && idx < 47) base47Candidates.add(anim);
+                    }
+                    for (const anim of base47Candidates.values()) addUsedTileAnim(anim);
+                }
+
+                const getLogicalFrameCount = (animName) => {
+                    try {
+                        if (this.scene && typeof this.scene._getAnimationLogicalFrameCount === 'function') {
+                            return Math.max(0, Number(this.scene._getAnimationLogicalFrameCount(animName)) | 0);
+                        }
+                    } catch (e) {}
+                    const arr = (this.sprite && this.sprite._frames) ? (this.sprite._frames.get(animName) || []) : [];
+                    return Math.max(0, arr.length | 0);
+                };
+
+                const buildFrameForBinding = (anim, idx, multiFrames, transform) => {
+                    const c = document.createElement('canvas');
+                    c.width = slice;
+                    c.height = slice;
+                    const ctx = c.getContext('2d');
+                    try { ctx.imageSmoothingEnabled = false; } catch (e) {}
+                    const list = (Array.isArray(multiFrames) && multiFrames.length > 0) ? multiFrames : [idx];
+                    if (transform && (transform.rot || transform.flipH)) {
+                        ctx.save();
+                        ctx.translate(slice / 2, slice / 2);
+                        if (transform.flipH) ctx.scale(-1, 1);
+                        if (transform.rot) ctx.rotate((Number(transform.rot) || 0) * Math.PI / 180);
+                        for (const fi of list) {
+                            const src = (this.scene && this.scene.currentSprite && typeof this.scene.currentSprite.getFrame === 'function')
+                                ? this.scene.currentSprite.getFrame(anim, fi)
+                                : null;
+                            if (!src) continue;
+                            try { ctx.drawImage(src, -slice / 2, -slice / 2, slice, slice); } catch (e) {}
+                        }
+                        ctx.restore();
+                    } else {
+                        for (const fi of list) {
+                            const src = (this.scene && this.scene.currentSprite && typeof this.scene.currentSprite.getFrame === 'function')
+                                ? this.scene.currentSprite.getFrame(anim, fi)
+                                : null;
+                            if (!src) continue;
+                            try { ctx.drawImage(src, 0, 0, slice, slice); } catch (e) {}
+                        }
+                    }
+                    return c;
+                };
+
+                const blocks = [];
+                const baseTileKeyToId = new Map();
+                const tilePropById = new Map();
+                const tileDrawById = new Map();
+                let runningTileCount = 0;
+
+                const activeTileLocals = [];
+                const localToAreaIndex = new Map();
                 for (const t of (Array.isArray(tiles.activeTiles) ? tiles.activeTiles : [])) {
                     if (!t) continue;
                     const lc = (Number(t.col) | 0) - (tiles.minCol | 0);
                     const lr = (Number(t.row) | 0) - (tiles.minRow | 0);
                     if (lc < 0 || lr < 0 || lc >= width || lr >= height) continue;
                     const localId = lr * width + lc;
-                    gidGrid[localId] = localId + 1;
+                    let areaIndex = null;
+                    const coordKey = `${Number(t.col) | 0},${Number(t.row) | 0}`;
+                    if (this.scene && this.scene._tileCoordToIndex && typeof this.scene._tileCoordToIndex.get === 'function') {
+                        areaIndex = this.scene._tileCoordToIndex.get(coordKey);
+                    }
+                    if (!Number.isFinite(Number(areaIndex)) && this.scene && typeof this.scene._getAreaIndexForCoord === 'function') {
+                        try { areaIndex = this.scene._getAreaIndexForCoord(Number(t.col) | 0, Number(t.row) | 0); } catch (e) { areaIndex = null; }
+                    }
+                    activeTileLocals.push({ localId, areaIndex: Number.isFinite(Number(areaIndex)) ? (Number(areaIndex) | 0) : null, col: Number(t.col) | 0, row: Number(t.row) | 0 });
+                    if (Number.isFinite(Number(areaIndex))) localToAreaIndex.set(localId, Number(areaIndex) | 0);
                 }
 
-                const tileEntries = Array.from(bindByLocal.entries()).sort((a, b) => a[0] - b[0]);
-                const tsxTileLines = tileEntries.map(([id, b]) => {
-                    const props = [];
-                    props.push(`<property name="source_anim" value="${this._xmlEscape(b.anim || '')}"/>`);
-                    props.push(`<property name="source_index" type="int" value="${Number.isFinite(Number(b.index)) ? (Number(b.index) | 0) : 0}"/>`);
-                    if (Array.isArray(b.multiFrames) && b.multiFrames.length > 0) {
-                        props.push(`<property name="source_multiFrames" value="${this._xmlEscape(JSON.stringify(b.multiFrames.map(n => Number(n) | 0)))}"/>`);
+                const animList = Array.from(usedTileAnims.values()).sort();
+                for (const anim of animList) {
+                    const isBase47 = this._isAnimationBase47(anim);
+                    if (isBase47) {
+                        const blockStart = runningTileCount;
+                        blocks.push({ anim, isBase47: true, width: 7, height: 7, start: blockStart });
+                        runningTileCount += 49;
+                        for (let i = 0; i < 47; i++) {
+                            const slot = this._base47SlotFromOrderIndex(i);
+                            if (slot < 0) continue;
+                            const tid = blockStart + slot;
+                            const src = (this.scene && this.scene.currentSprite && typeof this.scene.currentSprite.getFrame === 'function')
+                                ? this.scene.currentSprite.getFrame(anim, i)
+                                : null;
+                            if (src) tileDrawById.set(tid, src);
+                            const props = {
+                                source_anim: String(anim),
+                                source_index: i,
+                                source_base47: 'true',
+                                source_base47_slot: slot
+                            };
+                            const conn = (this.scene && this.scene._tileConnMap && typeof this.scene._tileConnMap === 'object')
+                                ? this.scene._tileConnMap[String(anim) + '::' + i]
+                                : null;
+                            if (typeof conn === 'string' && conn.length > 0) props.source_base47_conn = this._normalizeOpenConnKey(conn);
+                            tilePropById.set(tid, props);
+                            baseTileKeyToId.set(String(anim) + '::' + i, tid);
+                        }
+                    } else {
+                        const frameCount = getLogicalFrameCount(anim);
+                        const span = Math.max(1, frameCount);
+                        const blockStart = runningTileCount;
+                        blocks.push({ anim, isBase47: false, width: span, height: 1, start: blockStart, frameCount: span });
+                        runningTileCount += span;
+                        for (let i = 0; i < span; i++) {
+                            const tid = blockStart + i;
+                            const src = (this.scene && this.scene.currentSprite && typeof this.scene.currentSprite.getFrame === 'function')
+                                ? this.scene.currentSprite.getFrame(anim, i)
+                                : null;
+                            if (src) tileDrawById.set(tid, src);
+                            tilePropById.set(tid, { source_anim: String(anim), source_index: i });
+                            baseTileKeyToId.set(String(anim) + '::' + i, tid);
+                        }
                     }
-                    if (b.transform && (b.transform.rot || b.transform.flipH)) {
-                        props.push(`<property name="source_rot" type="int" value="${Number(b.transform.rot || 0) | 0}"/>`);
-                        props.push(`<property name="source_flipH" type="bool" value="${b.transform.flipH ? 'true' : 'false'}"/>`);
-                    }
-                    return `  <tile id="${id}">\n    <properties>\n      ${props.join('\n      ')}\n    </properties>\n  </tile>`;
-                }).join('\n');
+                }
 
+                const variantKeyToId = new Map();
+                const variantSpecs = [];
+                const addVariantCandidate = (binding, transform) => {
+                    if (!binding) return;
+                    const anim = String((binding.anim || '')).trim();
+                    if (!anim) return;
+                    const index = Number.isFinite(Number(binding.index)) ? (Number(binding.index) | 0) : 0;
+                    const multiFrames = Array.isArray(binding.multiFrames) ? binding.multiFrames.filter(n => Number.isFinite(Number(n))).map(n => Number(n) | 0) : null;
+                    const hasMulti = !!(multiFrames && multiFrames.length > 0);
+                    const tr = transform && typeof transform === 'object'
+                        ? { rot: Number(transform.rot || 0) | 0, flipH: !!transform.flipH }
+                        : null;
+                    const hasTransform = !!(tr && (tr.rot || tr.flipH));
+                    const baseId = baseTileKeyToId.get(anim + '::' + index);
+                    if (!hasMulti && !hasTransform && Number.isFinite(baseId)) return;
+                    const sig = JSON.stringify({ anim, index, multiFrames: hasMulti ? multiFrames : null, transform: hasTransform ? tr : null });
+                    if (variantKeyToId.has(sig)) return;
+                    const tid = runningTileCount++;
+                    variantKeyToId.set(sig, tid);
+                    variantSpecs.push({ tid, anim, index, multiFrames: hasMulti ? multiFrames : null, transform: hasTransform ? tr : null });
+                };
+
+                for (const b of bindByLocal.values()) {
+                    const tr = (b && b.transform && typeof b.transform === 'object') ? b.transform : null;
+                    addVariantCandidate(b, tr);
+                }
+                if (this.scene && Array.isArray(this.scene._tileLayers) && this.scene._tileLayers.length > 0) {
+                    for (const layer of this.scene._tileLayers) {
+                        if (!layer || !Array.isArray(layer.bindings)) continue;
+                        for (const loc of activeTileLocals) {
+                            const ai = loc && Number.isFinite(Number(loc.areaIndex)) ? (Number(loc.areaIndex) | 0) : null;
+                            if (!Number.isFinite(ai)) continue;
+                            const b = layer.bindings[ai] || null;
+                            const tr = Array.isArray(layer.transforms) ? (layer.transforms[ai] || null) : null;
+                            addVariantCandidate(b, tr);
+                        }
+                    }
+                }
+
+                if (variantSpecs.length > 0) {
+                    blocks.push({ anim: '__variants__', isBase47: false, width: variantSpecs.length, height: 1, start: runningTileCount - variantSpecs.length, frameCount: variantSpecs.length });
+                    for (let i = 0; i < variantSpecs.length; i++) {
+                        const spec = variantSpecs[i];
+                        const src = buildFrameForBinding(spec.anim, spec.index, spec.multiFrames, spec.transform);
+                        if (src) tileDrawById.set(spec.tid, src);
+                        const props = {
+                            source_anim: String(spec.anim),
+                            source_index: Number(spec.index) | 0
+                        };
+                        if (spec.multiFrames && spec.multiFrames.length > 0) {
+                            props.source_multiFrames = JSON.stringify(spec.multiFrames.map(n => Number(n) | 0));
+                        }
+                        if (spec.transform && (spec.transform.rot || spec.transform.flipH)) {
+                            props.source_rot = Number(spec.transform.rot || 0) | 0;
+                            props.source_flipH = spec.transform.flipH ? 'true' : 'false';
+                        }
+                        tilePropById.set(spec.tid, props);
+                    }
+                }
+
+                const atlasCols = Math.max(1, ...blocks.map(b => Math.max(1, Number(b.width) | 0)));
+                let atlasRows = 0;
+                for (const b of blocks) atlasRows += Math.max(1, Number(b.height) | 0);
+                atlasRows = Math.max(1, atlasRows);
+
+                const atlas = document.createElement('canvas');
+                atlas.width = atlasCols * slice;
+                atlas.height = atlasRows * slice;
+                const actx = atlas.getContext('2d');
+                try { actx.imageSmoothingEnabled = false; } catch (e) {}
+                actx.clearRect(0, 0, atlas.width, atlas.height);
+
+                const tileIdToPos = new Map();
+                let rowCursor = 0;
+                for (const b of blocks) {
+                    const blockW = Math.max(1, Number(b.width) | 0);
+                    const blockH = Math.max(1, Number(b.height) | 0);
+                    for (let by = 0; by < blockH; by++) {
+                        for (let bx = 0; bx < blockW; bx++) {
+                            const tid = (b.start | 0) + by * blockW + bx;
+                            const gx = bx;
+                            const gy = rowCursor + by;
+                            tileIdToPos.set(tid, { x: gx, y: gy });
+                        }
+                    }
+                    rowCursor += blockH;
+                }
+
+                for (const [tid, src] of tileDrawById.entries()) {
+                    const p = tileIdToPos.get(tid);
+                    if (!p || !src) continue;
+                    try { actx.drawImage(src, p.x * slice, p.y * slice, slice, slice); } catch (e) {}
+                }
+
+                // Remap local tile ids to global atlas ids so TSX id->pixel math stays correct on import.
+                const localToGlobalId = new Map();
+                for (const [localId, p] of tileIdToPos.entries()) {
+                    if (!p) continue;
+                    localToGlobalId.set(localId, ((Number(p.y) | 0) * atlasCols) + (Number(p.x) | 0));
+                }
+                const remapId = (id) => {
+                    if (!Number.isFinite(Number(id))) return null;
+                    const mapped = localToGlobalId.get(Number(id) | 0);
+                    return Number.isFinite(mapped) ? (mapped | 0) : null;
+                };
+
+                const tilePropByGlobalId = new Map();
+                for (const [localId, props] of tilePropById.entries()) {
+                    const gid = remapId(localId);
+                    if (!Number.isFinite(gid)) continue;
+                    tilePropByGlobalId.set(gid, props);
+                }
+
+                const baseTileKeyToGlobalId = new Map();
+                for (const [k, localId] of baseTileKeyToId.entries()) {
+                    const gid = remapId(localId);
+                    if (!Number.isFinite(gid)) continue;
+                    baseTileKeyToGlobalId.set(k, gid);
+                }
+
+                const variantKeyToGlobalId = new Map();
+                for (const [k, localId] of variantKeyToId.entries()) {
+                    const gid = remapId(localId);
+                    if (!Number.isFinite(gid)) continue;
+                    variantKeyToGlobalId.set(k, gid);
+                }
+
+                const resolveGlobalTileId = (binding, transform) => {
+                    if (!binding) return null;
+                    const anim = String((binding.anim || '')).trim();
+                    if (!anim) return null;
+                    const index = Number.isFinite(Number(binding.index)) ? (Number(binding.index) | 0) : 0;
+                    const multiFrames = Array.isArray(binding.multiFrames) ? binding.multiFrames.filter(n => Number.isFinite(Number(n))).map(n => Number(n) | 0) : null;
+                    const hasMulti = !!(multiFrames && multiFrames.length > 0);
+                    const tr = transform && typeof transform === 'object'
+                        ? { rot: Number(transform.rot || 0) | 0, flipH: !!transform.flipH }
+                        : null;
+                    const hasTransform = !!(tr && (tr.rot || tr.flipH));
+                    let tileId = null;
+                    if (!hasMulti && !hasTransform) tileId = baseTileKeyToGlobalId.get(anim + '::' + index);
+                    if (!Number.isFinite(tileId)) {
+                        const sig = JSON.stringify({ anim, index, multiFrames: hasMulti ? multiFrames : null, transform: hasTransform ? tr : null });
+                        tileId = variantKeyToGlobalId.get(sig);
+                    }
+                    return Number.isFinite(tileId) ? (tileId | 0) : null;
+                };
+
+                const pngBlob = await new Promise((res) => atlas.toBlob((b) => res(b), 'image/png'));
+                if (!pngBlob) {
+                    alert('Failed to create tileset PNG for TMX export.');
+                    return;
+                }
+
+                const tileEntries = Array.from(tilePropByGlobalId.entries()).sort((a, b) => a[0] - b[0]);
+                const tsxTileLines = tileEntries.map(([id, propsObj]) => {
+                    if (!propsObj || typeof propsObj !== 'object') return '';
+                    const props = [];
+                    if (Object.prototype.hasOwnProperty.call(propsObj, 'source_anim')) {
+                        props.push(`<property name="source_anim" value="${this._xmlEscape(propsObj.source_anim || '')}"/>`);
+                    }
+                    if (Object.prototype.hasOwnProperty.call(propsObj, 'source_index')) {
+                        props.push(`<property name="source_index" type="int" value="${Number.isFinite(Number(propsObj.source_index)) ? (Number(propsObj.source_index) | 0) : 0}"/>`);
+                    }
+                    if (propsObj.source_multiFrames) {
+                        props.push(`<property name="source_multiFrames" value="${this._xmlEscape(String(propsObj.source_multiFrames))}"/>`);
+                    }
+                    if (Object.prototype.hasOwnProperty.call(propsObj, 'source_rot') && Number(propsObj.source_rot || 0)) {
+                        props.push(`<property name="source_rot" type="int" value="${Number(propsObj.source_rot || 0) | 0}"/>`);
+                    }
+                    if (String(propsObj.source_flipH || '').toLowerCase() === 'true') {
+                        props.push('<property name="source_flipH" type="bool" value="true"/>');
+                    }
+                    if (String(propsObj.source_base47 || '').toLowerCase() === 'true') {
+                        props.push('<property name="source_base47" type="bool" value="true"/>');
+                    }
+                    if (Number.isFinite(Number(propsObj.source_base47_slot))) {
+                        props.push(`<property name="source_base47_slot" type="int" value="${Number(propsObj.source_base47_slot) | 0}"/>`);
+                    }
+                    if (typeof propsObj.source_base47_conn === 'string' && propsObj.source_base47_conn.length > 0) {
+                        props.push(`<property name="source_base47_conn" value="${this._xmlEscape(propsObj.source_base47_conn)}"/>`);
+                    }
+                    if (props.length === 0) return '';
+                    return `  <tile id="${id}">\n    <properties>\n      ${props.join('\n      ')}\n    </properties>\n  </tile>`;
+                }).filter(Boolean).join('\n');
+
+                const tilecount = Math.max(1, (atlasCols * atlasRows) | 0);
                 const tsx = [
                     '<?xml version="1.0" encoding="UTF-8"?>',
-                    `<tileset version="1.10" tiledversion="1.11.0" name="${this._xmlEscape(baseName)}" tilewidth="${slice}" tileheight="${slice}" tilecount="${width * height}" columns="${width}">`,
-                    `  <image source="${this._xmlEscape(imageFileName)}" width="${width * slice}" height="${height * slice}"/>`,
+                    `<tileset version="1.10" tiledversion="1.11.0" name="${this._xmlEscape(baseName)}" tilewidth="${slice}" tileheight="${slice}" tilecount="${tilecount}" columns="${atlasCols}">`,
+                    `  <image source="${this._xmlEscape(imageFileName)}" width="${atlas.width}" height="${atlas.height}"/>`,
                     tsxTileLines,
                     '</tileset>'
                 ].filter(Boolean).join('\n');
 
-                const csvRows = [];
-                for (let r = 0; r < height; r++) {
-                    const row = [];
-                    for (let c = 0; c < width; c++) row.push(gidGrid[r * width + c] || 0);
-                    csvRows.push(row.join(','));
-                }
-                const csvData = '\n' + csvRows.join(',\n') + '\n';
+                const exportTileLayers = (this.scene && Array.isArray(this.scene._tileLayers) && this.scene._tileLayers.length > 0)
+                    ? this.scene._tileLayers
+                    : [{ name: 'Tile Layer 1', bindings: this.scene && Array.isArray(this.scene._areaBindings) ? this.scene._areaBindings : [], transforms: this.scene && Array.isArray(this.scene._areaTransforms) ? this.scene._areaTransforms : [] }];
+
+                const buildLayerGidGrid = (layer) => {
+                    const out = new Array(Math.max(1, width * height)).fill(0);
+                    for (const loc of activeTileLocals) {
+                        if (!loc) continue;
+                        const localId = Number(loc.localId) | 0;
+                        if (localId < 0 || localId >= out.length) continue;
+                        const ai = Number.isFinite(Number(loc.areaIndex)) ? (Number(loc.areaIndex) | 0) : null;
+                        if (!Number.isFinite(ai)) continue;
+                        const binding = layer && Array.isArray(layer.bindings) ? (layer.bindings[ai] || null) : null;
+                        if (!binding) continue;
+                        const transform = layer && Array.isArray(layer.transforms) ? (layer.transforms[ai] || null) : null;
+                        const tileId = resolveGlobalTileId(binding, transform);
+                        if (Number.isFinite(tileId)) out[localId] = (tileId | 0) + 1;
+                    }
+                    return out;
+                };
+
+                const gridToCsvData = (grid) => {
+                    const rowsOut = [];
+                    for (let r = 0; r < height; r++) {
+                        const row = [];
+                        for (let c = 0; c < width; c++) row.push(grid[r * width + c] || 0);
+                        rowsOut.push(row.join(','));
+                    }
+                    return '\n' + rowsOut.join(',\n') + '\n';
+                };
+
+                const exportedTileLayerEntries = exportTileLayers.map((layer, idx) => {
+                    const grid = buildLayerGidGrid(layer || null);
+                    const name = String((layer && layer.name) || ('Tile Layer ' + (idx + 1))).trim() || ('Tile Layer ' + (idx + 1));
+                    return { index: idx, name, grid };
+                });
 
                 const spriteLayer = this.scene && typeof this.scene._normalizeSpriteLayerState === 'function'
                     ? this.scene._normalizeSpriteLayerState()
@@ -1776,17 +2398,52 @@ export default class FrameSelect {
                 const spriteEntities = [];
                 if (spriteLayer && spriteLayer.entities) {
                     const order = Array.isArray(spriteLayer.order) ? spriteLayer.order.slice() : Object.keys(spriteLayer.entities);
+                    const inferSpriteLayerName = (entity) => {
+                        if (!entity) return String((exportedTileLayerEntries[0] && exportedTileLayerEntries[0].name) || 'Tile Layer 1');
+                        const directName = String(entity.layerName || entity.layer || '').trim();
+                        if (directName) return directName;
+                        const directIdx = Number(entity.layerIndex);
+                        if (Number.isFinite(directIdx) && exportedTileLayerEntries[directIdx]) return exportedTileLayerEntries[directIdx].name;
+                        const col = Number(entity.col);
+                        const row = Number(entity.row);
+                        if (Number.isFinite(col) && Number.isFinite(row)) {
+                            let ai = null;
+                            if (this.scene && typeof this.scene._getAreaIndexForCoord === 'function') {
+                                try { ai = this.scene._getAreaIndexForCoord(col | 0, row | 0); } catch (e) { ai = null; }
+                            }
+                            if (Number.isFinite(Number(ai))) {
+                                for (let i = exportTileLayers.length - 1; i >= 0; i--) {
+                                    const layer = exportTileLayers[i];
+                                    const b = layer && Array.isArray(layer.bindings) ? layer.bindings[ai | 0] : null;
+                                    if (b && String((b.anim || '')).trim()) return exportedTileLayerEntries[i].name;
+                                }
+                            }
+                        }
+                        const activeIdx = (this.scene && Number.isFinite(Number(this.scene._activeTileLayerIndex))) ? (Number(this.scene._activeTileLayerIndex) | 0) : 0;
+                        return String((exportedTileLayerEntries[activeIdx] && exportedTileLayerEntries[activeIdx].name) || (exportedTileLayerEntries[0] && exportedTileLayerEntries[0].name) || 'Tile Layer 1');
+                    };
+
                     for (const id of order) {
                         const e = spriteLayer.entities[id];
                         if (!e) continue;
                         const col = Number(e.col);
                         const row = Number(e.row);
                         if (!Number.isFinite(col) || !Number.isFinite(row)) continue;
-                        spriteEntities.push({ id, col: col | 0, row: row | 0, anim: e.anim || '', fps: e.fps, parentAnim: e.parentAnim || '' });
+                        spriteEntities.push({
+                            id,
+                            col: col | 0,
+                            row: row | 0,
+                            anim: e.anim || '',
+                            fps: e.fps,
+                            parentAnim: e.parentAnim || '',
+                            layerName: inferSpriteLayerName(e)
+                        });
                     }
                 }
+
                 let objectId = 1;
-                const objLines = spriteEntities.map((s) => {
+                const objectLinesByLayerName = new Map();
+                for (const s of spriteEntities) {
                     const x = (s.col - (tiles.minCol | 0)) * slice;
                     const y = (s.row - (tiles.minRow | 0) + 1) * slice;
                     const propParts = [
@@ -1794,17 +2451,46 @@ export default class FrameSelect {
                         Number.isFinite(Number(s.fps)) ? `<property name="fps" type="float" value="${Number(s.fps)}"/>` : '',
                         s.parentAnim ? `<property name="parentAnim" value="${this._xmlEscape(s.parentAnim)}"/>` : ''
                     ].filter(Boolean).join('\n        ');
-                    return `    <object id="${objectId++}" name="sprite" type="sprite" x="${x}" y="${y}" width="${slice}" height="${slice}">\n      <properties>\n        ${propParts}\n      </properties>\n    </object>`;
-                }).join('\n');
+                    const line = `    <object id="${objectId++}" name="sprite" type="sprite" x="${x}" y="${y}" width="${slice}" height="${slice}">\n      <properties>\n        ${propParts}\n      </properties>\n    </object>`;
+                    const layerName = String((s.layerName || '')).trim() || String((exportedTileLayerEntries[0] && exportedTileLayerEntries[0].name) || 'Tile Layer 1');
+                    if (!objectLinesByLayerName.has(layerName)) objectLinesByLayerName.set(layerName, []);
+                    objectLinesByLayerName.get(layerName).push(line);
+                }
+
+                let layerIdCounter = 1;
+                const mapLayerXml = [];
+                for (const l of exportedTileLayerEntries) {
+                    const csvData = gridToCsvData(l.grid);
+                    mapLayerXml.push(
+                        `  <layer id="${layerIdCounter++}" name="${this._xmlEscape(l.name)}" width="${width}" height="${height}">`,
+                        `    <data encoding="csv">${csvData}    </data>`,
+                        '  </layer>'
+                    );
+                    const objLines = objectLinesByLayerName.get(l.name) || null;
+                    if (objLines && objLines.length > 0) {
+                        mapLayerXml.push(
+                            `  <objectgroup id="${layerIdCounter++}" name="${this._xmlEscape(l.name)}">`,
+                            objLines.join('\n'),
+                            '  </objectgroup>'
+                        );
+                    }
+                }
+                // Include any sprite-layer names that do not map to a current tile layer.
+                for (const [lname, objLines] of objectLinesByLayerName.entries()) {
+                    if (!objLines || objLines.length <= 0) continue;
+                    if (exportedTileLayerEntries.some((l) => l.name === lname)) continue;
+                    mapLayerXml.push(
+                        `  <objectgroup id="${layerIdCounter++}" name="${this._xmlEscape(lname)}">`,
+                        objLines.join('\n'),
+                        '  </objectgroup>'
+                    );
+                }
 
                 const tmx = [
                     '<?xml version="1.0" encoding="UTF-8"?>',
-                    `<map version="1.10" tiledversion="1.11.0" orientation="orthogonal" renderorder="right-down" width="${width}" height="${height}" tilewidth="${slice}" tileheight="${slice}" infinite="0" nextlayerid="3" nextobjectid="${Math.max(1, objectId)}">`,
+                    `<map version="1.10" tiledversion="1.11.0" orientation="orthogonal" renderorder="right-down" width="${width}" height="${height}" tilewidth="${slice}" tileheight="${slice}" infinite="0" nextlayerid="${Math.max(1, layerIdCounter)}" nextobjectid="${Math.max(1, objectId)}">`,
                     `  <tileset firstgid="1" source="${this._xmlEscape(tilesetFileName)}"/>`,
-                    `  <layer id="1" name="Tile Layer 1" width="${width}" height="${height}">`,
-                    `    <data encoding="csv">${csvData}    </data>`,
-                    '  </layer>',
-                    objLines ? `  <objectgroup id="2" name="Sprites">\n${objLines}\n  </objectgroup>` : '',
+                    mapLayerXml.join('\n'),
                     '</map>'
                 ].filter(Boolean).join('\n');
 
@@ -1816,49 +2502,151 @@ export default class FrameSelect {
                     archive.file(tilesetFileName, tsx);
                     archive.file(imageFileName, pngBlob);
 
-                    // Include sprite-only animations referenced by sprite entities so they round-trip.
-                    const spriteManifest = { version: 1, slice, animations: [] };
-                    const spriteAnimNames = Array.from(new Set(spriteEntities
-                        .map((s) => String((s && s.anim) || '').trim())
-                        .filter(Boolean)));
-                    for (const animName of spriteAnimNames) {
-                        const getCount = () => {
-                            if (this.scene && typeof this.scene._getAnimationLogicalFrameCount === 'function') {
-                                try { return Math.max(0, Number(this.scene._getAnimationLogicalFrameCount(animName)) | 0); } catch (e) {}
-                            }
-                            const arr = (this.sprite && this.sprite._frames) ? (this.sprite._frames.get(animName) || []) : [];
-                            return Math.max(0, arr.length | 0);
-                        };
-                        const frameCount = getCount();
-                        if (frameCount <= 0) continue;
-                        const frameFiles = [];
-                        for (let i = 0; i < frameCount; i++) {
-                            const src = (this.sprite && typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(animName, i) : null;
-                            if (!src) continue;
-                            const fc = document.createElement('canvas');
-                            fc.width = slice;
-                            fc.height = slice;
-                            const fctx = fc.getContext('2d');
-                            try { fctx.imageSmoothingEnabled = false; } catch (e) {}
-                            try { fctx.drawImage(src, 0, 0, slice, slice); } catch (e) {}
-                            const fb = await new Promise((res) => fc.toBlob((b) => res(b), 'image/png'));
-                            if (!fb) continue;
-                            const safeAnim = encodeURIComponent(animName);
-                            const fn = `${baseName}__sprite__${safeAnim}__${i}.png`;
-                            archive.file(fn, fb);
-                            frameFiles.push(fn);
+                    const reservedZipNames = new Set([mapFileName, tilesetFileName, imageFileName].map((n) => String(n || '').toLowerCase()));
+                    const normalizeStem = (raw, fallback = 'anim') => {
+                        const s = String(raw || '').trim().replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ');
+                        return s || fallback;
+                    };
+                    const chooseUniquePngName = (stemRaw, fallback = 'anim') => {
+                        const stem = normalizeStem(stemRaw, fallback);
+                        let name = stem + '.png';
+                        let i = 1;
+                        while (reservedZipNames.has(name.toLowerCase())) {
+                            name = `${stem}_${i++}.png`;
                         }
-                        if (frameFiles.length > 0) {
-                            const profile = (spriteLayer && spriteLayer.animationProfiles && spriteLayer.animationProfiles[animName]) ? spriteLayer.animationProfiles[animName] : null;
-                            spriteManifest.animations.push({
-                                name: animName,
-                                fps: Number.isFinite(Number(profile && profile.fps)) ? Number(profile.fps) : null,
-                                parentAnim: profile && profile.parent ? String(profile.parent) : '',
-                                frames: frameFiles
-                            });
+                        reservedZipNames.add(name.toLowerCase());
+                        return name;
+                    };
+
+                    // Export one PNG per used tile animation so source sets are directly available in the zip.
+                    const usedTileAnimList = Array.from(usedTileAnims.values()).sort();
+                    for (const tileAnimName of usedTileAnimList) {
+                        const isBase47 = this._isAnimationBase47(tileAnimName);
+                        let tileAnimCanvas = null;
+                        if (isBase47) {
+                            tileAnimCanvas = this._buildBase47ExportCanvas(tileAnimName);
+                        } else {
+                            const frameCount = getLogicalFrameCount(tileAnimName);
+                            const colsForAnim = Math.max(1, frameCount);
+                            tileAnimCanvas = document.createElement('canvas');
+                            tileAnimCanvas.width = colsForAnim * slice;
+                            tileAnimCanvas.height = slice;
+                            const tctx = tileAnimCanvas.getContext('2d');
+                            try { tctx.imageSmoothingEnabled = false; } catch (e) {}
+                            for (let i = 0; i < colsForAnim; i++) {
+                                const src = (this.scene && this.scene.currentSprite && typeof this.scene.currentSprite.getFrame === 'function')
+                                    ? this.scene.currentSprite.getFrame(tileAnimName, i)
+                                    : null;
+                                if (!src) continue;
+                                try { tctx.drawImage(src, i * slice, 0, slice, slice); } catch (e) {}
+                            }
+                        }
+                        if (!tileAnimCanvas) continue;
+                        const tileAnimBlob = await new Promise((res) => tileAnimCanvas.toBlob((b) => res(b), 'image/png'));
+                        if (!tileAnimBlob) continue;
+                        const tileAnimFileName = chooseUniquePngName(tileAnimName, 'tile_anim');
+                        archive.file(tileAnimFileName, tileAnimBlob);
+                    }
+
+                    // Include sprite-only animations referenced by sprite entities so they round-trip.
+                    const allAnimNames = (this.sprite && this.sprite._frames)
+                        ? Array.from(this.sprite._frames.keys()).map((n) => String(n || '').trim()).filter(Boolean)
+                        : [];
+                    const spriteAnimSeedNames = Array.from(new Set(spriteEntities
+                        .map((s) => String((s && s.anim) || '').trim())
+                        .filter(Boolean)
+                        .filter((animName) => !usedTileAnims.has(animName))));
+
+                    const spriteAnimNamesSet = new Set();
+                    for (const seed of spriteAnimSeedNames) {
+                        const base = String(seed.split('-')[0] || '').trim() || seed;
+                        spriteAnimNamesSet.add(seed);
+                        for (const candidate of allAnimNames) {
+                            if (usedTileAnims.has(candidate)) continue;
+                            if (candidate === base || candidate.startsWith(base + '-')) spriteAnimNamesSet.add(candidate);
                         }
                     }
-                    if (spriteManifest.animations.length > 0) {
+                    const spriteAnimNames = Array.from(spriteAnimNamesSet.values()).sort((a, b) => a.localeCompare(b));
+
+                    const spriteManifest = { version: 3, slice, animations: [], spriteSheets: [] };
+                    const spriteAnimProfileByName = new Map();
+                    for (const animName of spriteAnimNames) {
+                        const profile = (spriteLayer && spriteLayer.animationProfiles && spriteLayer.animationProfiles[animName])
+                            ? spriteLayer.animationProfiles[animName]
+                            : null;
+                        spriteAnimProfileByName.set(animName, profile || null);
+                    }
+
+                    // Also export compiled sprite sheets grouped by base name: base and base-* in row order.
+                    const groupedSpriteAnims = new Map();
+                    for (const animName of spriteAnimNames) {
+                        const base = String(animName.split('-')[0] || '').trim() || animName;
+                        if (!groupedSpriteAnims.has(base)) groupedSpriteAnims.set(base, []);
+                        groupedSpriteAnims.get(base).push(animName);
+                    }
+                    for (const [base, listRaw] of groupedSpriteAnims.entries()) {
+                        const list = Array.from(new Set(listRaw)).sort((a, b) => {
+                            if (a === base && b !== base) return -1;
+                            if (b === base && a !== base) return 1;
+                            return a.localeCompare(b);
+                        });
+                        if (list.length <= 0) continue;
+
+                        const rowEntries = [];
+                        let maxCols = 0;
+                        for (const animName of list) {
+                            let count = 0;
+                            try {
+                                if (this.scene && typeof this.scene._getAnimationLogicalFrameCount === 'function') {
+                                    count = Math.max(0, Number(this.scene._getAnimationLogicalFrameCount(animName)) | 0);
+                                } else {
+                                    const arr = (this.sprite && this.sprite._frames) ? (this.sprite._frames.get(animName) || []) : [];
+                                    count = Math.max(0, arr.length | 0);
+                                }
+                            } catch (e) {}
+                            if (count <= 0) continue;
+                            maxCols = Math.max(maxCols, count);
+                            rowEntries.push({ anim: animName, frames: count });
+                        }
+                        if (rowEntries.length <= 0 || maxCols <= 0) continue;
+
+                        const sc = document.createElement('canvas');
+                        sc.width = maxCols * slice;
+                        sc.height = rowEntries.length * slice;
+                        const sctx = sc.getContext('2d');
+                        try { sctx.imageSmoothingEnabled = false; } catch (e) {}
+                        for (let row = 0; row < rowEntries.length; row++) {
+                            const entry = rowEntries[row];
+                            for (let i = 0; i < entry.frames; i++) {
+                                const src = (this.sprite && typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(entry.anim, i) : null;
+                                if (!src) continue;
+                                try { sctx.drawImage(src, i * slice, row * slice, slice, slice); } catch (e) {}
+                            }
+                        }
+                        const sheetBlob = await new Promise((res) => sc.toBlob((b) => res(b), 'image/png'));
+                        if (!sheetBlob) continue;
+                        const sheetFileName = chooseUniquePngName(base, 'sprite');
+                        archive.file(sheetFileName, sheetBlob);
+                        for (let idx = 0; idx < rowEntries.length; idx++) {
+                            const rowEntry = rowEntries[idx];
+                            const profile = spriteAnimProfileByName.get(rowEntry.anim) || null;
+                            spriteManifest.animations.push({
+                                name: rowEntry.anim,
+                                fps: Number.isFinite(Number(profile && profile.fps)) ? Number(profile.fps) : null,
+                                parentAnim: profile && profile.parent ? String(profile.parent) : '',
+                                sheet: sheetFileName,
+                                row: idx,
+                                frames: rowEntry.frames
+                            });
+                        }
+                        spriteManifest.spriteSheets.push({
+                            name: base,
+                            file: sheetFileName,
+                            rows: rowEntries.map((r, idx) => ({ anim: r.anim, row: idx, frames: r.frames }))
+                        });
+                    }
+
+                    if (spriteManifest.animations.length > 0 || (Array.isArray(spriteManifest.spriteSheets) && spriteManifest.spriteSheets.length > 0)) {
                         archive.file(baseName + '.sprites.json', JSON.stringify(spriteManifest, null, 2));
                     }
 

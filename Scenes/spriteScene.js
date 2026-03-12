@@ -4329,8 +4329,44 @@ export class SpriteScene extends Scene {
                 created++;
             }
 
+            // If duplicates slipped in (same connection key on multiple frames),
+            // prune duplicate logical frames so the generated set stays canonical.
+            const targetSet = new Set(targetKeys);
+            const dupLogicalIndices = [];
+            const seenKey = new Map();
+            let currentLogicalCount = Math.max(1, Number(this._getAnimationLogicalFrameCount(anim)) || 1);
+            for (let i = 0; i < currentLogicalCount; i++) {
+                const raw = this._tileConnMap[anim + '::' + i];
+                if (typeof raw !== 'string') continue;
+                const norm = this._normalizeOpenConnectionKey(raw);
+                if (!targetSet.has(norm)) continue;
+                if (!seenKey.has(norm)) seenKey.set(norm, i);
+                else dupLogicalIndices.push(i);
+            }
+
+            let removed = 0;
+            const shiftConnMapAfterPop = (removedIdx, countBefore) => {
+                for (let j = removedIdx; j < countBefore - 1; j++) {
+                    const nextKey = this._tileConnMap[anim + '::' + (j + 1)];
+                    if (typeof nextKey === 'string') this._tileConnMap[anim + '::' + j] = nextKey;
+                    else delete this._tileConnMap[anim + '::' + j];
+                }
+                delete this._tileConnMap[anim + '::' + (countBefore - 1)];
+            };
+
+            dupLogicalIndices.sort((a, b) => b - a);
+            for (const idx of dupLogicalIndices) {
+                const before = Math.max(1, Number(this._getAnimationLogicalFrameCount(anim)) || 1);
+                if (idx < 0 || idx >= before) continue;
+                try {
+                    sheet.popFrame(anim, idx);
+                    shiftConnMapAfterPop(idx, before);
+                    removed++;
+                } catch (e) {}
+            }
+
             try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
-            return { ok: true, created };
+            return { ok: true, created, removed };
         } catch (e) {
             return { ok: false, reason: String((e && e.message) || e || 'Unknown error') };
         }
@@ -6253,21 +6289,20 @@ export class SpriteScene extends Scene {
             try {
                 if (this.keys && typeof this.keys.released === 'function' && this.keys.released('j')) {
                     const sheet = this.currentSprite;
-                    const anim = this.selectedAnimation;
-                    const frameIdx = this.selectedFrame;
                     if (!sheet) return;
                     const samples = [];
                     // explicit point selection
                     if (this.selectionPoints && this.selectionPoints.length > 0) {
-                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
-                        if (frameCanvas) {
+                        for (const p of this.selectionPoints) {
+                            if (!p) continue;
+                            const target = this._resolveAnimFrameForArea(p.areaIndex, this.selectedAnimation, this.selectedFrame);
+                            const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(target.anim, target.frameIdx) : null;
+                            if (!frameCanvas) continue;
                             const ctx = frameCanvas.getContext('2d');
-                            for (const p of this.selectionPoints) {
-                                try {
-                                    const d = ctx.getImageData(p.x, p.y, 1, 1).data;
-                                    samples.push(d);
-                                } catch (e) { /* ignore per-pixel errors */ }
-                            }
+                            try {
+                                const d = ctx.getImageData(p.x, p.y, 1, 1).data;
+                                samples.push(d);
+                            } catch (e) { /* ignore per-pixel errors */ }
                         }
                     } else if (this.selectionRegion) {
                         // rectangular region selection
@@ -6278,7 +6313,8 @@ export class SpriteScene extends Scene {
                         const maxY = Math.max(sr.start.y, sr.end.y);
                         const w = maxX - minX + 1;
                         const h = maxY - minY + 1;
-                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                        const target = this._resolveAnimFrameForArea(sr.areaIndex, this.selectedAnimation, this.selectedFrame);
+                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(target.anim, target.frameIdx) : null;
                         if (frameCanvas) {
                             const ctx = frameCanvas.getContext('2d');
                             try {
@@ -6318,8 +6354,6 @@ export class SpriteScene extends Scene {
                 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
                 const applyAdjust = (direction) => {
                     const sheet = this.currentSprite;
-                    const anim = this.selectedAnimation;
-                    const frameIdx = this.selectedFrame;
                     if (!sheet) return;
                     const channel = this.state.brush.pixelBrush.channel;
                     // Reduce hue adjustments to a smaller fraction so keys change hue more finely
@@ -6328,10 +6362,12 @@ export class SpriteScene extends Scene {
 
                     // point selection
                     if (this.selectionPoints && this.selectionPoints.length > 0) {
-                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
-                        if (!frameCanvas) return;
-                        const ctx = frameCanvas.getContext('2d');
                         for (const p of this.selectionPoints) {
+                            if (!p) continue;
+                            const target = this._resolveAnimFrameForArea(p.areaIndex, this.selectedAnimation, this.selectedFrame);
+                            const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(target.anim, target.frameIdx) : null;
+                            if (!frameCanvas) continue;
+                            const ctx = frameCanvas.getContext('2d');
                             try {
                                 const d = ctx.getImageData(p.x, p.y, 1, 1).data;
                                 const col = Color.convertColor(this.rgbaToHex(d[0], d[1], d[2], d[3]));
@@ -6353,7 +6389,7 @@ export class SpriteScene extends Scene {
                                 }
                                 const rgb = hsv.toRgb();
                                 const newHex = this.rgbaToHex(Math.round(rgb.a), Math.round(rgb.b), Math.round(rgb.c), Math.round((rgb.d ?? 1) * 255));
-                                if (typeof sheet.setPixel === 'function') sheet.setPixel(anim, frameIdx, p.x, p.y, newHex, 'replace');
+                                if (typeof sheet.setPixel === 'function') sheet.setPixel(target.anim, target.frameIdx, p.x, p.y, newHex, 'replace');
                             } catch (e) { /* ignore per-pixel errors */ }
                         }
                         if (typeof sheet._rebuildSheetCanvas === 'function') try { sheet._rebuildSheetCanvas(); } catch(e){}
@@ -6369,7 +6405,8 @@ export class SpriteScene extends Scene {
                         const maxY = Math.max(sr.start.y, sr.end.y);
                         const w = maxX - minX + 1;
                         const h = maxY - minY + 1;
-                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(anim, frameIdx) : null;
+                        const target = this._resolveAnimFrameForArea(sr.areaIndex, this.selectedAnimation, this.selectedFrame);
+                        const frameCanvas = (typeof sheet.getFrame === 'function') ? sheet.getFrame(target.anim, target.frameIdx) : null;
                         if (!frameCanvas) return;
                         const ctx = frameCanvas.getContext('2d');
                         try {
@@ -7285,6 +7322,19 @@ export class SpriteScene extends Scene {
 
     _getShapeStrokeWidth() {
         return Math.max(1, Math.min(15, this.brushSize || 1));
+    }
+
+    _resolveAnimFrameForArea(areaIndex = null, fallbackAnim = null, fallbackFrame = null) {
+        let anim = (fallbackAnim !== null && fallbackAnim !== undefined) ? fallbackAnim : this.selectedAnimation;
+        let frameIdx = (fallbackFrame !== null && fallbackFrame !== undefined) ? Number(fallbackFrame) : Number(this.selectedFrame || 0);
+        if (this.tilemode && Number.isFinite(Number(areaIndex))) {
+            const binding = this.getAreaBinding(Number(areaIndex) | 0);
+            if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                anim = binding.anim;
+                frameIdx = Number(binding.index);
+            }
+        }
+        return { anim, frameIdx };
     }
 
     _getShapeAnchorPoint(posInfo = null) {
@@ -14286,25 +14336,9 @@ export class SpriteScene extends Scene {
             ));
 
             if (this.tilemode && typeof hoveredAreaIndex === 'number' && !selectionAnchoredHere) {
-                try {
-                    const hoveredBinding = this.getAreaBinding(hoveredAreaIndex) || null;
-                    const hoveredAnim = (hoveredBinding && hoveredBinding.anim) ? hoveredBinding.anim : this.selectedAnimation;
-                    const hoveredFrame = (hoveredBinding && typeof hoveredBinding.index === 'number') ? Number(hoveredBinding.index) : this.selectedFrame;
-
-                    const thisBinding = binding || null;
-                    const thisAnim = (thisBinding && thisBinding.anim) ? thisBinding.anim : effAnim;
-                    const thisFrame = (thisBinding && typeof thisBinding.index === 'number') ? Number(thisBinding.index) : effFrame;
-
-                    // If this tile does not mirror the same effective frame
-                    // as the tile under the cursor, skip all preview drawing
-                    // for this area.
-                    if (!(hoveredAnim === thisAnim && hoveredFrame === thisFrame)) {
-                        return;
-                    }
-                } catch (e) {
-                    // If matching fails for any reason, fall back to drawing
-                    // the preview to avoid breaking basic cursor behavior.
-                }
+                // In tilemode, previews should be shown only on the hovered tile
+                // unless the preview is anchored by an existing per-area selection.
+                if (typeof areaIndex === 'number' && areaIndex !== hoveredAreaIndex) return;
             }
 
             // Draw selection points
@@ -14496,9 +14530,9 @@ export class SpriteScene extends Scene {
                 const cursorOutlineColor = useYellow ? '#FFFF00EE' : '#FFFFFFEE';
 
                 if (this.currentTool === 'line' && this.selectionPoints.length === 1) {
-                    this.drawLine(anchor, mousePixelPos, previewLineColor);
+                    this.drawLine(anchor, mousePixelPos, previewLineColor, dstPos, cellW, cellH);
                 } else if (this.currentTool === 'box' && this.selectionPoints.length === 1) {
-                    this.drawBox(anchor, mousePixelPos, previewLineColor, this.keys.held('Alt'));
+                    this.drawBox(anchor, mousePixelPos, previewLineColor, this.keys.held('Alt'), dstPos, cellW, cellH);
                 } else if (this.currentTool === 'circle' && this.selectionPoints && this.selectionPoints.length > 0 && typeof this.computeCirclePixels === 'function') {
                     // For circles, allow preview with either a single anchor pixel
                     // or an even-centered 2x2 anchor (4 pixels). In both cases we
@@ -14560,19 +14594,25 @@ export class SpriteScene extends Scene {
         }
     }
 
-    drawLine(start, end, color) {
+    drawLine(start, end, color, dstPos = null, cellW = null, cellH = null) {
         const strokeWidth = this._getShapeStrokeWidth();
         const pixels = this.computeLinePixels(start, end, strokeWidth) || [];
-        for (const p of pixels) this.drawPixel(p.x, p.y, color);
+        for (const p of pixels) this.drawPixel(p.x, p.y, color, dstPos, cellW, cellH);
     }
 
-    drawBox(start, end, color, filled) {
+    drawBox(start, end, color, filled, dstPos = null, cellW = null, cellH = null) {
         const strokeWidth = this._getShapeStrokeWidth();
         const pixels = this.computeBoxPixels(start, end, filled, strokeWidth) || [];
-        for (const p of pixels) this.drawPixel(p.x, p.y, color);
+        for (const p of pixels) this.drawPixel(p.x, p.y, color, dstPos, cellW, cellH);
     }
 
-    drawPixel(x, y, color) {
+    drawPixel(x, y, color, dstPos = null, cellW = null, cellH = null) {
+        if (dstPos && Number.isFinite(Number(cellW)) && Number.isFinite(Number(cellH))) {
+            const cellX = dstPos.x + x * cellW;
+            const cellY = dstPos.y + y * cellH;
+            this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), color, true);
+            return;
+        }
         // prefer the area the user last interacted with; fallback to centered area
         let area = null;
         if (typeof this._activeDrawAreaIndex === 'number' && Array.isArray(this._drawAreas) && this._drawAreas[this._activeDrawAreaIndex]) {
@@ -14580,11 +14620,11 @@ export class SpriteScene extends Scene {
         }
         if (!area) area = this.computeDrawArea();
         if (!area) return;
-        const cellW = area.dstW / this.currentSprite.slicePx;
-        const cellH = area.dstH / this.currentSprite.slicePx;
-        const cellX = area.dstPos.x + x * cellW;
-        const cellY = area.dstPos.y + y * cellH;
-        this.Draw.rect(new Vector(cellX, cellY), new Vector(cellW, cellH), color, true);
+        const fallbackCellW = area.dstW / this.currentSprite.slicePx;
+        const fallbackCellH = area.dstH / this.currentSprite.slicePx;
+        const cellX = area.dstPos.x + x * fallbackCellW;
+        const cellY = area.dstPos.y + y * fallbackCellH;
+        this.Draw.rect(new Vector(cellX, cellY), new Vector(fallbackCellW, fallbackCellH), color, true);
     }
 
     _drawSpriteEntities(basePos, tileSize, visible = null) {
