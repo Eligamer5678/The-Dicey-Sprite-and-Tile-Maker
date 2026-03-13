@@ -7,6 +7,8 @@ export default class Draw {
         this.ctxMap = new Map(); // Store multiple contexts by name
         this.currentCtxName = null;
         this.Scale = new Vector(1, 1); // scaling for coordinates
+        this.designSize = new Vector(1920, 1080);
+        this.textScaleMode = 'draw-scale';
         // Stack depths (save/restore counts)
         this._matrixDepth = 0;
         this._maskDepth = 0;
@@ -605,10 +607,41 @@ export default class Draw {
     }
 
     text(txt, pos, color = '#000000FF', width = 1, fontSize = 20, options = {}, erase = false) {
-        pos = this.pv(pos.clone());
-        fontSize = this.ps(fontSize);
-        width = this.ps(width);
         const ctx = this._assertCtx('text');
+        const {
+            outputScale = 'auto',
+            designWidth = null,
+            designHeight = null,
+            outputQuantizePx = 'auto',
+            outputMinFontPx = 11,
+        } = options || {};
+
+        let sx = this.Scale.x;
+        let sy = this.Scale.y;
+        const useOutputScale = outputScale === true || (outputScale === 'auto' && this.textScaleMode === 'output');
+        if (useOutputScale && ctx.canvas) {
+            const dw = Number.isFinite(Number(designWidth)) ? Number(designWidth) : Number(this.designSize?.x || 1920);
+            const dh = Number.isFinite(Number(designHeight)) ? Number(designHeight) : Number(this.designSize?.y || 1080);
+            if (dw > 0 && dh > 0) {
+                sx = ctx.canvas.width / dw;
+                sy = ctx.canvas.height / dh;
+            }
+        }
+
+        pos = new Vector(pos.x * sx, pos.y * sy);
+        fontSize = fontSize * sx;
+        width = width * sx;
+
+        // In output-scaled mode, small fractional font sizes tend to look choppy.
+        // Stabilize by quantizing to pixel steps and enforcing a readable minimum.
+        if (useOutputScale) {
+            const qRaw = Number(outputQuantizePx);
+            const q = (outputQuantizePx === 'auto') ? 1 : (Number.isFinite(qRaw) && qRaw > 0 ? qRaw : 1);
+            fontSize = Math.round(fontSize / q) * q;
+            const minPx = Number.isFinite(Number(outputMinFontPx)) ? Number(outputMinFontPx) : 11;
+            if (fontSize < minPx) fontSize = minPx;
+            width = Math.max(1, Math.round(width));
+        }
         const {
             font = `${fontSize}px Arial`,
             align = 'start',
@@ -616,6 +649,13 @@ export default class Draw {
             fill = true,
             strokeWidth = width, // pass down our width param
             italics = false,
+            // antialias and compression-friendly text rendering toggles
+            antialias = true,
+            // snap position to integer pixels; 'auto' disables snapping for fractional downscale
+            snapToPixel = 'auto',
+            // supersample: true|false|'auto' (auto enables when scale/font is small)
+            supersample = 'auto',
+            supersampleFactor = 'auto',
             // box: optional Vector or [w,h] or {x,y} specifying bounding box for wrapping/clipping
             box = null,
             // wrap: 'word' (default) or 'char' - controls how long lines are broken
@@ -624,21 +664,47 @@ export default class Draw {
         ctx.save();
         ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
         const col = Color.convertColor(erase ? '#000000FF' : color);
-    // Build font string. If caller passed a font family/name without size
-    // (for example 'monospace'), prepend the computed fontSize so scaling works.
-    // Respect italics option by placing 'italic' before the size/family.
-    const baseFont = font;
-    const hasSize = (typeof baseFont === 'string') && (/\b\d+px\b/.test(baseFont));
-    let fontStr = (italics ? 'italic ' : '') + (hasSize ? baseFont : `${fontSize}px ${baseFont}`);
-    ctx.font = fontStr;
+        // Build font string. If caller passed a font family/name without size
+        // (for example 'monospace'), prepend the computed fontSize so scaling works.
+        // Respect italics option by placing 'italic' before the size/family.
+        const baseFont = font;
+        const hasSize = (typeof baseFont === 'string') && (/\b\d+px\b/.test(baseFont));
+        let fontStr = (italics ? 'italic ' : '') + (hasSize ? baseFont : `${fontSize}px ${baseFont}`);
+        ctx.font = fontStr;
+
+        // Improve glyph rasterization quality when the canvas is scaled/compressed.
+        if (antialias) {
+            try {
+                if ('imageSmoothingEnabled' in ctx) ctx.imageSmoothingEnabled = true;
+                if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
+                if ('textRendering' in ctx) ctx.textRendering = 'optimizeLegibility';
+                if ('fontKerning' in ctx) ctx.fontKerning = 'normal';
+            } catch (e) {
+                // ignore unsupported quality flags
+            }
+        }
+
+        const scaleMin = Math.max(0.0001, Math.min(Math.abs(sx || 1), Math.abs(sy || 1)));
+        const isFractionalScale = Math.abs(scaleMin - Math.round(scaleMin)) > 0.02;
+        const shouldSnap = (snapToPixel === true)
+            || (snapToPixel === 'auto' && (useOutputScale || (scaleMin >= 1 && !isFractionalScale)));
+        const drawPos = shouldSnap
+            ? new Vector(Math.round(pos.x), Math.round(pos.y))
+            : pos;
+        const autoSupersample = (supersample === 'auto')
+            ? (!useOutputScale && (scaleMin < 1 || fontSize < 14))
+            : !!supersample;
+        const ssFactorRaw = Number(supersampleFactor);
+        const autoFactor = Math.max(2, Math.min(6, Math.ceil(2 / scaleMin)));
+        const ssFactor = Math.max(1, Math.min(6, Number.isFinite(ssFactorRaw) ? ssFactorRaw : autoFactor));
         ctx.textAlign = align;
         // Determine if we're drawing into a bounded box (wrap + clip)
         let boxWidth = null;
         let boxHeight = null;
         if (box) {
             const b = _asVec(box);
-            boxWidth = this.px(b.x);
-            boxHeight = this.py(b.y);
+            boxWidth = b.x * sx;
+            boxHeight = b.y * sy;
         }
 
         // If a box is provided and baseline wasn't explicitly set, use 'top' to make layout predictable
@@ -725,36 +791,83 @@ export default class Draw {
             }
 
             ctx.save();
-            if (boxHeight != null) {
-                // clip to bounding box
-                ctx.beginPath();
-                ctx.rect(pos.x, pos.y, boxWidth, boxHeight);
-                ctx.clip();
-            }
+            if (autoSupersample && ssFactor > 1) {
+                const scaledFontStr = String(fontStr).replace(/(\d+(?:\.\d+)?)px/g, (_, n) => `${(parseFloat(n) * ssFactor)}px`);
+                ctx.scale(1 / ssFactor, 1 / ssFactor);
+                ctx.font = scaledFontStr;
+                ctx.textAlign = align;
+                ctx.textBaseline = usedBaseline;
+                const drawX = drawPos.x * ssFactor;
+                const drawY = drawPos.y * ssFactor;
+                const lineHeightSS = lineHeight * ssFactor;
 
-            if (fill) {
-                ctx.fillStyle = col.toHex();
-                for (let i = 0; i < Math.min(lines.length, maxLines); i++) {
-                    ctx.fillText(lines[i], pos.x, pos.y + i * lineHeight);
+                if (boxHeight != null) {
+                    ctx.beginPath();
+                    ctx.rect(drawX, drawY, boxWidth * ssFactor, boxHeight * ssFactor);
+                    ctx.clip();
+                }
+
+                if (fill) {
+                    ctx.fillStyle = col.toHex();
+                    for (let i = 0; i < Math.min(lines.length, maxLines); i++) {
+                        ctx.fillText(lines[i], drawX, drawY + i * lineHeightSS);
+                    }
+                } else {
+                    ctx.strokeStyle = col.toHex();
+                    ctx.lineWidth = strokeWidth * ssFactor;
+                    for (let i = 0; i < Math.min(lines.length, maxLines); i++) {
+                        ctx.strokeText(lines[i], drawX, drawY + i * lineHeightSS);
+                    }
                 }
             } else {
-                ctx.strokeStyle = col.toHex();
-                ctx.lineWidth = strokeWidth;
-                for (let i = 0; i < Math.min(lines.length, maxLines); i++) {
-                    ctx.strokeText(lines[i], pos.x, pos.y + i * lineHeight);
+                if (boxHeight != null) {
+                    // clip to bounding box
+                    ctx.beginPath();
+                    ctx.rect(drawPos.x, drawPos.y, boxWidth, boxHeight);
+                    ctx.clip();
+                }
+
+                if (fill) {
+                    ctx.fillStyle = col.toHex();
+                    for (let i = 0; i < Math.min(lines.length, maxLines); i++) {
+                        ctx.fillText(lines[i], drawPos.x, drawPos.y + i * lineHeight);
+                    }
+                } else {
+                    ctx.strokeStyle = col.toHex();
+                    ctx.lineWidth = strokeWidth;
+                    for (let i = 0; i < Math.min(lines.length, maxLines); i++) {
+                        ctx.strokeText(lines[i], drawPos.x, drawPos.y + i * lineHeight);
+                    }
                 }
             }
 
             ctx.restore();
         } else {
             ctx.textBaseline = usedBaseline;
-            if (fill) {
+            if (autoSupersample && ssFactor > 1) {
+                const scaledFontStr = String(fontStr).replace(/(\d+(?:\.\d+)?)px/g, (_, n) => `${(parseFloat(n) * ssFactor)}px`);
+                ctx.save();
+                ctx.translate(drawPos.x, drawPos.y);
+                ctx.scale(1 / ssFactor, 1 / ssFactor);
+                ctx.font = scaledFontStr;
+                ctx.textAlign = align;
+                ctx.textBaseline = usedBaseline;
+                if (fill) {
+                    ctx.fillStyle = col.toHex();
+                    ctx.fillText(txt, 0, 0);
+                } else {
+                    ctx.strokeStyle = col.toHex();
+                    ctx.lineWidth = strokeWidth * ssFactor;
+                    ctx.strokeText(txt, 0, 0);
+                }
+                ctx.restore();
+            } else if (fill) {
                 ctx.fillStyle = col.toHex();
-                ctx.fillText(txt, pos.x, pos.y);
+                ctx.fillText(txt, drawPos.x, drawPos.y);
             } else {
                 ctx.strokeStyle = col.toHex();
                 ctx.lineWidth = strokeWidth;
-                ctx.strokeText(txt, pos.x, pos.y);
+                ctx.strokeText(txt, drawPos.x, drawPos.y);
             }
         }
         ctx.restore();

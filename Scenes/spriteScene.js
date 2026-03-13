@@ -13,6 +13,7 @@ import { createSpriteCollabTransport } from './spriteScene/collabTransport.js';
 import { installSpriteSceneStateBindings } from './spriteScene/stateBindings.js';
 import { createSpriteSceneStateController } from './spriteScene/stateController.js';
 import { createSpriteWebRTCCollabController } from './spriteScene/webrtcCollab.js';
+import AutoTileGenerationMenu from './spriteScene/AutoTileGenerationMenu.js';
 
 export class SpriteScene extends Scene {
     constructor(...args) {
@@ -85,6 +86,7 @@ export class SpriteScene extends Scene {
         }
 
         this.FrameSelect = new FrameSelect(this,this.currentSprite,this.mouse,this.keys,this.UIDraw,1)
+        this.autoTileGenerationMenu = new AutoTileGenerationMenu(this, this.mouse, this.keys, this.UIDraw, 80);
         // load available tile connection mapping (tiles.json) for autotile matching
         try {
             fetch('tiles.json').then(r=>r.json()).then(obj=>{ this._availableTileConn = obj || {}; this._availableTileKeys = Object.keys(this._availableTileConn || {}); }).catch(()=>{});
@@ -3247,6 +3249,9 @@ export class SpriteScene extends Scene {
         this._clipboardBrushBlinkPhase = (this._clipboardBrushBlinkPhase || 0) + tickDelta;
         this.mouse.setMask(0)
         this.FrameSelect.update()
+        if (this.autoTileGenerationMenu && typeof this.autoTileGenerationMenu.update === 'function') {
+            this.autoTileGenerationMenu.update(tickDelta);
+        }
         // Keep tile brush binding in sync with current selection by default
         this._tileBrushBinding = { anim: this.selectedAnimation, index: this.selectedFrame }
         this.mouse.setPower(0)
@@ -3409,30 +3414,26 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            // Ctrl+A: generate missing connection frames from three selected templates.
+            // Ctrl+A: open procedural auto-tile generation panel.
             // Plain A keeps its previous toggle behavior.
             if (this.keys.released('a') || this.keys.released('A')) {
                 const ctrlDown = !!(this.keys.held('Control') || this.keys.held('ControlLeft') || this.keys.held('ControlRight') || this.keys.held('Meta'));
                 if (ctrlDown) {
                     try {
-                        const slicePx = Math.max(1, Number(this.currentSprite && this.currentSprite.slicePx) || 16);
-                        const defaultW = Math.max(1, Math.floor(slicePx / 4));
-                        try {
-                            if (this.keys && typeof this.keys.pause === 'function') this.keys.pause();
-                            if (this.keys && typeof this.keys.clearState === 'function') this.keys.clearState();
-                            if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause();
-                        } catch (e) {}
-                        const input = window.prompt('Connector width in pixels', String(defaultW));
-                        if (input !== null) {
-                            const parsed = Math.floor(Number(String(input).trim()));
-                            if (Number.isFinite(parsed) && parsed > 0) {
-                                const result = this._generateMissingConnectionFramesFromTemplates(parsed);
-                                if (!result || !result.ok) {
-                                    try { window.alert((result && result.reason) ? result.reason : 'Could not generate missing connection tiles.'); } catch (e) {}
-                                } else {
-                                    try { this._playSfx('frame.duplicate'); } catch (e) {}
-                                }
-                            }
+                        const selected = Array.from((this.FrameSelect && this.FrameSelect._multiSelected) || [])
+                            .filter(i => Number.isFinite(i))
+                            .map(i => Number(i) | 0)
+                            .sort((a, b) => a - b);
+                        const sourceFrame = selected.length > 0 ? selected[0] : Number(this.selectedFrame || 0);
+                        if (this.autoTileGenerationMenu && typeof this.autoTileGenerationMenu.open === 'function') {
+                            this.autoTileGenerationMenu.open({
+                                sourceFrame,
+                                sourceAnimation: String(this.selectedAnimation || 'idle')
+                            });
+                            try {
+                                if (this.keys && typeof this.keys.clearState === 'function') this.keys.clearState();
+                                if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.12);
+                            } catch (e) {}
                         }
                     } catch (e) {}
                 } else {
@@ -4214,6 +4215,269 @@ export class SpriteScene extends Scene {
             if (norm === bits) keys.push(bits);
         }
         return keys;
+    }
+
+    _findConnectionFrameIndex(anim, normalizedOpenKey) {
+        try {
+            const target = this._normalizeOpenConnectionKey(normalizedOpenKey);
+            const count = Math.max(1, Number(this._getAnimationLogicalFrameCount(anim)) || 1);
+            for (let i = 0; i < count; i++) {
+                const raw = this._tileConnMap && this._tileConnMap[anim + '::' + i];
+                if (typeof raw !== 'string') continue;
+                if (this._normalizeOpenConnectionKey(raw) === target) return i;
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    _noise01(x, y, seed = 1) {
+        const n = Math.sin((x * 127.1) + (y * 311.7) + (seed * 74.7)) * 43758.5453123;
+        return n - Math.floor(n);
+    }
+
+    _renderProceduralConnectionFrame(sourceFrame, openKey, options = {}) {
+        try {
+            if (!sourceFrame || typeof sourceFrame.getContext !== 'function') return null;
+            const srcCtx = sourceFrame.getContext('2d');
+            if (!srcCtx) return null;
+
+            const px = Math.max(1, Number(sourceFrame.width) || Number(this.currentSprite && this.currentSprite.slicePx) || 16);
+            const bits = this._normalizeOpenConnectionKey(openKey).split('').map((b) => b === '1');
+            const channel = (typeof options.channel === 'string' ? options.channel : 'h').toLowerCase();
+            const colorChannel = (channel === 'h' || channel === 's' || channel === 'v' || channel === 'a') ? channel : 'h';
+            const outlineWidth = Math.max(1, Math.min(px, Math.floor(Number(options.outlineWidth) || 2)));
+            const cornerRoundness = Math.max(0, Math.min(1, Number(options.cornerRoundness) || 0));
+            const falloff = Math.max(0, Math.min(1, Number(options.falloff) || 0));
+            const strength = Math.max(0.01, Number(options.strength) || 1);
+            const noiseAmount = Math.max(0, Math.min(1, Number(options.noiseAmount) || 0));
+            const colorSteps = Math.max(2, Math.min(32, Math.floor(Number(options.colorSteps) || 4)));
+            const seed = Math.floor(Number(options.seed) || 1);
+            const tone = (Number(options.tone) >= 0) ? 1 : -1;
+            const channelMultiplier = (colorChannel === 'h') ? 0.2 : 1.0;
+            const baseAdjust = Math.max(0, Number(options.baseAdjust) || 0.05);
+            const maxDelta = Math.max(0.0001, baseAdjust * channelMultiplier * strength);
+
+            const srcImage = srcCtx.getImageData(0, 0, px, px);
+            const out = document.createElement('canvas');
+            out.width = px;
+            out.height = px;
+            const octx = out.getContext('2d');
+            if (!octx) return null;
+            const outImage = octx.createImageData(px, px);
+            outImage.data.set(srcImage.data);
+
+            // Connection semantics follow frame-side UI toggles:
+            // 1 = highlighted (outside edge / no neighbor), 0 = inside (connected).
+            const edgeTopOutside = bits[0];
+            const edgeRightOutside = bits[1];
+            const edgeBottomOutside = bits[2];
+            const edgeLeftOutside = bits[3];
+            const cornerTLOutside = bits[4];
+            const cornerTROutside = bits[5];
+            const cornerBROutside = bits[6];
+            const cornerBLOutside = bits[7];
+
+            const hasOutsideBoundary = (edgeTopOutside || edgeRightOutside || edgeBottomOutside || edgeLeftOutside || cornerTLOutside || cornerTROutside || cornerBROutside || cornerBLOutside);
+            if (!hasOutsideBoundary) {
+                octx.putImageData(outImage, 0, 0);
+                return out;
+            }
+
+            const clamp01 = (v) => Math.max(0, Math.min(1, v));
+            const stepDiv = Math.max(1, colorSteps - 1);
+            const stepUnit = maxDelta / stepDiv;
+            const mix = (a, b, t) => (a * (1 - t)) + (b * t);
+            // Keep corner curvature independent from outline thickness.
+            // Thickness controls band width; cornerRadius controls arc shape.
+            const cornerRadius = Math.max(1, Math.round(px * 0.32));
+            const radius = Math.max(0.0001, cornerRadius);
+            const cornerZone = Math.max(1, Math.floor(cornerRadius));
+            const cornerInwardDistance = (dx, dy) => {
+                // Distance inward from corner boundary:
+                // - square: min(dx,dy) gives straight inside boundary
+                // - round: r - dist(center,p) gives concentric quarter-circle inside boundary
+                const squareIn = Math.min(dx, dy);
+                const roundIn = radius - Math.hypot(dx - radius, dy - radius);
+                return mix(squareIn, roundIn, cornerRoundness);
+            };
+            const applyRoundedCornerAlphaMask = (x, y, alphaByte) => {
+                if (cornerRoundness <= 0 || alphaByte <= 0) return false;
+                const cornerCutoff = radius * (1 - cornerRoundness);
+
+                // Top-left
+                if (edgeTopOutside && edgeLeftOutside && x <= cornerZone && y <= cornerZone) {
+                    const dist = Math.hypot(x - radius, y - radius);
+                    if (dist - radius > cornerCutoff) return true;
+                }
+                // Top-right
+                if (edgeTopOutside && edgeRightOutside && (px - 1 - x) <= cornerZone && y <= cornerZone) {
+                    const dx = (px - 1 - x);
+                    const dist = Math.hypot(dx - radius, y - radius);
+                    if (dist - radius > cornerCutoff) return true;
+                }
+                // Bottom-right
+                if (edgeBottomOutside && edgeRightOutside && (px - 1 - x) <= cornerZone && (px - 1 - y) <= cornerZone) {
+                    const dx = (px - 1 - x);
+                    const dy = (px - 1 - y);
+                    const dist = Math.hypot(dx - radius, dy - radius);
+                    if (dist - radius > cornerCutoff) return true;
+                }
+                // Bottom-left
+                if (edgeBottomOutside && edgeLeftOutside && x <= cornerZone && (px - 1 - y) <= cornerZone) {
+                    const dy = (px - 1 - y);
+                    const dist = Math.hypot(x - radius, dy - radius);
+                    if (dist - radius > cornerCutoff) return true;
+                }
+                return false;
+            };
+            const innerCornerDistance = (dx, dy) => {
+                // Use square width at roundness=0 so inner-corner width matches edges,
+                // then blend toward circular distance as roundness increases.
+                const sq = Math.max(dx, dy);
+                const rd = Math.hypot(dx, dy);
+                return mix(sq, rd, cornerRoundness);
+            };
+
+            for (let y = 0; y < px; y++) {
+                for (let x = 0; x < px; x++) {
+                    const i = (y * px + x) * 4;
+                    const alpha = outImage.data[i + 3] / 255;
+                    if (alpha <= 0) continue;
+
+                    // Physically round outside corners by cutting alpha in corner zones.
+                    if (applyRoundedCornerAlphaMask(x, y, outImage.data[i + 3])) {
+                        outImage.data[i + 3] = 0;
+                        continue;
+                    }
+
+                    let nearest = Infinity;
+                    // Distances to outside edges selected in the frame-side connection UI.
+                    if (edgeTopOutside) nearest = Math.min(nearest, y);
+                    if (edgeRightOutside) nearest = Math.min(nearest, (px - 1 - x));
+                    if (edgeBottomOutside) nearest = Math.min(nearest, (px - 1 - y));
+                    if (edgeLeftOutside) nearest = Math.min(nearest, x);
+
+                    // Round outside corners (where two adjacent outside edges meet).
+                    // Use corner inward distance so both outer and inner boundaries curve.
+                    if (edgeTopOutside && edgeLeftOutside && x <= cornerZone && y <= cornerZone) {
+                        nearest = Math.min(nearest, cornerInwardDistance(x, y));
+                    }
+                    if (edgeTopOutside && edgeRightOutside && (px - 1 - x) <= cornerZone && y <= cornerZone) {
+                        nearest = Math.min(nearest, cornerInwardDistance((px - 1 - x), y));
+                    }
+                    if (edgeBottomOutside && edgeRightOutside && (px - 1 - x) <= cornerZone && (px - 1 - y) <= cornerZone) {
+                        nearest = Math.min(nearest, cornerInwardDistance((px - 1 - x), (px - 1 - y)));
+                    }
+                    if (edgeBottomOutside && edgeLeftOutside && x <= cornerZone && (px - 1 - y) <= cornerZone) {
+                        nearest = Math.min(nearest, cornerInwardDistance(x, (px - 1 - y)));
+                    }
+
+                    // Handle inner-corner seams where only the diagonal is outside.
+                    if (cornerTLOutside && !edgeTopOutside && !edgeLeftOutside) nearest = Math.min(nearest, innerCornerDistance(x, y));
+                    if (cornerTROutside && !edgeTopOutside && !edgeRightOutside) nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), y));
+                    if (cornerBROutside && !edgeBottomOutside && !edgeRightOutside) nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), (px - 1 - y)));
+                    if (cornerBLOutside && !edgeBottomOutside && !edgeLeftOutside) nearest = Math.min(nearest, innerCornerDistance(x, (px - 1 - y)));
+
+                    if (!Number.isFinite(nearest) || nearest > outlineWidth) continue;
+
+                    const t = clamp01(nearest / Math.max(0.0001, outlineWidth));
+                    const edgeBlend = Math.pow(1 - t, 1 + (falloff * 4));
+                    const noise = ((this._noise01((x * 1.37) + 9, (y * 0.83) + 17, seed + 97) * 2) - 1) * maxDelta * noiseAmount;
+                    let delta = (tone * edgeBlend * maxDelta) + noise;
+                    delta = Math.round(delta / stepUnit) * stepUnit;
+
+                    const c = new Color(outImage.data[i], outImage.data[i + 1], outImage.data[i + 2], alpha, 'rgb').toHsv();
+                    if (!c) continue;
+
+                    if (colorChannel === 'h') c.a = ((c.a + delta) % 1 + 1) % 1;
+                    if (colorChannel === 's') c.b = clamp01(c.b + delta);
+                    if (colorChannel === 'v') c.c = clamp01(c.c + delta);
+                    if (colorChannel === 'a') c.d = clamp01(c.d + delta);
+
+                    const rgb = c.toRgb();
+                    if (!rgb) continue;
+
+                    outImage.data[i] = Math.max(0, Math.min(255, Math.round(rgb.a)));
+                    outImage.data[i + 1] = Math.max(0, Math.min(255, Math.round(rgb.b)));
+                    outImage.data[i + 2] = Math.max(0, Math.min(255, Math.round(rgb.c)));
+                    outImage.data[i + 3] = Math.max(0, Math.min(255, Math.round((rgb.d ?? alpha) * 255)));
+                }
+            }
+
+            octx.putImageData(outImage, 0, 0);
+            return out;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _runProceduralAutotileGeneration(settings = {}) {
+        try {
+            const anim = String(settings.sourceAnimation || this.selectedAnimation || 'idle');
+            const sourceFrameIndex = Number.isFinite(Number(settings.sourceFrame))
+                ? (Number(settings.sourceFrame) | 0)
+                : (Number(this.selectedFrame) | 0);
+            const sheet = this.currentSprite;
+            if (!sheet || typeof sheet.getFrame !== 'function' || typeof sheet.insertFrame !== 'function') {
+                return { ok: false, reason: 'Sprite sheet is not ready.' };
+            }
+
+            const sourceFrame = sheet.getFrame(anim, sourceFrameIndex);
+            if (!sourceFrame) {
+                return { ok: false, reason: 'Select a source tile frame first.' };
+            }
+
+            if (!this._tileConnMap || typeof this._tileConnMap !== 'object') this._tileConnMap = {};
+
+            const keys = this._getAllValidOpenConnectionKeys();
+            if (!Array.isArray(keys) || keys.length === 0) {
+                return { ok: false, reason: 'No connection keys available.' };
+            }
+
+            let created = 0;
+            let updated = 0;
+            let skipped = 0;
+            const replaceExisting = !!settings.replaceExisting;
+
+            for (const rawKey of keys) {
+                const key = this._normalizeOpenConnectionKey(rawKey);
+                const existingIndex = this._findConnectionFrameIndex(anim, key);
+                if (existingIndex !== null && !replaceExisting) {
+                    skipped++;
+                    continue;
+                }
+
+                const rendered = this._renderProceduralConnectionFrame(sourceFrame, key, settings);
+                if (!rendered) {
+                    skipped++;
+                    continue;
+                }
+
+                let dstIndex = existingIndex;
+                if (dstIndex === null) {
+                    dstIndex = Math.max(0, Number(this._getAnimationLogicalFrameCount(anim)) || 0);
+                    sheet.insertFrame(anim);
+                    created++;
+                } else {
+                    updated++;
+                }
+
+                const dstFrame = sheet.getFrame(anim, dstIndex);
+                const dctx = dstFrame && dstFrame.getContext ? dstFrame.getContext('2d') : null;
+                if (!dctx) {
+                    skipped++;
+                    continue;
+                }
+                dctx.clearRect(0, 0, dstFrame.width, dstFrame.height);
+                dctx.drawImage(rendered, 0, 0, dstFrame.width, dstFrame.height);
+                this._tileConnMap[anim + '::' + dstIndex] = key;
+            }
+
+            try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
+            return { ok: true, created, updated, skipped, total: keys.length };
+        } catch (e) {
+            return { ok: false, reason: String((e && e.message) || e || 'Unknown error') };
+        }
     }
 
     _generateMissingConnectionFramesFromTemplates(widthPx = 2) {
@@ -13963,6 +14227,9 @@ export class SpriteScene extends Scene {
         this.UIDraw.useCtx('UI');
         this.UIDraw.clear()
         this.FrameSelect.draw()
+        if (this.autoTileGenerationMenu && typeof this.autoTileGenerationMenu.draw === 'function') {
+            this.autoTileGenerationMenu.draw(this.UIDraw);
+        }
         // Draw remote cursors from other clients
         if (this._remoteCursors && this._remoteCursors.size > 0) {
             const colors = ['#FF5555FF','#55FF55FF','#5555FFFF','#FFFF55FF','#FF55FFFF','#55FFFFFF','#FFA500FF','#FFFFFF88'];

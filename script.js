@@ -665,6 +665,9 @@ class Program {
         // === Draw Helpers ===
         this.Draw = new Draw(() => this.getCtx("main")); // default draw target
         this.UIDraw = new Draw(() => this.getCtx("ui")); // separate draw for UI
+        this.Draw.designSize = new Vector(mainWidth, mainheight);
+        this.UIDraw.designSize = new Vector(mainWidth, mainheight);
+        this.UIDraw.textScaleMode = 'output';
 
         // === Game/Application Logic ===
         this.game = new Game(this);
@@ -714,6 +717,8 @@ class Program {
             canvas.style.position = 'absolute';
             // keep canvas non-interactive by default so HTML children receive pointer events
             canvas.style.pointerEvents = 'none';
+            // UI text should use browser text AA, not nearest-neighbor pixel scaling.
+            canvas.style.imageRendering = 'auto';
 
             container.appendChild(canvas);
             this.uiContainer.appendChild(container);
