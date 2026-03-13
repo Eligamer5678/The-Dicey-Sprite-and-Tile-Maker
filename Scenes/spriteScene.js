@@ -3424,11 +3424,39 @@ export class SpriteScene extends Scene {
                             .filter(i => Number.isFinite(i))
                             .map(i => Number(i) | 0)
                             .sort((a, b) => a - b);
+                        const anim = String(this.selectedAnimation || 'idle');
+
+                        // Back-compat: when the original 3 template frames are selected,
+                        // run the legacy template expansion flow instead of opening the new menu.
+                        if (this._isLegacyAutotileTemplateSelection(selected, anim)) {
+                            try {
+                                let widthPx = 2;
+                                try {
+                                    if (this.keys && typeof this.keys.pause === 'function') this.keys.pause();
+                                    if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause();
+                                } catch (e) {}
+                                const input = window.prompt('Template edge width (px)', '2');
+                                if (input !== null) {
+                                    const parsed = Number(input);
+                                    if (Number.isFinite(parsed)) widthPx = Math.max(1, Math.floor(parsed));
+                                }
+                                const result = this._generateMissingConnectionFramesFromTemplates(widthPx);
+                                if (!result || !result.ok) {
+                                    try { console.warn('Legacy auto-tile generation failed:', result && result.reason ? result.reason : result); } catch (e) {}
+                                }
+                                try {
+                                    if (this.keys && typeof this.keys.clearState === 'function') this.keys.clearState();
+                                    if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.12);
+                                } catch (e) {}
+                            } catch (e) {}
+                            return;
+                        }
+
                         const sourceFrame = selected.length > 0 ? selected[0] : Number(this.selectedFrame || 0);
                         if (this.autoTileGenerationMenu && typeof this.autoTileGenerationMenu.open === 'function') {
                             this.autoTileGenerationMenu.open({
                                 sourceFrame,
-                                sourceAnimation: String(this.selectedAnimation || 'idle')
+                                sourceAnimation: anim
                             });
                             try {
                                 if (this.keys && typeof this.keys.clearState === 'function') this.keys.clearState();
@@ -4633,6 +4661,34 @@ export class SpriteScene extends Scene {
             return { ok: true, created, removed };
         } catch (e) {
             return { ok: false, reason: String((e && e.message) || e || 'Unknown error') };
+        }
+    }
+
+    _isLegacyAutotileTemplateSelection(selected = null, anim = null) {
+        try {
+            const list = Array.isArray(selected)
+                ? selected
+                : Array.from((this.FrameSelect && this.FrameSelect._multiSelected) || []);
+            const normalized = list
+                .filter(i => Number.isFinite(i))
+                .map(i => Number(i) | 0)
+                .sort((a, b) => a - b);
+            if (normalized.length !== 3) return false;
+
+            const animation = String(anim || this.selectedAnimation || 'idle');
+            const expected = new Set(['11111111', '00000000', '00001111']);
+            const found = new Set();
+            for (const idx of normalized) {
+                const raw = (this._tileConnMap && this._tileConnMap[animation + '::' + idx]) || '00000000';
+                found.add(this._normalizeOpenConnectionKey(raw));
+            }
+            if (found.size !== 3) return false;
+            for (const key of expected) {
+                if (!found.has(key)) return false;
+            }
+            return true;
+        } catch (e) {
+            return false;
         }
     }
 
