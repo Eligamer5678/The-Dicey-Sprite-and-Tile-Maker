@@ -1,0 +1,21 @@
+LICENCE - 100sidedice Asset Use Terms
+
+Pack: Asset Pack
+
+You may:
+- Use these assets in personal and commercial games/apps.
+- Modify these assets for your own projects.
+- Include these assets in compiled/distributed game builds.
+
+You may not:
+- Resell, repackage, or redistribute these assets as standalone files.
+- Upload these assets as a competing asset pack (free or paid).
+- Claim original authorship of unmodified assets.
+
+Attribution:
+- Appreciated but not required. Credit as: 100sidedice
+
+Support:
+- Contact the seller where you purchased this pack for support or clarifications.
+
+By using these files, you agree to these terms.

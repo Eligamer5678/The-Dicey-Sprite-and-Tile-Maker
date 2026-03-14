@@ -142,8 +142,12 @@ export class SpriteScene extends Scene {
 
         // Autosave defaults
         this._autosaveEnabled = true;
-        this._autosaveIntervalSeconds = 5;
+        this._autosaveIntervalSeconds = 10;
+        this._autosaveMinIntervalSeconds = 10;
         this._autosaveIntervalId = null;
+        this._autosaveDirty = false;
+        this._autosaveInFlight = false;
+        this._autosaveLastRunAt = 0;
         this._restoringSavedState = false;
 
         
@@ -152,8 +156,17 @@ export class SpriteScene extends Scene {
         if (this._autosaveEnabled) {
             this._autosaveIntervalId = setInterval(() => {
                 if (this._restoringSavedState) return;
-                try { this.doSave(); } catch (e) { /* ignore autosave errors */ }
-            }, (this._autosaveIntervalSeconds || 60) * 1000);
+                if (!this._autosaveDirty || this._autosaveInFlight) return;
+                const now = Date.now();
+                const minSeconds = Math.max(1, Number(this._autosaveMinIntervalSeconds) || 1);
+                const everySeconds = Math.max(minSeconds, Number(this._autosaveIntervalSeconds) || 60);
+                if ((now - (Number(this._autosaveLastRunAt) || 0)) < (everySeconds * 1000)) return;
+                this._autosaveInFlight = true;
+                setTimeout(() => {
+                    try { this.doSave(); } catch (e) { /* ignore autosave errors */ }
+                    finally { this._autosaveInFlight = false; }
+                }, 0);
+            }, 1000);
         }
 
         // Attempt to load previously-saved sprite frames/metdata (async). We call
@@ -1527,10 +1540,25 @@ export class SpriteScene extends Scene {
         window.Debug.createSignal('autosave', (enabled, seconds) => {
             try {
                 this._autosaveEnabled = !!enabled;
-                if (typeof seconds === 'number' && seconds > 0) this._autosaveIntervalSeconds = Math.max(1, Math.floor(seconds));
+                if (typeof seconds === 'number' && seconds > 0) {
+                    const minSeconds = Math.max(1, Number(this._autosaveMinIntervalSeconds) || 1);
+                    this._autosaveIntervalSeconds = Math.max(minSeconds, Math.floor(seconds));
+                }
                 if (this._autosaveIntervalId) { try { clearInterval(this._autosaveIntervalId); } catch (e) {} this._autosaveIntervalId = null; }
                 if (this._autosaveEnabled) {
-                    this._autosaveIntervalId = setInterval(() => { try { this.doSave(); } catch (e) {} }, (this._autosaveIntervalSeconds || 60) * 1000);
+                    this._autosaveIntervalId = setInterval(() => {
+                        if (this._restoringSavedState) return;
+                        if (!this._autosaveDirty || this._autosaveInFlight) return;
+                        const now = Date.now();
+                        const minSeconds = Math.max(1, Number(this._autosaveMinIntervalSeconds) || 1);
+                        const everySeconds = Math.max(minSeconds, Number(this._autosaveIntervalSeconds) || 60);
+                        if ((now - (Number(this._autosaveLastRunAt) || 0)) < (everySeconds * 1000)) return;
+                        this._autosaveInFlight = true;
+                        setTimeout(() => {
+                            try { this.doSave(); } catch (e) {}
+                            finally { this._autosaveInFlight = false; }
+                        }, 0);
+                    }, 1000);
                 }
             } catch (e) { console.warn('debug autosave failed', e); }
         });
@@ -8892,6 +8920,8 @@ export class SpriteScene extends Scene {
                 } catch (e) { /* ignore sprite layer save errors */ }
 
                 try { this.saver.set('sprites_meta/' + keyName, meta); } catch (e) {}
+                this._autosaveLastRunAt = Date.now();
+                this._autosaveDirty = false;
                 return true;
             } catch (e) {
                 console.warn('doSave failed', e);
@@ -12404,6 +12434,7 @@ export class SpriteScene extends Scene {
             }
 
             this._tileOpPending.set(key, pending);
+            this._autosaveDirty = true;
             this._scheduleSend && this._scheduleSend();
             return true;
         } catch (e) {
@@ -12735,6 +12766,7 @@ export class SpriteScene extends Scene {
             } else {
                 return false;
             }
+            this._autosaveDirty = true;
             this._scheduleSend && this._scheduleSend();
             return true;
         } catch (e) {

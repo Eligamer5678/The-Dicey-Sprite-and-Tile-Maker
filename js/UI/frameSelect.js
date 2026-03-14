@@ -820,6 +820,49 @@ export default class FrameSelect {
         return 'application/octet-stream';
     }
 
+    _shouldIncludeSellerLicenceInTiledZip(){
+        try {
+            const names = [];
+            if (this.scene && this.scene.saver && typeof this.scene.saver.get === 'function') {
+                names.push(this.scene.saver.get('player_name'));
+            }
+            if (this.scene && this.scene.playerName !== undefined) names.push(this.scene.playerName);
+            for (const raw of names) {
+                const n = String(raw || '').trim().toLowerCase();
+                if (!n) continue;
+                if (n === '100sidedice') return true;
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    _buildSellerLicenceText(packName = 'Asset Pack'){
+        const name = String(packName || 'Asset Pack').trim() || 'Asset Pack';
+        return [
+            'LICENCE - 100sidedice Asset Use Terms',
+            '',
+            `Pack: ${name}`,
+            '',
+            'You may:',
+            '- Use these assets in personal and commercial games/apps.',
+            '- Modify these assets for your own projects.',
+            '- Include these assets in compiled/distributed game builds.',
+            '',
+            'You may not:',
+            '- Resell, repackage, or redistribute these assets as standalone files.',
+            '- Upload these assets as a competing asset pack (free or paid).',
+            '- Claim original authorship of unmodified assets.',
+            '',
+            'Attribution:',
+            '- Appreciated but not required. Credit as: 100sidedice',
+            '',
+            'Support:',
+            '- Contact the seller where you purchased this pack for support or clarifications.',
+            '',
+            'By using these files, you agree to these terms.'
+        ].join('\n');
+    }
+
     async _extractTiledFilesFromZip(zipFile){
         const JSZip = await this._getJsZipCtor();
         const archive = await JSZip.loadAsync(zipFile);
@@ -2689,6 +2732,10 @@ export default class FrameSelect {
 
                     if (spriteManifest.animations.length > 0 || (Array.isArray(spriteManifest.spriteSheets) && spriteManifest.spriteSheets.length > 0)) {
                         archive.file(baseName + '.sprites.json', JSON.stringify(spriteManifest, null, 2));
+                    }
+
+                    if (this._shouldIncludeSellerLicenceInTiledZip()) {
+                        archive.file('LICENCE.txt', this._buildSellerLicenceText(baseName));
                     }
 
                     zipBlob = await archive.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
