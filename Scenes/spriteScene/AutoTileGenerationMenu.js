@@ -2,6 +2,7 @@ import Vector from '../../js/Vector.js';
 import Menu from '../../js/UI/Menu.js';
 import UISlider from '../../js/UI/Slider.js';
 import UIButton from '../../js/UI/Button.js';
+import UITextInput from '../../js/UI/UITextInput.js';
 
 export default class AutoTileGenerationMenu {
     constructor(scene, mouse, keys, UIDraw, layer = 70) {
@@ -47,6 +48,8 @@ export default class AutoTileGenerationMenu {
             seed: 1,
             tone: -1,
             replaceExisting: true,
+            useCustomOutline: false,
+            customOutlineHex: '#00FF00',
         };
 
         this._status = '';
@@ -117,6 +120,39 @@ export default class AutoTileGenerationMenu {
             this.menu.addElement('slider:' + def.id, slider);
             this._sliders.push({ def, slider, y });
         }
+
+        // Custom outline color input + toggle (below sliders)
+        const controlsY = startY + this._sliderDefs.length * rowH + 8;
+        this.customHexInput = new UITextInput(this.mouse, this.keys, new Vector(sliderX, controlsY), new Vector(160, 32), this.layer + 3, String(this.settings.customOutlineHex || '#00FF00'), '#HEX');
+        this.customHexInput.onChange.connect((txt) => {
+            this.settings.customOutlineHex = String(txt || '').trim() || '#00FF00';
+        });
+        this.customHexInput.onSubmit.connect((txt) => {
+            this.settings.customOutlineHex = String(txt || '').trim() || '#00FF00';
+        });
+        this.menu.addElement('input:customOutlineHex', this.customHexInput);
+
+        this.useCustomButton = new UIButton(this.mouse, this.keys, new Vector(sliderX + 176, controlsY), new Vector(120, 32), this.layer + 3, null, '#3B3B3BFF', '#4A4A4AFF', '#222222FF');
+        this.useCustomButton.trigger = true;
+        this.useCustomButton.triggered = !!this.settings.useCustomOutline;
+        this.useCustomButton.onTrigger.connect((triggered) => {
+            this.settings.useCustomOutline = !!triggered;
+            if (triggered) {
+                this.useCustomButton.baseColor = '#2E3547FF';
+                this.useCustomButton.hoverColor = '#404A65FF';
+                this.useCustomButton.pressedColor = '#1F2533FF';
+            } else {
+                this.useCustomButton.baseColor = '#3B3B3BFF';
+                this.useCustomButton.hoverColor = '#4A4A4AFF';
+                this.useCustomButton.pressedColor = '#222222FF';
+            }
+        });
+        if (this.settings.useCustomOutline) {
+            this.useCustomButton.baseColor = '#2E3547FF';
+            this.useCustomButton.hoverColor = '#404A65FF';
+            this.useCustomButton.pressedColor = '#1F2533FF';
+        }
+        this.menu.addElement('btn:useCustomOutline', this.useCustomButton);
 
         this.generateButton = new UIButton(this.mouse, this.keys, new Vector(28, this.layout.buttonY), new Vector(146, 42), this.layer + 3, null, '#2B5A36FF', '#367244FF', '#1E4228FF');
         this.generateButton.onPressed['left'].connect(() => this._runGeneration());
@@ -218,6 +254,10 @@ export default class AutoTileGenerationMenu {
         const adjust = this._getAdjustAmount(channel);
         UIDraw.text(`${Math.round(adjust * 100)}% (${channel.toUpperCase()})`, base.add(new Vector(178, this.layout.adjustY)), '#89C6DEFF', 0, 18, { align: 'left', baseline: 'top', font: 'monospace' });
 
+        // Custom outline hex label
+        const controlsY = this.layout.sliderStartY + this._sliderDefs.length * this.layout.sliderRowH + 8;
+        UIDraw.text('Outline Hex', base.add(new Vector(this.layout.sliderLabelX, controlsY + 8)), '#D7DFF2FF', 0, 14, { align: 'left', baseline: 'top', font: 'monospace' });
+
         UIDraw.text('Generate', base.add(new Vector(101, this.layout.buttonY + 22)), '#F2FFF5FF', 0, 17, { align: 'center', baseline: 'middle', font: 'monospace' });
         UIDraw.text('Replace', base.add(new Vector(257, this.layout.buttonY + 22)), '#E6ECFFFF', 0, 17, { align: 'center', baseline: 'middle', font: 'monospace' });
         UIDraw.text(this.settings.tone > 0 ? 'Lighten' : 'Darken', base.add(new Vector(413, this.layout.buttonY + 22)), '#EADFFF', 0, 17, { align: 'center', baseline: 'middle', font: 'monospace' });
@@ -243,6 +283,8 @@ export default class AutoTileGenerationMenu {
         out.baseAdjust = this._getAdjustAmount(out.channel);
         out.sourceFrame = this._sourceFrame;
         out.sourceAnimation = this._sourceAnimation;
+        out.useCustomOutline = !!this.settings.useCustomOutline;
+        out.customOutlineHex = String(this.settings.customOutlineHex || '#00FF00');
         return out;
     }
 

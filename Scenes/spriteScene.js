@@ -3426,6 +3426,34 @@ export class SpriteScene extends Scene {
                             .sort((a, b) => a - b);
                         const anim = String(this.selectedAnimation || 'idle');
 
+                        // Named transition shortcut:
+                        // If selected animation is empty and named like "snow-to-dirt",
+                        // auto-build a 5-tile transition set (4 edges + center)
+                        // using the first frame from each endpoint animation.
+                        const selectedAnimCount = this._getAnimationLogicalFrameCountExact(anim);
+                        if (selectedAnimCount === 0) {
+                            const maybeTransition = this._runNamedTransitionTilesetGeneration({
+                                sourceAnimation: anim,
+                                noiseAmount: 0.32,
+                                seed: 1
+                            });
+                            if (maybeTransition && maybeTransition.ok) {
+                                try {
+                                    if (this.keys && typeof this.keys.clearState === 'function') this.keys.clearState();
+                                    if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.12);
+                                    if (typeof this._playSfx === 'function') this._playSfx('frame.duplicate');
+                                } catch (e) {}
+                                return;
+                            }
+                            const parsedTransition = this._parseTransitionAnimationName(anim);
+                            if (parsedTransition) {
+                                try {
+                                    console.warn('Transition generation failed:', maybeTransition && maybeTransition.reason ? maybeTransition.reason : 'Unknown error');
+                                } catch (e) {}
+                                return;
+                            }
+                        }
+
                         // Back-compat: when the original 3 template frames are selected,
                         // run the legacy template expansion flow instead of opening the new menu.
                         if (this._isLegacyAutotileTemplateSelection(selected, anim)) {
@@ -4110,11 +4138,11 @@ export class SpriteScene extends Scene {
                     // apply autotile selection if enabled
                     if (this.autotile) {
                         try {
-                            const anim = entry.anim || (this.selectedAnimation || '');
-                            // compute key and choose best tile index
-                            const chosen = this._computeConnectionKey ? this._chooseBestTileIndex(this._computeConnectionKey(t.col, t.row, anim), anim) : null;
-                            if (chosen !== null && typeof chosen !== 'undefined') {
-                                entry.index = chosen;
+                            const logicalAnim = this._getAutotileLogicalAnimationName(entry.anim || (this.selectedAnimation || ''));
+                            const resolved = this._resolveAutotileBindingForTile(t.col, t.row, logicalAnim);
+                            if (resolved && typeof resolved === 'object') {
+                                if (typeof resolved.anim === 'string' && resolved.anim) entry.anim = resolved.anim;
+                                if (resolved.index !== null && typeof resolved.index !== 'undefined') entry.index = resolved.index;
                             }
                         } catch (e) {}
                     }
@@ -4126,7 +4154,12 @@ export class SpriteScene extends Scene {
                     } catch (e) {}
                     if (baseTransform) this._setAreaTransformAtIndex(idx, { ...baseTransform }, true);
                     // update neighbors if autotile enabled
-                    try { if (this.autotile) this._updateAutotileNeighbors(t.col, t.row, entry.anim || this.selectedAnimation); } catch(e){}
+                    try {
+                        if (this.autotile) {
+                            const logicalAnim = this._getAutotileLogicalAnimationName(entry.anim || this.selectedAnimation || '');
+                            this._updateAutotileNeighbors(t.col, t.row, logicalAnim);
+                        }
+                    } catch(e){}
                 }
             } else if (this.mouse.held('right')) {
                 // If tiles are selected, right-drag acts as deselect instead of erase
@@ -4142,7 +4175,7 @@ export class SpriteScene extends Scene {
                         let oldAnim = null;
                         try {
                             const oldBinding = this.getAreaBinding(idx);
-                            if (oldBinding && oldBinding.anim) oldAnim = oldBinding.anim;
+                            if (oldBinding && oldBinding.anim) oldAnim = this._getAutotileLogicalAnimationName(oldBinding.anim);
                         } catch(e){}
                         try { this._clearTileOnActiveLayer(t.col, t.row, true); } catch (e) { /* ignore */ }
                         // update neighbors if autotile enabled
@@ -4181,7 +4214,7 @@ export class SpriteScene extends Scene {
             if (ai === null || ai === undefined) return false;
             const b = Array.isArray(this._areaBindings) ? this._areaBindings[ai] : null;
             if (!b) return false;
-            return (b.anim === anim);
+            return (this._getAutotileLogicalAnimationName(b.anim) === anim);
         };
 
         const top = hasNeighbor(col, row-1);
@@ -4212,6 +4245,213 @@ export class SpriteScene extends Scene {
 
         // Final key: edges then corners
         return '' + eTop + eRight + eBottom + eLeft + cTL + cTR + cBR + cBL;
+    }
+
+    _computeBinaryConnectionKey(col, row, predicate) {
+        try {
+            const has = (c, r) => {
+                const ai = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(c, r) : null;
+                if (ai === null || ai === undefined) return false;
+                const b = Array.isArray(this._areaBindings) ? this._areaBindings[ai] : null;
+                return !!predicate(b, c, r, ai);
+            };
+
+            const eTop = has(col, row - 1) ? '1' : '0';
+            const eRight = has(col + 1, row) ? '1' : '0';
+            const eBottom = has(col, row + 1) ? '1' : '0';
+            const eLeft = has(col - 1, row) ? '1' : '0';
+
+            const cTL = has(col - 1, row - 1) ? '1' : '0';
+            const cTR = has(col + 1, row - 1) ? '1' : '0';
+            const cBR = has(col + 1, row + 1) ? '1' : '0';
+            const cBL = has(col - 1, row + 1) ? '1' : '0';
+
+            return '' + eTop + eRight + eBottom + eLeft + cTL + cTR + cBR + cBL;
+        } catch (e) {
+            return '00000000';
+        }
+    }
+
+    _computeTransitionConnectionKey(col, row, firstAnim, targetAnim = null) {
+        try {
+            const base = String(this._getAutotileLogicalAnimationName(firstAnim || '') || '').trim();
+            if (!base) return '00000000';
+            const target = String(this._getAutotileLogicalAnimationName(targetAnim || '') || '').trim();
+
+            const basePlain = this._computeBinaryConnectionKey(col, row, (binding) => {
+                if (!binding || !binding.anim) return false;
+                return this._getAutotileLogicalAnimationName(binding.anim) === base;
+            });
+
+            // Transition stack uses plain binary toward target animation:
+            // bit=1 when the neighbor belongs to target (or non-base fallback).
+            const plain = this._computeBinaryConnectionKey(col, row, (binding) => {
+                if (!binding || !binding.anim) return false;
+                const logical = this._getAutotileLogicalAnimationName(binding.anim);
+                if (target) return logical === target;
+                return !!logical && logical !== base;
+            });
+
+            const b = plain.split('');
+            const bb = basePlain.split('');
+            const eTop = b[0] === '1';
+            const eRight = b[1] === '1';
+            const eBottom = b[2] === '1';
+            const eLeft = b[3] === '1';
+            const cTL = b[4] === '1';
+            const cTR = b[5] === '1';
+            const cBR = b[6] === '1';
+            const cBL = b[7] === '1';
+
+            const baseTL = bb[4] === '1';
+            const baseTR = bb[5] === '1';
+            const baseBR = bb[6] === '1';
+            const baseBL = bb[7] === '1';
+
+            const edgeCount = (eTop ? 1 : 0) + (eRight ? 1 : 0) + (eBottom ? 1 : 0) + (eLeft ? 1 : 0);
+            const cornerCount = (cTL ? 1 : 0) + (cTR ? 1 : 0) + (cBR ? 1 : 0) + (cBL ? 1 : 0);
+
+            // Pure interior-corner transitions.
+            if (edgeCount === 0) {
+                if (cornerCount === 1) {
+                    if (cTL) return '00001000';
+                    if (cTR) return '00000100';
+                    if (cBR) return '00000001';
+                    if (cBL) return '00000010';
+                }
+                // Fallback: keep plain binary semantics for scoring fallback.
+                return plain;
+            }
+
+            // Single-edge transitions: center band + edge-outline variants.
+            if (edgeCount === 1) {
+                const hash = Math.abs((((Number(col) | 0) * 73856093) ^ ((Number(row) | 0) * 19349663)) >>> 0);
+
+                if (eTop) {
+                    if (baseTL && !baseTR) return '10001101';
+                    if (baseTR && !baseTL) return '10001110';
+                    if (baseTL && baseTR) return (hash & 1) ? '10001101' : '10001110';
+                    return '10001100';
+                }
+                if (eRight) {
+                    if (baseTR && !baseBR) return '01001110';
+                    if (baseBR && !baseTR) return '01000111';
+                    if (baseTR && baseBR) return (hash & 1) ? '01001110' : '01000111';
+                    return '01000110';
+                }
+                if (eBottom) {
+                    if (baseBL && !baseBR) return '00101011';
+                    if (baseBR && !baseBL) return '00100111';
+                    if (baseBL && baseBR) return (hash & 1) ? '00101011' : '00100111';
+                    return '00100011';
+                }
+                if (eLeft) {
+                    if (baseTL && !baseBL) return '00011101';
+                    if (baseBL && !baseTL) return '00011011';
+                    if (baseTL && baseBL) return (hash & 1) ? '00011101' : '00011011';
+                    return '00011001';
+                }
+            }
+
+            // Complex/multi-edge junctions: normalize for robust best-match fallback.
+            return this._normalizeOpenConnectionKey(plain);
+        } catch (e) {
+            return '00000000';
+        }
+    }
+
+    _getAutotileLogicalAnimationName(animName) {
+        try {
+            const raw = String(animName || '').trim();
+            if (!raw) return '';
+            const m = raw.match(/^(.+?)-to-(.+)$/i);
+            if (m && m[1]) return String(m[1]).trim();
+            return raw;
+        } catch (e) {
+            return String(animName || '').trim();
+        }
+    }
+
+    _resolveAutotileTransitionTargetAt(col, row, baseAnim) {
+        try {
+            const base = String(baseAnim || '').trim();
+            if (!base) return null;
+            const sheet = this.currentSprite;
+            if (!sheet || !sheet._frames || typeof sheet._frames.has !== 'function') return null;
+
+            const counts = new Map();
+            const edgeNeighbors = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+            for (const d of edgeNeighbors) {
+                const ai = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(col + d[0], row + d[1]) : null;
+                if (ai === null || ai === undefined) continue;
+                const b = Array.isArray(this._areaBindings) ? this._areaBindings[ai] : null;
+                if (!b || !b.anim) continue;
+                const other = this._getAutotileLogicalAnimationName(b.anim);
+                if (!other || other === base) continue;
+
+                const transitionAnim = `${base}-to-${other}`;
+                if (!sheet._frames.has(transitionAnim)) continue;
+                if (this._getAnimationLogicalFrameCountExact(transitionAnim) <= 0) continue;
+
+                counts.set(other, (counts.get(other) || 0) + 1);
+            }
+
+            if (counts.size === 0) return null;
+            let bestOther = null;
+            let bestCount = -1;
+            for (const [other, n] of counts.entries()) {
+                if (n > bestCount) {
+                    bestCount = n;
+                    bestOther = other;
+                }
+            }
+            if (!bestOther) return null;
+            return {
+                targetAnim: bestOther,
+                transitionAnim: `${base}-to-${bestOther}`
+            };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _resolveAutotileBindingForTile(col, row, baseAnim) {
+        try {
+            const base = String(this._getAutotileLogicalAnimationName(baseAnim || this.selectedAnimation || '') || '').trim();
+            if (!base) return null;
+
+            const transition = this._resolveAutotileTransitionTargetAt(col, row, base);
+            const animForLookup = transition && transition.transitionAnim ? transition.transitionAnim : base;
+            const key = transition
+                ? this._computeTransitionConnectionKey(col, row, base, transition.targetAnim)
+                : this._computeConnectionKey(col, row, base);
+            let preferredDominant = null;
+            if (transition && transition.targetAnim) {
+                let baseCount = 0;
+                let targetCount = 0;
+                const ring = [
+                    [0, -1], [1, 0], [0, 1], [-1, 0],
+                    [-1, -1], [1, -1], [1, 1], [-1, 1]
+                ];
+                for (const d of ring) {
+                    const ai = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(col + d[0], row + d[1]) : null;
+                    if (ai === null || ai === undefined) continue;
+                    const b = Array.isArray(this._areaBindings) ? this._areaBindings[ai] : null;
+                    if (!b || !b.anim) continue;
+                    const logical = this._getAutotileLogicalAnimationName(b.anim);
+                    if (logical === base) baseCount++;
+                    if (logical === transition.targetAnim) targetCount++;
+                }
+                preferredDominant = (targetCount > baseCount) ? 'to' : 'from';
+            }
+
+            const chosen = this._chooseBestTileIndex(key, animForLookup, { col, row, preferredDominant });
+            if (chosen === null || typeof chosen === 'undefined') return null;
+
+            return { anim: animForLookup, index: chosen, key };
+        } catch (e) {
+            return null;
+        }
     }
 
     _normalizeOpenConnectionKey(key) {
@@ -4263,6 +4503,252 @@ export class SpriteScene extends Scene {
         return n - Math.floor(n);
     }
 
+    _getAnimationLogicalFrameCountExact(anim) {
+        try {
+            const arr = (this.currentSprite && this.currentSprite._frames) ? (this.currentSprite._frames.get(anim) || []) : [];
+            let logical = 0;
+            for (let i = 0; i < arr.length; i++) {
+                const entry = arr[i];
+                if (!entry || entry.__groupStart || entry.__groupEnd) continue;
+                logical++;
+            }
+            return Math.max(0, logical);
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    _parseTransitionAnimationName(animName) {
+        try {
+            const raw = String(animName || '').trim();
+            if (!raw) return null;
+            const match = raw.match(/^(.+?)-to-(.+)$/i);
+            if (!match) return null;
+            const fromAnim = String(match[1] || '').trim();
+            const toAnim = String(match[2] || '').trim();
+            if (!fromAnim || !toAnim) return null;
+            return { fromAnim, toAnim };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _renderTransitionBlendFrame(fromFrame, toFrame, mode = 'center', options = {}) {
+        try {
+            if (!fromFrame || !toFrame || typeof fromFrame.getContext !== 'function' || typeof toFrame.getContext !== 'function') return null;
+            const px = Math.max(1, Number(this.currentSprite && this.currentSprite.slicePx) || Number(fromFrame.width) || Number(toFrame.width) || 16);
+
+            const fromCanvas = document.createElement('canvas');
+            fromCanvas.width = px;
+            fromCanvas.height = px;
+            const fctx = fromCanvas.getContext('2d');
+            if (!fctx) return null;
+            try { fctx.imageSmoothingEnabled = false; } catch (e) {}
+            fctx.clearRect(0, 0, px, px);
+            fctx.drawImage(fromFrame, 0, 0, fromFrame.width, fromFrame.height, 0, 0, px, px);
+
+            const toCanvas = document.createElement('canvas');
+            toCanvas.width = px;
+            toCanvas.height = px;
+            const tctx = toCanvas.getContext('2d');
+            if (!tctx) return null;
+            try { tctx.imageSmoothingEnabled = false; } catch (e) {}
+            tctx.clearRect(0, 0, px, px);
+            tctx.drawImage(toFrame, 0, 0, toFrame.width, toFrame.height, 0, 0, px, px);
+
+            const fromImage = fctx.getImageData(0, 0, px, px);
+            const toImage = tctx.getImageData(0, 0, px, px);
+            const out = document.createElement('canvas');
+            out.width = px;
+            out.height = px;
+            const octx = out.getContext('2d');
+            if (!octx) return null;
+            const outImage = octx.createImageData(px, px);
+
+            const clamp01 = (v) => Math.max(0, Math.min(1, v));
+            const noiseAmount = clamp01(Number(options.noiseAmount) || 0.3);
+            const seed = Math.floor(Number(options.seed) || 1);
+            const feather = Math.max(0.03, Math.min(0.45, Number(options.transitionFeather) || 0.12));
+            const mirrorVariant = !!options.mirrorVariant;
+            const perpendicularSplit = !!options.perpendicularSplit;
+            const cornerDominant = (options.cornerDominant === 'to') ? 'to' : 'from';
+
+            const fromWeightAt = (x, y) => {
+                const nx = (x + 0.5) / px;
+                const ny = (y + 0.5) / px;
+                const n = ((this._noise01((x * 1.13) + 3, (y * 1.91) + 11, seed) * 2) - 1) * noiseAmount;
+                const boundary = 0.5 + (n * 0.22);
+
+                // Interior corner transition modes with circular quarter rounding.
+                // Dominance controls whether this tile is mostly first or mostly second tilesheet.
+                if (mode === 'corner-tl' || mode === 'corner-tr' || mode === 'corner-br' || mode === 'corner-bl') {
+                    let ux = nx, uy = ny;
+                    if (mode === 'corner-tr') { ux = 1 - nx; uy = ny; }
+                    if (mode === 'corner-br') { ux = 1 - nx; uy = 1 - ny; }
+                    if (mode === 'corner-bl') { ux = nx; uy = 1 - ny; }
+
+                    const nCorner = ((this._noise01((x * 2.11) + 19, (y * 1.73) + 31, seed + 211) * 2) - 1) * noiseAmount;
+                    const r = Math.max(0.24, Math.min(0.76, 0.48 + (nCorner * 0.06)));
+                    const dist = Math.hypot(ux, uy);
+                    const cornerFeather = Math.max(0.02, feather * 0.85);
+                    const mask = clamp01(0.5 + ((r - dist) / cornerFeather)); // ~1 inside corner wedge
+
+                    // `w` is globally flipped below (`w = 1 - fromWeightAt`), so return inverse.
+                    const finalFromWeight = (cornerDominant === 'to') ? mask : (1 - mask);
+                    return 1 - finalFromWeight;
+                }
+
+                // Default: transition varies along edge normal.
+                // Edge-transition variants can opt into perpendicular splitting.
+                let normalCoord = (mode === 'top' || mode === 'bottom') ? ny : nx;
+                let tangentCoord = (mode === 'top' || mode === 'bottom') ? nx : ny;
+                if (mirrorVariant) tangentCoord = 1 - tangentCoord;
+
+                const activeCoord = perpendicularSplit ? tangentCoord : normalCoord;
+
+                if (mode === 'top') return clamp01(((boundary - activeCoord) / feather) + 0.5);
+                if (mode === 'right') return clamp01(((activeCoord - boundary) / feather) + 0.5);
+                if (mode === 'bottom') return clamp01(((activeCoord - boundary) / feather) + 0.5);
+                if (mode === 'left') return clamp01(((boundary - activeCoord) / feather) + 0.5);
+
+                // center: patchy 50/50 blend with mild bias variation.
+                const n2 = ((this._noise01((x * 2.37) + 17, (y * 2.09) + 29, seed + 37) * 2) - 1);
+                return clamp01(0.5 + (n2 * (0.14 + noiseAmount * 0.2)));
+            };
+
+            for (let y = 0; y < px; y++) {
+                for (let x = 0; x < px; x++) {
+                    const i = (y * px + x) * 4;
+                    // Flip orientation so transition sides align with autotile placement semantics.
+                    const w = 1 - fromWeightAt(x, y);
+                    const inv = 1 - w;
+
+                    outImage.data[i] = Math.round((fromImage.data[i] * w) + (toImage.data[i] * inv));
+                    outImage.data[i + 1] = Math.round((fromImage.data[i + 1] * w) + (toImage.data[i + 1] * inv));
+                    outImage.data[i + 2] = Math.round((fromImage.data[i + 2] * w) + (toImage.data[i + 2] * inv));
+                    outImage.data[i + 3] = Math.round((fromImage.data[i + 3] * w) + (toImage.data[i + 3] * inv));
+                }
+            }
+
+            octx.putImageData(outImage, 0, 0);
+            return out;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _runNamedTransitionTilesetGeneration(settings = {}) {
+        try {
+            const anim = String(settings.sourceAnimation || this.selectedAnimation || 'idle').trim();
+            const parsed = this._parseTransitionAnimationName(anim);
+            if (!parsed) return { ok: false, reason: 'Animation name must follow "<from>-to-<to>" format.' };
+
+            const sheet = this.currentSprite;
+            if (!sheet || typeof sheet.getFrame !== 'function' || typeof sheet.insertFrame !== 'function') {
+                return { ok: false, reason: 'Sprite sheet is not ready.' };
+            }
+
+            const existingCount = this._getAnimationLogicalFrameCountExact(anim);
+            if (existingCount > 0) {
+                return { ok: false, reason: 'Transition target animation must be empty before generation.' };
+            }
+
+            const fromBaseFrame = sheet.getFrame(parsed.fromAnim, 0);
+            const toBaseFrame = sheet.getFrame(parsed.toAnim, 0);
+            if (!fromBaseFrame || !toBaseFrame) {
+                return { ok: false, reason: `Missing source frames. Ensure animations "${parsed.fromAnim}" and "${parsed.toAnim}" both have at least one frame.` };
+            }
+
+            if (!this._tileConnMap || typeof this._tileConnMap !== 'object') this._tileConnMap = {};
+
+            const defs = [
+                // Keep these 4 as center transition bands.
+                { mode: 'top', key: '10001100', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+                { mode: 'right', key: '01000110', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+                { mode: 'bottom', key: '00100011', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+                { mode: 'left', key: '00011001', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+
+                // 8 true edge-outline transitions (mirror pairs per direction).
+                { mode: 'top', key: '10001101', sourceKey: '10001100', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
+                { mode: 'top', key: '10001110', sourceKey: '10001100', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
+                { mode: 'right', key: '01000111', sourceKey: '01000110', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
+                { mode: 'right', key: '01001110', sourceKey: '01000110', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
+                { mode: 'bottom', key: '00100111', sourceKey: '00100011', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
+                { mode: 'bottom', key: '00101011', sourceKey: '00100011', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
+                { mode: 'left', key: '00011101', sourceKey: '00011001', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
+                { mode: 'left', key: '00011011', sourceKey: '00011001', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
+
+                // 8 interior-corner transitions:
+                // 4 mostly-first + 1-part-second, and 4 mostly-second + 1-part-first.
+                { mode: 'corner-tl', key: '00001000', sourceKey: '00001000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                { mode: 'corner-tr', key: '00000100', sourceKey: '00000100', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                { mode: 'corner-br', key: '00000001', sourceKey: '00000001', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                { mode: 'corner-bl', key: '00000010', sourceKey: '00000010', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                { mode: 'corner-tl', key: '00001000', sourceKey: '00001000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
+                { mode: 'corner-tr', key: '00000100', sourceKey: '00000100', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
+                { mode: 'corner-br', key: '00000001', sourceKey: '00000001', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
+                { mode: 'corner-bl', key: '00000010', sourceKey: '00000010', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' }
+            ];
+
+            if (!this._transitionVariantMeta || typeof this._transitionVariantMeta !== 'object') this._transitionVariantMeta = {};
+
+            let created = 0;
+            let dstIndex = 0;
+            for (const def of defs) {
+                let fromFrame = fromBaseFrame;
+                let toFrame = toBaseFrame;
+
+                // For true edge transitions, blend matching connector frames from each source tilesheet.
+                if (def.useConnFrames) {
+                    const sourceKey = String(def.sourceKey || def.key || '00000000');
+                    const fromIdx = this._findConnectionFrameIndex(parsed.fromAnim, sourceKey);
+                    const toIdx = this._findConnectionFrameIndex(parsed.toAnim, sourceKey);
+                    const maybeFrom = (fromIdx !== null && Number.isFinite(fromIdx)) ? sheet.getFrame(parsed.fromAnim, fromIdx) : null;
+                    const maybeTo = (toIdx !== null && Number.isFinite(toIdx)) ? sheet.getFrame(parsed.toAnim, toIdx) : null;
+                    if (maybeFrom) fromFrame = maybeFrom;
+                    if (maybeTo) toFrame = maybeTo;
+                }
+
+                const rendered = this._renderTransitionBlendFrame(fromFrame, toFrame, def.mode, {
+                    ...settings,
+                    mirrorVariant: !!def.mirrorVariant,
+                    perpendicularSplit: !!def.perpendicularSplit,
+                    cornerDominant: def.cornerDominant || 'from'
+                });
+                if (!rendered) continue;
+
+                sheet.insertFrame(anim);
+                const dstFrame = sheet.getFrame(anim, dstIndex);
+                const dctx = dstFrame && dstFrame.getContext ? dstFrame.getContext('2d') : null;
+                if (!dctx) {
+                    dstIndex++;
+                    continue;
+                }
+                dctx.clearRect(0, 0, dstFrame.width, dstFrame.height);
+                dctx.drawImage(rendered, 0, 0, dstFrame.width, dstFrame.height);
+                this._tileConnMap[anim + '::' + dstIndex] = this._normalizeOpenConnectionKey(def.key);
+                this._transitionVariantMeta[anim + '::' + dstIndex] = {
+                    mode: String(def.mode || ''),
+                    cornerDominant: def.cornerDominant || null
+                };
+                created++;
+                dstIndex++;
+            }
+
+            try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
+            if (created > 0) {
+                try {
+                    if (this.stateController && typeof this.stateController.setActiveFrame === 'function') this.stateController.setActiveFrame(0);
+                    else this.selectedFrame = 0;
+                } catch (e) {}
+                return { ok: true, created, total: defs.length, fromAnim: parsed.fromAnim, toAnim: parsed.toAnim };
+            }
+            return { ok: false, reason: 'No transition tiles were generated.' };
+        } catch (e) {
+            return { ok: false, reason: String((e && e.message) || e || 'Unknown error') };
+        }
+    }
+
     _renderProceduralConnectionFrame(sourceFrame, openKey, options = {}) {
         try {
             if (!sourceFrame || typeof sourceFrame.getContext !== 'function') return null;
@@ -4284,6 +4770,16 @@ export class SpriteScene extends Scene {
             const channelMultiplier = (colorChannel === 'h') ? 0.2 : 1.0;
             const baseAdjust = Math.max(0, Number(options.baseAdjust) || 0.05);
             const maxDelta = Math.max(0.0001, baseAdjust * channelMultiplier * strength);
+
+            const useCustomOutline = !!options.useCustomOutline;
+            let _customBaseColor = null;
+            if (useCustomOutline) {
+                try {
+                    _customBaseColor = Color.convertColor(String(options.customOutlineHex || '#FFFFFF'));
+                } catch (e) {
+                    try { _customBaseColor = Color.fromHex('#FFFFFF'); } catch (e2) { _customBaseColor = null; }
+                }
+            }
 
             const srcImage = srcCtx.getImageData(0, 0, px, px);
             const out = document.createElement('canvas');
@@ -4414,7 +4910,33 @@ export class SpriteScene extends Scene {
                     let delta = (tone * edgeBlend * maxDelta) + noise;
                     delta = Math.round(delta / stepUnit) * stepUnit;
 
-                    const c = new Color(outImage.data[i], outImage.data[i + 1], outImage.data[i + 2], alpha, 'rgb').toHsv();
+                    // If using a custom outline color: blend between source pixel and custom color
+                    // across the falloff region, including noise perturbation, so the edge
+                    // retains the same noisy transition behavior as the native outline.
+                    if (useCustomOutline && _customBaseColor) {
+                        try {
+                            const srcRgb = new Color(outImage.data[i], outImage.data[i + 1], outImage.data[i + 2], alpha, 'rgb');
+                            const customRgb = (_customBaseColor.type === 'rgb') ? _customBaseColor : _customBaseColor.toRgb();
+                            const noiseNorm = (maxDelta > 0) ? (noise / maxDelta) : 0; // roughly in [-noiseAmount,noiseAmount]
+                            let mixAmt = edgeBlend + noiseNorm;
+                            mixAmt = Math.max(0, Math.min(1, mixAmt));
+                            // Quantize the blend amount into discrete steps to match `colorSteps` (dithering)
+                            const quantMix = Math.round(mixAmt * stepDiv) / stepDiv;
+                            const r = Math.round(mix(srcRgb.a, customRgb.a, quantMix));
+                            const g = Math.round(mix(srcRgb.b, customRgb.b, quantMix));
+                            const b = Math.round(mix(srcRgb.c, customRgb.c, quantMix));
+                            const aMix = mix(srcRgb.d ?? alpha, customRgb.d ?? 1, quantMix);
+                            outImage.data[i] = Math.max(0, Math.min(255, r));
+                            outImage.data[i + 1] = Math.max(0, Math.min(255, g));
+                            outImage.data[i + 2] = Math.max(0, Math.min(255, b));
+                            outImage.data[i + 3] = Math.max(0, Math.min(255, Math.round((aMix ?? alpha) * 255)));
+                        } catch (e) {
+                            continue;
+                        }
+                        continue;
+                    }
+
+                    let c = new Color(outImage.data[i], outImage.data[i + 1], outImage.data[i + 2], alpha, 'rgb').toHsv();
                     if (!c) continue;
 
                     if (colorChannel === 'h') c.a = ((c.a + delta) % 1 + 1) % 1;
@@ -4692,12 +5214,18 @@ export class SpriteScene extends Scene {
         }
     }
 
-    _chooseBestFrameByConnections(desiredClosedKey, anim) {
+    _chooseBestFrameByConnections(desiredClosedKey, anim, context = null) {
         try {
             if (!anim || !this.currentSprite || !this.currentSprite._frames) return null;
             const frames = this.currentSprite._frames.get(anim) || [];
             if (!Array.isArray(frames) || frames.length === 0) return null;
             if (!this._tileConnMap || typeof this._tileConnMap !== 'object') return null;
+
+            const cx = (context && Number.isFinite(context.col)) ? (Number(context.col) | 0) : null;
+            const cy = (context && Number.isFinite(context.row)) ? (Number(context.row) | 0) : null;
+            const preferredDominant = (context && (context.preferredDominant === 'to' || context.preferredDominant === 'from'))
+                ? context.preferredDominant
+                : null;
 
             const scoreFor = (candClosedKey) => {
                 let scClosedEdges = 0, scOpenEdges = 0, scOpenCorners = 0, scClosedCorners = 0;
@@ -4726,16 +5254,36 @@ export class SpriteScene extends Scene {
 
             let bestIndex = null;
             let bestScore = null;
+            const exact = [];
             for (let i = 0; i < frames.length; i++) {
                 const key = String(anim) + '::' + i;
                 const openBits = this._tileConnMap[key];
                 if (typeof openBits !== 'string' || !/^[01]{8}$/.test(openBits)) continue;
                 const candClosed = this._openConnectionToClosedKey(openBits);
+                if (candClosed === desiredClosedKey) exact.push(i);
                 const score = scoreFor(candClosed);
                 if (!bestScore || compareScore(score, bestScore) > 0) {
                     bestScore = score;
                     bestIndex = i;
                 }
+            }
+
+            if (exact.length > 0) {
+                if (preferredDominant && this._transitionVariantMeta && typeof this._transitionVariantMeta === 'object') {
+                    const preferred = exact.filter((idx) => {
+                        const meta = this._transitionVariantMeta[String(anim) + '::' + idx];
+                        return !!(meta && meta.cornerDominant === preferredDominant);
+                    });
+                    if (preferred.length === 1) return preferred[0];
+                    if (preferred.length > 1) {
+                        if (cx === null || cy === null) return preferred[0];
+                        const hashPreferred = Math.abs((((cx * 73856093) ^ (cy * 19349663)) >>> 0));
+                        return preferred[hashPreferred % preferred.length];
+                    }
+                }
+                if (exact.length === 1 || cx === null || cy === null) return exact[0];
+                const hash = Math.abs((((cx * 73856093) ^ (cy * 19349663)) >>> 0));
+                return exact[hash % exact.length];
             }
             return bestIndex;
         } catch (e) {
@@ -4744,8 +5292,8 @@ export class SpriteScene extends Scene {
     }
 
     // Choose best matching available tile index for a desired key and animation.
-    _chooseBestTileIndex(desiredKey, anim) {
-        const fromFrameConnections = this._chooseBestFrameByConnections(desiredKey, anim);
+    _chooseBestTileIndex(desiredKey, anim, context = null) {
+        const fromFrameConnections = this._chooseBestFrameByConnections(desiredKey, anim, context);
         if (fromFrameConnections !== null && fromFrameConnections !== undefined) return fromFrameConnections;
 
         if (!this._availableTileConn) return null;
@@ -4795,12 +5343,16 @@ export class SpriteScene extends Scene {
     _applyAutotileAt(col, row, anim) {
         const areaIdx = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(col, row) : null;
         if (areaIdx === null || areaIdx === undefined) return;
-        const key = this._computeConnectionKey(col, row, anim);
-        const chosen = this._chooseBestTileIndex(key, anim);
-        if (chosen === null || chosen === undefined) return;
+
         const old = this._areaBindings[areaIdx];
-        const entry = (old && typeof old === 'object') ? { ...old } : { anim: anim, index: chosen };
-        entry.index = chosen;
+        const logicalAnim = String(this._getAutotileLogicalAnimationName(anim || (old && old.anim) || this.selectedAnimation || '') || '').trim();
+        if (!logicalAnim) return;
+        const resolved = this._resolveAutotileBindingForTile(col, row, logicalAnim);
+        if (!resolved) return;
+
+        const entry = (old && typeof old === 'object') ? { ...old } : { anim: resolved.anim, index: resolved.index };
+        entry.anim = resolved.anim;
+        entry.index = resolved.index;
         return this._setAreaBindingAtIndex(areaIdx, entry, true);
     }
 
@@ -4813,8 +5365,10 @@ export class SpriteScene extends Scene {
             const ai = (typeof this._getAreaIndexForCoord === 'function') ? this._getAreaIndexForCoord(c, r) : null;
             if (ai === null || ai === undefined) continue;
             const b = Array.isArray(this._areaBindings) ? this._areaBindings[ai] : null;
-            if (!b || b.anim !== anim) continue;
-            this._applyAutotileAt(c, r, anim);
+            if (!b) continue;
+            const logical = this._getAutotileLogicalAnimationName(b.anim);
+            if (!logical || logical !== anim) continue;
+            this._applyAutotileAt(c, r, logical);
         }
     }
 
