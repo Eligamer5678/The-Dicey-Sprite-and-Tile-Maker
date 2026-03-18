@@ -26,6 +26,9 @@ export class SpriteScene extends Scene {
         this._checkerboardDark = '#2e2e2eff';
         this._renderOnlyAllVisible = false;
         this._lastVisibleTileBounds = null;
+        this._frameMousePosInfo = null;
+        this._drawAreaIndexMap = new Map();
+        this._renderScratchCanvases = Object.create(null);
     }
 
     onReady() {
@@ -1750,13 +1753,13 @@ export class SpriteScene extends Scene {
             else { x = ix; y = iy; }
             // Prefer the last-active area (where the mouse was); fall back to centered area
             let area = null;
-            if (typeof this._activeDrawAreaIndex === 'number' && Array.isArray(this._drawAreas)) {
-                const direct = this._drawAreas[this._activeDrawAreaIndex];
-                if (direct) area = direct;
-                if (!area) {
-                    for (const a of this._drawAreas) {
-                        if (a && typeof a.areaIndex === 'number' && a.areaIndex === this._activeDrawAreaIndex) { area = a; break; }
-                    }
+            if (typeof this._activeDrawAreaIndex === 'number') {
+                if (this._drawAreaIndexMap && typeof this._drawAreaIndexMap.get === 'function') {
+                    area = this._drawAreaIndexMap.get(this._activeDrawAreaIndex) || null;
+                }
+                if (!area && Array.isArray(this._drawAreas)) {
+                    const direct = this._drawAreas[this._activeDrawAreaIndex];
+                    if (direct) area = direct;
                 }
             }
             if (!area) area = this.computeDrawArea();
@@ -3243,7 +3246,12 @@ export class SpriteScene extends Scene {
         this._sceneTime = (this._sceneTime || 0) + (tickDelta || 0);
         this.mouse.update(tickDelta)
         this.keys.update(tickDelta)
-        try { this._installPixelLayerHooks(); } catch (e) {}
+        try {
+            if (this.currentSprite && this._pixelHookSheetRef !== this.currentSprite) {
+                this._installPixelLayerHooks();
+                this._pixelHookSheetRef = this.currentSprite;
+            }
+        } catch (e) {}
         try { this._updateRemotePlayerSims(tickDelta); } catch (e) {}
         if (!this._playerSimMode) {
             this._playerSimMode = {
@@ -10040,6 +10048,8 @@ export class SpriteScene extends Scene {
             if (!Array.isArray(changes) || changes.length === 0) return;
             const sheet = this.currentSprite;
             if (!sheet) return;
+            this._animPixelToken = (Number(this._animPixelToken) || 0) + 1;
+            const token = this._animPixelToken;
             // compute distance from origin for each change
             const entries = changes.map(c => ({ ...c, dist: Math.hypot((c.x - (originX||0)), (c.y - (originY||0))) }));
             const maxDist = entries.reduce((m, e) => Math.max(m, e.dist), 0) || 1;
@@ -10056,6 +10066,7 @@ export class SpriteScene extends Scene {
                 const batch = buckets[i];
                 setTimeout(() => {
                     try {
+                        if (token !== this._animPixelToken) return;
                         if (!batch || batch.length === 0) return;
                         if (typeof sheet.modifyFrame === 'function') {
                             const simple = batch.map(b => ({ x: b.x, y: b.y, color: b.color, blendType: b.blendType || 'replace' }));
@@ -10082,6 +10093,8 @@ export class SpriteScene extends Scene {
     _animateSelectPoints(points, durationMs = 200, origin = null) {
         try {
             if (!Array.isArray(points) || points.length === 0) return;
+            this._animSelectToken = (Number(this._animSelectToken) || 0) + 1;
+            const token = this._animSelectToken;
             const steps = Math.min(12, Math.max(4, Math.ceil(points.length / 25)));
             // compute centroid to expand from
             let cx = 0, cy = 0;
@@ -10100,14 +10113,18 @@ export class SpriteScene extends Scene {
             }
             const delay = Math.max(0, Math.round(durationMs / steps));
             let accumulated = this.selectionPoints && this.selectionPoints.length ? this.selectionPoints.slice() : [];
+            const seen = new Set(accumulated.map((sp) => `${sp.x},${sp.y},${(typeof sp.areaIndex === 'number') ? sp.areaIndex : 'n'}`));
             for (let i = 0; i < buckets.length; i++) {
                 const batch = buckets[i];
                 setTimeout(() => {
                     try {
+                        if (token !== this._animSelectToken) return;
                         if (!batch || batch.length === 0) return;
                         for (const p of batch) {
-                            const exists = accumulated.some(sp => sp.x === p.x && sp.y === p.y && sp.areaIndex === p.areaIndex);
-                            if (!exists) accumulated.push(p);
+                            const pKey = `${p.x},${p.y},${(typeof p.areaIndex === 'number') ? p.areaIndex : 'n'}`;
+                            if (seen.has(pKey)) continue;
+                            seen.add(pKey);
+                            accumulated.push(p);
                         }
                         if (this.stateController && typeof this.stateController.setSelectionPoints === 'function') {
                             try { this.stateController.setSelectionPoints(accumulated.slice()); this.stateController.clearSelectionRegion(); } catch (e) {}
@@ -10127,6 +10144,8 @@ export class SpriteScene extends Scene {
             if (!Array.isArray(entries) || entries.length === 0) return;
             const sheet = this.currentSprite;
             if (!sheet) return;
+            this._animFillToken = (Number(this._animFillToken) || 0) + 1;
+            const token = this._animFillToken;
             // Compute fill-iteration distances (BFS) from start so the animation
             // follows the actual topology of the selected pixels rather than a
             // radial or simple projection. Build a map of points for adjacency.
@@ -10153,12 +10172,13 @@ export class SpriteScene extends Scene {
             // BFS from startEntry to compute iteration distances
             if (startEntry) {
                 const q = [];
+                let head = 0;
                 startEntry._dist = 0;
                 q.push(startEntry);
                 const visited = new Set();
                 visited.add(startEntry.x + ',' + startEntry.y);
-                while (q.length) {
-                    const cur = q.shift();
+                while (head < q.length) {
+                    const cur = q[head++];
                     const d = cur._dist;
                     const nx = cur.x, ny = cur.y;
                     const neigh = [ [nx+1, ny], [nx-1, ny], [nx, ny+1], [nx, ny-1] ];
@@ -10195,6 +10215,7 @@ export class SpriteScene extends Scene {
                 const batch = buckets[i];
                 setTimeout(() => {
                     try {
+                        if (token !== this._animFillToken) return;
                         // for each pixel compute a mix factor based on normalized distance plus small noise
                         const changes = [];
                                 for (const p of batch) {
@@ -10236,6 +10257,19 @@ export class SpriteScene extends Scene {
                 try { clearTimeout(this._sendScheduledId); } catch (e) {}
                 this._sendScheduledId = null;
             }, this._sendIntervalMs || 120);
+        } catch (e) { /* ignore */ }
+    }
+
+    _clearPendingCollabOps() {
+        try {
+            if (this._sendScheduledId) {
+                try { clearTimeout(this._sendScheduledId); } catch (e) {}
+                this._sendScheduledId = null;
+            }
+            if (Array.isArray(this._opBuffer) && this._opBuffer.length > 0) this._opBuffer.length = 0;
+            if (this._tileOpPending && typeof this._tileOpPending.clear === 'function') this._tileOpPending.clear();
+            if (this._spriteOpPending && typeof this._spriteOpPending.clear === 'function') this._spriteOpPending.clear();
+            this._tileStatePending = null;
         } catch (e) { /* ignore */ }
     }
 
@@ -10377,6 +10411,7 @@ export class SpriteScene extends Scene {
                 // In SpriteScene we do not fall back to Scene.sendState().
                 // This prevents per-tick Firebase writes when running
                 // WebRTC with handshake-only signaling.
+                this._clearPendingCollabOps();
                 return;
             }
 
@@ -11967,6 +12002,18 @@ export class SpriteScene extends Scene {
         }
         if (!samples.length) return;
 
+        const maxSamples = Math.max(256, Number(this._undoPixelSampleLimit) || 12000);
+        if (samples.length > maxSamples) {
+            const trimmed = [];
+            const step = samples.length / maxSamples;
+            for (let i = 0; i < maxSamples; i++) {
+                const idx = Math.min(samples.length - 1, Math.floor(i * step));
+                trimmed.push(samples[idx]);
+            }
+            samples.length = 0;
+            for (const s of trimmed) samples.push(s);
+        }
+
         const now = Date.now();
         const layerIndex = Number.isFinite(Number(pixelLayer)) ? (Number(pixelLayer) | 0) : (this._activePixelLayerIndex | 0);
         const last = this._undoStack[this._undoStack.length - 1];
@@ -12940,6 +12987,7 @@ export class SpriteScene extends Scene {
     _queueTileOp(action, payload = {}) {
         try {
             if (this._suppressOutgoing) return false;
+            if (!this._canSendCollab || !this._canSendCollab()) return false;
             const col = Number(payload.col);
             const row = Number(payload.row);
             if (!Number.isFinite(col) || !Number.isFinite(row)) return false;
@@ -13293,6 +13341,7 @@ export class SpriteScene extends Scene {
     _queueSpriteOp(action, payload = {}) {
         try {
             if (this._suppressOutgoing) return false;
+            if (!this._canSendCollab || !this._canSendCollab()) return false;
             if (!this._spriteOpPending) this._spriteOpPending = new Map();
             if (action === 'add') {
                 const entity = payload && payload.entity ? payload.entity : null;
@@ -13991,6 +14040,10 @@ export class SpriteScene extends Scene {
             const fi = Math.max(0, Number(frameIdx) | 0);
             const layers = Array.isArray(this._pixelLayers) ? this._pixelLayers : [{ name: 'Pixel Layer 1', visibility: 0 }];
             const active = Math.max(0, Math.min((this._activePixelLayerIndex | 0), layers.length - 1));
+            const previewActive = !!(this._playerSimMode && this._playerSimMode.active);
+            const cache = (this._compositedFrameCache && this._compositedFrameCache instanceof Map) ? this._compositedFrameCache : null;
+            const cacheKey = `${a}|${fi}|${includeHidden ? 1 : 0}|${forceDimFullVisibility ? 1 : 0}|${active}|${previewActive ? 1 : 0}|${layers.length}`;
+            if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
 
             let width = 0;
             let height = 0;
@@ -14008,6 +14061,7 @@ export class SpriteScene extends Scene {
 
             if (refs.length === 0) {
                 const fallback = this._ensurePixelLayerFrameCanvas(active, a, fi, true);
+                if (cache) cache.set(cacheKey, fallback || null);
                 return fallback || null;
             }
 
@@ -14017,7 +14071,6 @@ export class SpriteScene extends Scene {
             const ctx = c.getContext('2d');
             try { ctx.imageSmoothingEnabled = false; } catch (e) {}
 
-            const previewActive = !!(this._playerSimMode && this._playerSimMode.active);
             for (const ref of refs) {
                 const rel = ref.i - active;
                 let alpha = 1;
@@ -14040,6 +14093,7 @@ export class SpriteScene extends Scene {
                     ctx.restore();
                 }
             }
+            if (cache) cache.set(cacheKey, c);
             return c;
         } catch (e) {
             return null;
@@ -14263,11 +14317,13 @@ export class SpriteScene extends Scene {
             if (!Array.isArray(layer.bindings)) layer.bindings = [];
             if (!Array.isArray(layer.transforms)) layer.transforms = [];
             this._activeTileLayerIndex = idx;
+            const bindingsChanged = this._areaBindings !== layer.bindings;
+            const transformsChanged = this._areaTransforms !== layer.transforms;
             this._areaBindings = layer.bindings;
             this._areaTransforms = layer.transforms;
             try {
-                this.modifyState(this._areaBindings, false, false, ['tilemap', 'bindings']);
-                this.modifyState(this._areaTransforms, false, false, ['tilemap', 'transforms']);
+                if (bindingsChanged) this.modifyState(this._areaBindings, false, false, ['tilemap', 'bindings']);
+                if (transformsChanged) this.modifyState(this._areaTransforms, false, false, ['tilemap', 'transforms']);
             } catch (e) {}
         } catch (e) {}
     }
@@ -14507,36 +14563,73 @@ export class SpriteScene extends Scene {
             if (!entries || entries.length === 0) return false;
             const drawCtx = this.Draw && this.Draw.ctx;
             if (!drawCtx) return false;
+            const drawSize = new Vector(dstW, dstH);
+
+            const getScratch = (key) => {
+                if (!this._renderScratchCanvases || typeof this._renderScratchCanvases !== 'object') {
+                    this._renderScratchCanvases = Object.create(null);
+                }
+                let canvas = this._renderScratchCanvases[key];
+                if (!canvas) {
+                    canvas = document.createElement('canvas');
+                    this._renderScratchCanvases[key] = canvas;
+                }
+                const w = Math.max(1, Math.floor(dstW));
+                const h = Math.max(1, Math.floor(dstH));
+                if (canvas.width !== w) canvas.width = w;
+                if (canvas.height !== h) canvas.height = h;
+                return canvas;
+            };
 
             for (const entry of entries) {
                 if (!entry || !entry.binding) continue;
                 const b = entry.binding;
                 const anim = b.anim;
-                const multi = Array.isArray(b.multiFrames) ? b.multiFrames.filter(v => Number.isFinite(v)).map(v => Number(v)) : null;
-                const frameList = (multi && multi.length > 0) ? multi : [Number(b.index) || 0];
-
-                const composeCanvas = document.createElement('canvas');
-                composeCanvas.width = Math.max(1, Math.floor(dstW));
-                composeCanvas.height = Math.max(1, Math.floor(dstH));
-                const cctx = composeCanvas.getContext('2d');
-                try { cctx.imageSmoothingEnabled = false; } catch (e) {}
-
-                for (const fi of frameList) {
-                    const fr = frameResolver(anim, fi);
-                    if (!fr) continue;
-                    cctx.drawImage(fr, 0, 0, fr.width, fr.height, 0, 0, composeCanvas.width, composeCanvas.height);
-                }
-
+                const frameList = (Array.isArray(b.multiFrames) && b.multiFrames.length > 0) ? b.multiFrames : null;
                 const hasTransform = !!(entry.transform && ((entry.transform.rot || 0) !== 0 || entry.transform.flipH));
-                let drawable = composeCanvas;
-                if (hasTransform && !renderOnly) {
+                const needsCompose = hasTransform && !renderOnly;
+
+                if (!needsCompose) {
+                    drawCtx.save();
+                    drawCtx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
+                    if (frameList && frameList.length > 0) {
+                        for (let i = 0; i < frameList.length; i++) {
+                            const fi = Number(frameList[i]);
+                            if (!Number.isFinite(fi)) continue;
+                            const fr = frameResolver(anim, fi);
+                            if (!fr) continue;
+                            this.Draw.image(fr, dstPos, drawSize, null, 0, 1, false);
+                        }
+                    } else {
+                        const fr = frameResolver(anim, Number(b.index) || 0);
+                        if (fr) this.Draw.image(fr, dstPos, drawSize, null, 0, 1, false);
+                    }
+                    drawCtx.restore();
+                } else {
+                    const composeCanvas = getScratch('compose');
+                    const cctx = composeCanvas.getContext('2d');
+                    try { cctx.imageSmoothingEnabled = false; } catch (e) {}
+                    cctx.clearRect(0, 0, composeCanvas.width, composeCanvas.height);
+                    if (frameList && frameList.length > 0) {
+                        for (let i = 0; i < frameList.length; i++) {
+                            const fi = Number(frameList[i]);
+                            if (!Number.isFinite(fi)) continue;
+                            const fr = frameResolver(anim, fi);
+                            if (!fr) continue;
+                            cctx.drawImage(fr, 0, 0, fr.width, fr.height, 0, 0, composeCanvas.width, composeCanvas.height);
+                        }
+                    } else {
+                        const fr = frameResolver(anim, Number(b.index) || 0);
+                        if (fr) cctx.drawImage(fr, 0, 0, fr.width, fr.height, 0, 0, composeCanvas.width, composeCanvas.height);
+                    }
+
+                    let drawable = composeCanvas;
                     try {
                         const t = entry.transform;
-                        const tcanvas = document.createElement('canvas');
-                        tcanvas.width = composeCanvas.width;
-                        tcanvas.height = composeCanvas.height;
+                        const tcanvas = getScratch('transform');
                         const tctx = tcanvas.getContext('2d');
                         try { tctx.imageSmoothingEnabled = false; } catch (e) {}
+                        tctx.clearRect(0, 0, tcanvas.width, tcanvas.height);
                         tctx.save();
                         tctx.translate(tcanvas.width / 2, tcanvas.height / 2);
                         if (t.flipH) tctx.scale(-1, 1);
@@ -14545,12 +14638,12 @@ export class SpriteScene extends Scene {
                         tctx.restore();
                         drawable = tcanvas;
                     } catch (e) {}
-                }
 
-                drawCtx.save();
-                drawCtx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
-                this.Draw.image(drawable, dstPos, new Vector(dstW, dstH), null, 0, 1, false);
-                drawCtx.restore();
+                    drawCtx.save();
+                    drawCtx.globalAlpha = Math.max(0, Math.min(1, Number(entry.alpha) || 1));
+                    this.Draw.image(drawable, dstPos, drawSize, null, 0, 1, false);
+                    drawCtx.restore();
+                }
 
                 if ((Number(entry.darken) || 0) > 0) {
                     drawCtx.save();
@@ -14764,6 +14857,9 @@ export class SpriteScene extends Scene {
 
     draw() {
         if (!this.isReady) return;
+        if (!this._compositedFrameCache || !(this._compositedFrameCache instanceof Map)) this._compositedFrameCache = new Map();
+        else this._compositedFrameCache.clear();
+        this._frameMousePosInfo = null;
         this._trackSelectionUndoState();
         this.Draw.background('#222')
         this.Draw.pushMatrix()
@@ -14842,6 +14938,20 @@ export class SpriteScene extends Scene {
         }
 
         this._drawAreas = areas;
+        this._drawAreaIndexMap.clear();
+        for (let i = 0; i < areas.length; i++) {
+            const area = areas[i];
+            if (!area) continue;
+            const idx = (typeof area.areaIndex === 'number') ? area.areaIndex : i;
+            this._drawAreaIndexMap.set(idx, area);
+        }
+
+        // Cache mouse hit info once per frame to avoid repeated O(area count) hit-tests in overlay passes.
+        try {
+            this._frameMousePosInfo = this.getPos(this.mouse && this.mouse.pos);
+        } catch (e) {
+            this._frameMousePosInfo = null;
+        }
 
         if (!this.tilemode) this._renderOnlyAllVisible = false;
 
@@ -14938,6 +15048,7 @@ export class SpriteScene extends Scene {
         if (this.selectedSpriteEntityId) {
             this.UIDraw.text(`Sprite Selected: ${this.selectedSpriteEntityId}`, new Vector(1920 - 12, 1080 - 46), '#66CCFFFF', 1, 12, { align: 'right', baseline: 'bottom', font: 'monospace' });
         }
+        this._frameMousePosInfo = null;
     }
 
     /**
@@ -15227,12 +15338,9 @@ export class SpriteScene extends Scene {
 
             // Determine which draw area (if any) the mouse is currently over
             // so we can limit tilemode previews to matching frame types.
-            const posInfoGlobal = this.getPos(this.mouse && this.mouse.pos);
+            const posInfoGlobal = this._frameMousePosInfo || this.getPos(this.mouse && this.mouse.pos);
             const hoveredInside = !!(posInfoGlobal && posInfoGlobal.inside);
             const hoveredAreaIndex = hoveredInside ? posInfoGlobal.areaIndex : null;
-            const areaInfo = (Array.isArray(this._drawAreas) && typeof areaIndex === 'number')
-                ? this._drawAreas.find(a => a && a.areaIndex === areaIndex)
-                : null;
 
             // Render-only handled separately to avoid per-area stacking
             if (isRenderOnly) return;
@@ -15524,8 +15632,13 @@ export class SpriteScene extends Scene {
         }
         // prefer the area the user last interacted with; fallback to centered area
         let area = null;
-        if (typeof this._activeDrawAreaIndex === 'number' && Array.isArray(this._drawAreas) && this._drawAreas[this._activeDrawAreaIndex]) {
-            area = this._drawAreas[this._activeDrawAreaIndex];
+        if (typeof this._activeDrawAreaIndex === 'number') {
+            if (this._drawAreaIndexMap && typeof this._drawAreaIndexMap.get === 'function') {
+                area = this._drawAreaIndexMap.get(this._activeDrawAreaIndex) || null;
+            }
+            if (!area && Array.isArray(this._drawAreas) && this._drawAreas[this._activeDrawAreaIndex]) {
+                area = this._drawAreas[this._activeDrawAreaIndex];
+            }
         }
         if (!area) area = this.computeDrawArea();
         if (!area) return;

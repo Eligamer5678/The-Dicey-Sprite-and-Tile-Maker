@@ -172,6 +172,7 @@ export function initializeSpriteSceneState(scene, currentSprite) {
     scene._redoStack = [];
     scene._undoMax = 200;
     scene._undoTimeWindowMs = 30000;
+    scene._undoPixelSampleLimit = 12000;
     scene._ignoreUndoCapture = false;
     scene._undoMergeMs = 100;
     scene._tileUndoPendingBefore = null;
