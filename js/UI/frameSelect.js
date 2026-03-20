@@ -135,7 +135,12 @@ export default class FrameSelect {
             if (!this.scene) return;
             if (!this.scene._tileConnMap) this.scene._tileConnMap = {};
             const k = String(anim || '') + '::' + Number(frame || 0);
-            this.scene._tileConnMap[k] = this._normalizeOpenConnKey(key);
+            if (typeof this.scene._setTileConnection === 'function') {
+                try { this.scene._setTileConnection(anim, frame, key, true); }
+                catch (e) { this.scene._tileConnMap[k] = this._normalizeOpenConnKey(key); }
+            } else {
+                this.scene._tileConnMap[k] = this._normalizeOpenConnKey(key);
+            }
         } catch (e) {}
     }
 

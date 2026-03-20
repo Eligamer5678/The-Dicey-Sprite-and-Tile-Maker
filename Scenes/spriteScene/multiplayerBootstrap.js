@@ -46,7 +46,8 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
                                     try { scene._markPixelModified(animation, Number(index), Number(p.x), Number(p.y), now); } catch (e) {}
                                 }
                             } catch (e) {}
-                            if (!scene._suppressOutgoing && scene._canSendCollab && scene._canSendCollab()) {
+                            if (!scene._suppressOutgoing) {
+                                // Always buffer pixel edits locally; transport will enqueue/flush when available.
                                 scene._opBuffer.push({ type: 'draw', anim: animation, frame: Number(index), pixelLayer, pixels, client: scene.clientId, time: Date.now() });
                                 scene._scheduleSend && scene._scheduleSend();
                             }
@@ -66,7 +67,8 @@ export function setupSpriteSceneMultiplayerHooks(scene, sheet) {
                     try {
                         const now = Date.now();
                         try { scene._markPixelModified(animation, Number(index), Number(x), Number(y), now); } catch (e) {}
-                        if (!scene._suppressOutgoing && scene._canSendCollab && scene._canSendCollab()) {
+                        if (!scene._suppressOutgoing) {
+                            // Always buffer pixel edits locally; transport will enqueue/flush when available.
                             scene._opBuffer.push({ type: 'draw', anim: animation, frame: Number(index), pixelLayer, pixels: [{ x: Number(x), y: Number(y), color: (color || '#000000') }], client: scene.clientId, time: now });
                             scene._scheduleSend && scene._scheduleSend();
                         }

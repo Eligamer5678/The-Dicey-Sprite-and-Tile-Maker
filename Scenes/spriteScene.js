@@ -1844,6 +1844,89 @@ export class SpriteScene extends Scene {
         return false;
     }
 
+    _sendFrameDataForFrame(anim, index, canvas) {
+        try {
+            if (!anim || !canvas || typeof canvas.toDataURL !== 'function') return false;
+            const dataUrl = (() => { try { return canvas.toDataURL('image/png'); } catch (e) { return null; } })();
+            if (!dataUrl) return false;
+            const diff = {};
+            const id = (Date.now()) + '_' + Math.random().toString(36).slice(2,6);
+            diff['edits/' + id] = { type: 'frameData', anim: String(anim), index: Number.isFinite(Number(index)) ? Number(index) : null, dataUrl, client: this.clientId, time: Date.now() };
+            try {
+                // If we have a raw open WebRTC data channel, send the frame as
+                // chunked base64 parts directly to avoid creating a single very
+                // large JSON diff message that could break the channel.
+                try {
+                    const ch = this._webrtcChannel;
+                    if (ch && ch.readyState === 'open' && typeof ch.send === 'function') {
+                        try {
+                            // strip prefix and chunk the base64 payload
+                            const prefix = 'data:image/png;base64,';
+                            const base = (String(dataUrl || '')).startsWith(prefix) ? String(dataUrl).slice(prefix.length) : String(dataUrl);
+                            const chunkSize = 8192; // characters per chunk (~6KB binary)
+                            const parts = [];
+                            for (let i = 0; i < base.length; i += chunkSize) parts.push(base.slice(i, i + chunkSize));
+                            const chunkCount = parts.length;
+                            // notify start
+                            try { ch.send(JSON.stringify({ kind: 'frameStart', id, anim: String(anim), index: Number.isFinite(Number(index)) ? Number(index) : null, chunkCount, client: this.clientId, time: Date.now() })); } catch (e) {}
+                            // send chunks sequentially
+                            for (let si = 0; si < parts.length; si++) {
+                                try { ch.send(JSON.stringify({ kind: 'frameChunk', id, seq: si, data: parts[si] })); } catch (e) { throw e; }
+                            }
+                            try { console.debug && console.debug('[collab] _sendFrameDataForFrame sentChunkedViaWebRTC?', true, anim, index, 'chunks', chunkCount); } catch (e) {}
+                            // reset send failure counter on success
+                            try { this._webrtcSendFailures = 0; } catch (e) {}
+                            return true;
+                        } catch (e) {
+                            try { console.warn && console.warn('[collab] frame chunk send failed, falling back to transport enqueue', e && e.message ? e.message : e); } catch (er) {}
+                            // fall through to enqueue below
+                        }
+                    }
+                } catch (e) {}
+
+                // If chunked send failed, enqueue via transport. Track failures and recover if repeated.
+                try { this._webrtcSendFailures = Number(this._webrtcSendFailures || 0); } catch (e) { this._webrtcSendFailures = 0; }
+                const sent = !!this._sendCollabDiff(diff);
+                if (!sent) {
+                    try { this._webrtcSendFailures = (this._webrtcSendFailures || 0) + 1; } catch (e) {}
+                    if ((this._webrtcSendFailures || 0) > 3) {
+                        try { console.warn && console.warn('[collab] repeated webrtc send failures, triggering recovery'); } catch (e) {}
+                        try { this._recoverCollabState('sendFailures'); } catch (e) {}
+                        this._webrtcSendFailures = 0;
+                    }
+                } else {
+                    try { this._webrtcSendFailures = 0; } catch (e) {}
+                }
+                try { console.debug && console.debug('[collab] _sendFrameDataForFrame queuedViaTransport?', !sent, anim, index); } catch (e) {}
+                return sent;
+            } catch (e) { return false; }
+        } catch (e) { return false; }
+    }
+
+    _setTileConnection(anim, index, key, send = true) {
+        try {
+            const a = String(anim || '').trim();
+            if (!a) return false;
+            const idx = (Number.isFinite(Number(index)) ? Number(index) : null);
+            if (idx === null) return false;
+            const normalized = (typeof this._normalizeOpenConnectionKey === 'function')
+                ? this._normalizeOpenConnectionKey(key || '00000000')
+                : String(key || '00000000').replace(/[^01]/g, '').padEnd(8, '0').slice(0, 8);
+            if (!this._tileConnMap || typeof this._tileConnMap !== 'object') this._tileConnMap = {};
+            this._tileConnMap[a + '::' + (idx | 0)] = normalized;
+            try { if (this.FrameSelect && typeof this.FrameSelect.rebuild === 'function') this.FrameSelect.rebuild(); } catch (e) {}
+            if (send && this._canSendCollab && this._canSendCollab()) {
+                try {
+                    const diff = {};
+                    const id = (Date.now()) + '_' + Math.random().toString(36).slice(2,6);
+                    diff['edits/' + id] = { type: 'tileConn', anim: a, index: idx | 0, key: normalized, client: this.clientId, time: Date.now() };
+                    try { this._sendCollabDiff(diff); } catch (e) {}
+                } catch (e) {}
+            }
+            return true;
+        } catch (e) { return false; }
+    }
+
     configureCollabTransport(options = {}) {
         try {
             if (!this.collabTransport || typeof this.collabTransport.setMode !== 'function') return false;
@@ -1862,6 +1945,7 @@ export class SpriteScene extends Scene {
             if (Object.prototype.hasOwnProperty.call(options, 'sendSignal')) modeOptions.sendSignal = options.sendSignal;
 
             this.collabTransport.setMode(mode, modeOptions);
+            try { console.debug && console.debug('[scene] configureCollabTransport', { mode, handshakeOnly, allowFirebaseData: modeOptions.allowFirebaseData, webrtcSender: !!(this.collabTransport && this.collabTransport.webrtcSender) }); } catch (e) {}
 
             if (this.localState && this.localState.collab) {
                 this.localState.collab.transportMode = mode;
@@ -1882,6 +1966,44 @@ export class SpriteScene extends Scene {
         } catch (e) {
             return false;
         }
+    }
+
+    _setWebRTCChannel(ch) {
+        try {
+            this._webrtcChannel = ch;
+            try { console.debug && console.debug('[scene] _setWebRTCChannel bound'); } catch (e) {}
+        } catch (e) { this._webrtcChannel = null; }
+    }
+
+    _clearWebRTCChannel() {
+        try { this._webrtcChannel = null; } catch (e) { this._webrtcChannel = null; }
+    }
+
+    _recoverCollabState(reason = null) {
+        try {
+            try { console.warn && console.warn('[collab] _recoverCollabState triggered', reason || 'unknown'); } catch (e) {}
+            // Ensure outgoing suppression is cleared so future ops aren't silently blocked
+            try { this._suppressOutgoing = false; } catch (e) {}
+            // Clear any raw channel reference
+            try { this._clearWebRTCChannel(); } catch (e) {}
+            // Mark local state as not ready
+            try { if (this.localState && this.localState.collab) { this.localState.collab.webrtcReady = false; this.localState.collab.handshakeOnly = true; } } catch (e) {}
+            // Reconfigure transport to handshake-only so signaling can re-establish
+            try { if (typeof this.configureCollabTransport === 'function') this.configureCollabTransport({ mode: 'webrtc', handshakeOnly: true }); } catch (e) {}
+            // Attempt to restart WebRTC handshake after a short delay
+            try {
+                if (this.webrtcCollab && typeof this.webrtcCollab.stop === 'function') {
+                    try { this.webrtcCollab.stop(); } catch (e) {}
+                }
+                setTimeout(() => {
+                    try {
+                        if (this.webrtcCollab && typeof this.webrtcCollab.start === 'function') {
+                            this.webrtcCollab.start({ offer: null }).catch(()=>{});
+                        }
+                    } catch (e) {}
+                }, 500);
+            } catch (e) {}
+        } catch (e) {}
     }
 
     setCollabHandshakeOnly(enabled = true) {
@@ -4839,7 +4961,7 @@ export class SpriteScene extends Scene {
                 }
                 dctx.clearRect(0, 0, dstFrame.width, dstFrame.height);
                 dctx.drawImage(rendered, 0, 0, dstFrame.width, dstFrame.height);
-                this._tileConnMap[anim + '::' + dstIndex] = this._normalizeOpenConnectionKey(def.key);
+                try { this._setTileConnection(anim, dstIndex, def.key || '00000000', false); } catch (e) { this._tileConnMap[anim + '::' + dstIndex] = this._normalizeOpenConnectionKey(def.key); }
                 this._transitionVariantMeta[anim + '::' + dstIndex] = {
                     mode: String(def.mode || ''),
                     cornerDominant: def.cornerDominant || null
@@ -5076,6 +5198,7 @@ export class SpriteScene extends Scene {
 
     _runProceduralAutotileGeneration(settings = {}) {
         try {
+            try { console.debug && console.debug('[gen] _runProceduralAutotileGeneration start', { anim: String(settings.sourceAnimation || this.selectedAnimation || 'idle'), sourceFrame: settings.sourceFrame, handshakeOnly: !!this.localState?.collab?.handshakeOnly, webrtcReady: !!this.localState?.collab?.webrtcReady, queued: (this.collabTransport && this.collabTransport._dataQueue) ? this.collabTransport._dataQueue.length : 0 }); } catch(e) {}
             const anim = String(settings.sourceAnimation || this.selectedAnimation || 'idle');
             const sourceFrameIndex = Number.isFinite(Number(settings.sourceFrame))
                 ? (Number(settings.sourceFrame) | 0)
@@ -5142,10 +5265,59 @@ export class SpriteScene extends Scene {
                     skipped++;
                     continue;
                 }
-                dctx.clearRect(0, 0, dstFrame.width, dstFrame.height);
-                dctx.drawImage(rendered, 0, 0, dstFrame.width, dstFrame.height);
-                this._tileConnMap[anim + '::' + dstIndex] = key;
-                existingByConnKey.set(key, dstIndex);
+                try {
+                    // Prefer using SpriteSheet APIs so multiplayer hooks detect pixel edits.
+                    // Extract pixel data from the rendered canvas and apply via drawPixels/modifyFrame.
+                    const rw = rendered.width || dstFrame.width;
+                    const rh = rendered.height || dstFrame.height;
+                    const rctx = (rendered && rendered.getContext) ? rendered.getContext('2d') : null;
+                    let imgData = null;
+                    try { if (rctx) imgData = rctx.getImageData(0, 0, rw, rh); } catch (e) { imgData = null; }
+                    if (imgData && imgData.data && imgData.data.length >= 4) {
+                        const pixels = [];
+                        const data = imgData.data;
+                        const w = Math.max(1, Math.min(dstFrame.width, rw));
+                        const h = Math.max(1, Math.min(dstFrame.height, rh));
+                        for (let py = 0; py < h; py++) {
+                            for (let px = 0; px < w; px++) {
+                                const idx = (py * rw + px) * 4;
+                                const r = data[idx] | 0;
+                                const g = data[idx + 1] | 0;
+                                const b = data[idx + 2] | 0;
+                                const a = data[idx + 3] | 0;
+                                // encode as hex #RRGGBBAA
+                                const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
+                                const hex = '#' + toHex(r) + toHex(g) + toHex(b) + toHex(a);
+                                pixels.push({ x: px, y: py, color: hex, blendType: 'replace' });
+                            }
+                        }
+                        // Apply pixels via SpriteSheet API so wrapped modifyFrame will emit collab ops.
+                        try {
+                            try { console.debug && console.debug('[gen] applying pixels via sheet.drawPixels', { anim, dstIndex, pixelCount: pixels.length, handshakeOnly: !!this.localState?.collab?.handshakeOnly, webrtcReady: !!this.localState?.collab?.webrtcReady, queued: (this.collabTransport && this.collabTransport._dataQueue) ? this.collabTransport._dataQueue.length : 0 }); } catch(e) {}
+                            sheet.drawPixels(anim, dstIndex, pixels);
+                            try { console.debug && console.debug('[gen] sheet.drawPixels returned', { anim, dstIndex }); } catch(e) {}
+                        } catch (e) {
+                            // Fallback: draw directly if API fails
+                            try { console.debug && console.debug('[gen] sheet.drawPixels failed, fallback to direct draw', e && e.message ? e.message : e); } catch(er) {}
+                            dctx.clearRect(0, 0, dstFrame.width, dstFrame.height);
+                            dctx.drawImage(rendered, 0, 0, dstFrame.width, dstFrame.height);
+                        }
+                    } else {
+                        // If we couldn't read pixel data, fall back to direct draw.
+                        dctx.clearRect(0, 0, dstFrame.width, dstFrame.height);
+                        dctx.drawImage(rendered, 0, 0, dstFrame.width, dstFrame.height);
+                    }
+                        try { this._setTileConnection(anim, dstIndex, key, false); } catch (e) { this._tileConnMap[anim + '::' + dstIndex] = key; }
+                        try { existingByConnKey.set(key, dstIndex); } catch (e) {}
+                        try { console.debug && console.debug('[gen] about to send frameData', { anim, dstIndex, handshakeOnly: !!this.localState?.collab?.handshakeOnly, webrtcReady: !!this.localState?.collab?.webrtcReady, queued: (this.collabTransport && this.collabTransport._dataQueue) ? this.collabTransport._dataQueue.length : 0 }); } catch(e) {}
+                        try { this._sendFrameDataForFrame(anim, dstIndex, dstFrame); } catch (e) {}
+                } catch (e) {
+                    // ensure generation continues even on errors
+                    try { dctx.clearRect(0, 0, dstFrame.width, dstFrame.height); dctx.drawImage(rendered, 0, 0, dstFrame.width, dstFrame.height); } catch (er) {}
+                    try { this._setTileConnection(anim, dstIndex, key, false); } catch (er) { this._tileConnMap[anim + '::' + dstIndex] = key; }
+                    try { existingByConnKey.set(key, dstIndex); } catch (er) {}
+                    try { this._sendFrameDataForFrame(anim, dstIndex, dstFrame); } catch (e) {}
+                }
             }
 
             try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
@@ -5261,11 +5433,48 @@ export class SpriteScene extends Scene {
                 const dstFrame = sheet.getFrame(anim, insertAt);
                 const dctx = dstFrame && dstFrame.getContext ? dstFrame.getContext('2d') : null;
                 if (!dctx) continue;
-                dctx.clearRect(0, 0, px, px);
-                dctx.drawImage(out, 0, 0, px, px);
-                this._tileConnMap[anim + '::' + insertAt] = key;
-                existing.add(key);
-                created++;
+                try {
+                    const rw = out.width || px;
+                    const rh = out.height || px;
+                    const rctx = (out && out.getContext) ? out.getContext('2d') : null;
+                    let imgData = null;
+                    try { if (rctx) imgData = rctx.getImageData(0, 0, rw, rh); } catch (e) { imgData = null; }
+                    if (imgData && imgData.data && imgData.data.length >= 4) {
+                        const pixels = [];
+                        const data = imgData.data;
+                        const w = Math.max(1, Math.min(dstFrame.width, rw));
+                        const h = Math.max(1, Math.min(dstFrame.height, rh));
+                        for (let py = 0; py < h; py++) {
+                            for (let px2 = 0; px2 < w; px2++) {
+                                const idx = (py * rw + px2) * 4;
+                                const r = data[idx] | 0;
+                                const g = data[idx + 1] | 0;
+                                const b = data[idx + 2] | 0;
+                                const a = data[idx + 3] | 0;
+                                const toHex = (v) => (v < 16 ? '0' : '') + v.toString(16).toUpperCase();
+                                const hex = '#' + toHex(r) + toHex(g) + toHex(b) + toHex(a);
+                                pixels.push({ x: px2, y: py, color: hex, blendType: 'replace' });
+                            }
+                        }
+                        try { sheet.drawPixels(anim, insertAt, pixels); } catch (e) {
+                            dctx.clearRect(0, 0, px, px);
+                            dctx.drawImage(out, 0, 0, px, px);
+                        }
+                    } else {
+                        dctx.clearRect(0, 0, px, px);
+                        dctx.drawImage(out, 0, 0, px, px);
+                    }
+                    try { this._setTileConnection(anim, insertAt, key, false); } catch (e) { this._tileConnMap[anim + '::' + insertAt] = key; }
+                    try { existing.add(key); } catch (e) {}
+                    created++;
+                    try { this._sendFrameDataForFrame(anim, insertAt, dstFrame); } catch (e) {}
+                } catch (e) {
+                    try { dctx.clearRect(0, 0, px, px); dctx.drawImage(out, 0, 0, px, px); } catch (er) {}
+                    try { this._setTileConnection(anim, insertAt, key, false); } catch (er) { this._tileConnMap[anim + '::' + insertAt] = key; }
+                    try { existing.add(key); } catch (er) {}
+                    created++;
+                    try { this._sendFrameDataForFrame(anim, insertAt, dstFrame); } catch (e) {}
+                }
             }
 
             // If duplicates slipped in (same connection key on multiple frames),
@@ -10526,10 +10735,26 @@ export class SpriteScene extends Scene {
     sendState() {
         try {
             if (!this._canSendCollab()) {
-                // In SpriteScene we do not fall back to Scene.sendState().
-                // This prevents per-tick Firebase writes when running
-                // WebRTC with handshake-only signaling.
-                this._clearPendingCollabOps();
+                // When collab data transport is not currently available (e.g. WebRTC down),
+                // do NOT drop pending edits. Instead, flush pending tile/sprite ops into
+                // the op buffer and hand the batch to the collab transport which will
+                // queue and retry delivery when WebRTC returns. This avoids routing
+                // data through the server while preserving edits.
+                try {
+                    this._flushPendingTileOpsToBuffer();
+                    this._flushPendingSpriteOpsToBuffer();
+                    if (this._opBuffer && this._opBuffer.length > 0) {
+                        const batch = this._opBuffer.splice(0, 512);
+                        const diff = {};
+                        for (const op of batch) {
+                            const id = (op.time || Date.now()) + '_' + Math.random().toString(36).slice(2,6);
+                            diff['edits/' + id] = op;
+                        }
+                        try { this._sendCollabDiff(diff); } catch (e) { /* enqueue attempt failed */ }
+                    }
+                } catch (e) { /* ignore flush errors */ }
+                // schedule a retry later
+                this._scheduleSend();
                 return;
             }
 
@@ -10897,6 +11122,43 @@ export class SpriteScene extends Scene {
                             }
                             applied++;
                         } catch (e) { /* ignore sprite blob errors */ }
+                        finally { this._suppressOutgoing = false; }
+                    } else if (op.type === 'tileConn' && typeof op.key === 'string' && op.anim !== undefined) {
+                        try {
+                            this._suppressOutgoing = true;
+                            const animName = String(op.anim || '');
+                            const frameIdx = (Number.isFinite(Number(op.index)) ? Number(op.index) : null);
+                            const key = String(op.key || '');
+                            if (animName && frameIdx !== null) {
+                                try {
+                                    if (!this._tileConnMap || typeof this._tileConnMap !== 'object') this._tileConnMap = {};
+                                    const norm = (typeof this._normalizeOpenConnectionKey === 'function') ? this._normalizeOpenConnectionKey(key) : String(key).replace(/[^01]/g, '').padEnd(8, '0').slice(0, 8);
+                                    this._tileConnMap[animName + '::' + (frameIdx|0)] = norm;
+                                    try { if (this.FrameSelect && typeof this.FrameSelect.rebuild === 'function') this.FrameSelect.rebuild(); } catch (e) {}
+                                    applied++;
+                                } catch (e) {}
+                            }
+                        } catch (e) { /* ignore */ }
+                        finally { this._suppressOutgoing = false; }
+                    } else if (op.type === 'frameData' && typeof op.dataUrl === 'string' && op.anim !== undefined) {
+                        try {
+                            this._suppressOutgoing = true;
+                            const animName = String(op.anim || '');
+                            const frameIdx = (Number.isFinite(Number(op.index)) ? Number(op.index) : null);
+                            const dataUrl = String(op.dataUrl || '');
+                            const dstFrame = (frameIdx !== null && typeof sheet.getFrame === 'function') ? sheet.getFrame(animName, frameIdx) : null;
+                            if (dstFrame && dstFrame.getContext) {
+                                const ctx = dstFrame.getContext('2d');
+                                const img = new Image();
+                                img.onload = () => {
+                                    try { ctx.clearRect(0, 0, dstFrame.width, dstFrame.height); ctx.drawImage(img, 0, 0, dstFrame.width, dstFrame.height); } catch (e) {}
+                                    try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
+                                };
+                                img.onerror = () => {};
+                                img.src = dataUrl;
+                                applied++;
+                            }
+                        } catch (e) { /* ignore */ }
                         finally { this._suppressOutgoing = false; }
                     } else if (op.type === 'draw' && Array.isArray(op.pixels)) {
                         // Apply incoming draw ops as-is and rely on server/update

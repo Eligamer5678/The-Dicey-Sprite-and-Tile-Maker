@@ -154,19 +154,40 @@ export class SpriteWebRTCCollabController {
         this.channel.onopen = () => {
             try {
                 if (this.scene && typeof this.scene.bindWebRTCCollab === 'function') {
+                    // Data channel is open — enable full WebRTC transport (not handshake-only)
                     this.scene.bindWebRTCCollab((diff) => {
                         try {
                             if (!this.channel || this.channel.readyState !== 'open') return;
                             this.channel.send(JSON.stringify({ kind: 'diff', diff }));
                         } catch (e) { /* ignore */ }
-                    }, { handshakeOnly: true });
+                    }, { handshakeOnly: false });
+                    try { console.debug && console.debug('[webrtcCollab] data channel open -> bindWebRTCCollab called'); } catch (e) {}
                 }
                 if (this.scene && this.scene.localState && this.scene.localState.collab) {
                     this.scene.localState.collab.webrtcReady = true;
                     this.scene.localState.collab.transportMode = 'webrtc';
-                    this.scene.localState.collab.handshakeOnly = true;
+                    // mark handshakeOnly=false so scene knows to send live diffs
+                    this.scene.localState.collab.handshakeOnly = false;
+                    try { console.debug && console.debug('[webrtcCollab] localState.collab updated', this.scene.localState.collab); } catch (e) {}
                 }
+                try {
+                    // Provide the raw data channel to the scene so it can send chunked
+                    // large payloads without going through the JSON-diff path.
+                    if (this.scene && typeof this.scene._setWebRTCChannel === 'function') {
+                        this.scene._setWebRTCChannel(this.channel);
+                        try { console.debug && console.debug('[webrtcCollab] raw channel passed to scene'); } catch (e) {}
+                    }
+                } catch (e) {}
             } catch (e) { /* ignore */ }
+        };
+
+        this.channel.onerror = (ev) => {
+            try {
+                try { console.warn && console.warn('[webrtcCollab] data channel error', ev); } catch (e) {}
+                if (this.scene && typeof this.scene._recoverCollabState === 'function') {
+                    try { this.scene._recoverCollabState('dataChannelError'); } catch (e) {}
+                }
+            } catch (e) {}
         };
 
         this.channel.onclose = () => {
@@ -174,6 +195,14 @@ export class SpriteWebRTCCollabController {
                 if (this.scene && this.scene.localState && this.scene.localState.collab) {
                     this.scene.localState.collab.webrtcReady = false;
                 }
+                try {
+                    if (this.scene && typeof this.scene._clearWebRTCChannel === 'function') {
+                        this.scene._clearWebRTCChannel();
+                    }
+                    if (this.scene && typeof this.scene._recoverCollabState === 'function') {
+                        try { this.scene._recoverCollabState('dataChannelClosed'); } catch (e) {}
+                    }
+                } catch (e) {}
             } catch (e) { /* ignore */ }
         };
 
@@ -182,10 +211,48 @@ export class SpriteWebRTCCollabController {
                 if (!event || typeof event.data !== 'string') return;
                 const msg = JSON.parse(event.data);
                 if (!msg || typeof msg !== 'object') return;
-                if (msg.kind !== 'diff' || !msg.diff) return;
-                const expanded = expandDiffMap(msg.diff);
-                if (this.scene && typeof this.scene.applyRemoteState === 'function') {
-                    this.scene.applyRemoteState(expanded);
+                // Support both diff messages and chunked frame transfers.
+                if (msg.kind === 'diff' && msg.diff) {
+                    const expanded = expandDiffMap(msg.diff);
+                    if (this.scene && typeof this.scene.applyRemoteState === 'function') {
+                        this.scene.applyRemoteState(expanded);
+                    }
+                    return;
+                }
+
+                // Chunked frame transfer messages:
+                // { kind: 'frameStart', id, anim, index, chunkCount, client, time }
+                // { kind: 'frameChunk', id, seq, data }
+                if (msg.kind === 'frameStart' && msg.id) {
+                    try {
+                        if (!this._incomingFrames) this._incomingFrames = {};
+                        this._incomingFrames[msg.id] = { anim: msg.anim, index: msg.index, chunkCount: Number(msg.chunkCount) || 0, client: msg.client, time: msg.time, parts: [], received: 0 };
+                    } catch (e) {}
+                    return;
+                }
+                if (msg.kind === 'frameChunk' && msg.id) {
+                    try {
+                        if (!this._incomingFrames) return;
+                        const buf = this._incomingFrames[msg.id];
+                        if (!buf) return;
+                        buf.parts[msg.seq | 0] = String(msg.data || '');
+                        buf.received = (buf.received || 0) + 1;
+                        // If we've received all chunks, assemble and apply
+                        if (buf.received >= (buf.chunkCount || 0)) {
+                            try {
+                                const base64 = buf.parts.join('');
+                                const dataUrl = 'data:image/png;base64,' + base64;
+                                const id = msg.id;
+                                const payload = { type: 'frameData', anim: String(buf.anim), index: Number.isFinite(Number(buf.index)) ? Number(buf.index) : null, dataUrl, client: buf.client, time: buf.time };
+                                const expanded = expandDiffMap({ ['edits/' + id]: payload });
+                                if (this.scene && typeof this.scene.applyRemoteState === 'function') {
+                                    this.scene.applyRemoteState(expanded);
+                                }
+                            } catch (e) {}
+                            delete this._incomingFrames[msg.id];
+                        }
+                    } catch (e) {}
+                    return;
                 }
             } catch (e) { /* ignore malformed data */ }
         };

@@ -1,4 +1,4 @@
-LICENCE - 100sidedice Asset Use Terms
+LICENCE - Rubra obscura/100sidedice (Elijah DeLima/Collin Fullen/Blake Murner) Assets Use Terms
 
 Pack: Asset Pack
 
@@ -13,7 +13,7 @@ You may not:
 - Claim original authorship of unmodified assets.
 
 Attribution:
-- Appreciated but not required. Credit as: 100sidedice
+- Appreciated but not required. Credit as: Made by Elijah DeLima, Collin Fullen, and Blake Murner, also known as [Rubra obscura/100sidedice]
 
 Support:
 - Contact the seller where you purchased this pack for support or clarifications.
