@@ -50,6 +50,7 @@ export default class AutoTileGenerationMenu {
             replaceExisting: true,
             useCustomOutline: false,
             customOutlineHex: '#00FF00',
+            depth: 0,
         };
 
         this._status = '';
@@ -71,6 +72,7 @@ export default class AutoTileGenerationMenu {
             { id: 'noiseAmount', label: 'Noise (N-style)', min: 0, max: 1, step: 0.01 },
             { id: 'colorSteps', label: 'Step Count', min: 2, max: 12, step: 1, integer: true },
             { id: 'seed', label: 'Seed', min: 1, max: 999, step: 1, integer: true },
+            { id: 'depth', label: 'Depth (px)', min: 0, max: 16, step: 1, integer: true },
         ];
 
         this._sliders = [];
@@ -78,6 +80,64 @@ export default class AutoTileGenerationMenu {
         this._previewSignature = '';
 
         this._buildUI();
+    }
+
+    _hasTwoTileTypesSelected() {
+        try {
+            // Use FrameSelect's multi-selection: if there is at least one
+            // additional selected frame, treat it as a second tile type.
+            const fs = this.scene && this.scene.FrameSelect;
+            if (!fs) return false;
+            const multi = Array.from(fs._multiSelected || []);
+            return multi.length > 0;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    _updateDepthSliderVisibility() {
+        const show = !!this._hasTwoTileTypesSelected();
+        for (const entry of this._sliders) {
+            if (entry.def && entry.def.id === 'depth') {
+                entry.slider.visible = show;
+            }
+        }
+    }
+
+    _reflowMenuSize() {
+        const startY = this.layout.sliderStartY;
+        const rowH = this.layout.sliderRowH;
+        const visibleCount = this._sliders.reduce((acc, e) => acc + (e.slider && e.slider.visible ? 1 : 0), 0);
+        const neededControlsY = startY + Math.max(visibleCount, 1) * rowH + 8;
+        const minHeight = neededControlsY + 200;
+        if (!this.menu.size) this.menu.size = new Vector(this.menu.size.x || 844, minHeight);
+        if (this.menu.size.y < minHeight) this.menu.size.y = minHeight;
+
+        // Shift action controls downward to make room for visible sliders
+        const controlsY = neededControlsY;
+        const sliderX = this.layout.sliderX;
+        // move custom controls
+        try {
+            if (this.customHexInput && typeof this.customHexInput.pos !== 'undefined') {
+                this.customHexInput.pos = new Vector(sliderX, controlsY);
+            }
+            if (this.useCustomButton && typeof this.useCustomButton.pos !== 'undefined') {
+                this.useCustomButton.pos = new Vector(sliderX + 176, controlsY);
+            }
+        } catch (e) {}
+
+        // update layout-driven Y positions for buttons/status so draw uses updated coords
+        this.layout.adjustY = controlsY + 48;
+        this.layout.buttonY = this.layout.adjustY + 36;
+        this.layout.statusY = this.layout.buttonY + 56;
+
+        // move primary buttons to updated positions
+        try {
+            if (this.generateButton) this.generateButton.pos = new Vector(28, this.layout.buttonY);
+            if (this.replaceButton) this.replaceButton.pos = new Vector(184, this.layout.buttonY);
+            if (this.toneButton) this.toneButton.pos = new Vector(340, this.layout.buttonY);
+            if (this.closeButton) this.closeButton.pos = new Vector(496, this.layout.buttonY);
+        } catch (e) {}
     }
 
     _buildUI() {
@@ -121,8 +181,12 @@ export default class AutoTileGenerationMenu {
             this._sliders.push({ def, slider, y });
         }
 
-        // Custom outline color input + toggle (below sliders)
-        const controlsY = startY + this._sliderDefs.length * rowH + 8;
+        // Evaluate depth slider visibility now that sliders exist
+        if (typeof this._updateDepthSliderVisibility === 'function') this._updateDepthSliderVisibility();
+
+        // Custom outline color input + toggle (below visible sliders)
+        const visibleSliderCountForLayout = this._sliders.reduce((acc, e) => acc + (e.slider && e.slider.visible ? 1 : 0), 0);
+        const controlsY = startY + visibleSliderCountForLayout * rowH + 8;
         this.customHexInput = new UITextInput(this.mouse, this.keys, new Vector(sliderX, controlsY), new Vector(160, 32), this.layer + 3, String(this.settings.customOutlineHex || '#00FF00'), '#HEX');
         this.customHexInput.onChange.connect((txt) => {
             this.settings.customOutlineHex = String(txt || '').trim() || '#00FF00';
@@ -210,6 +274,9 @@ export default class AutoTileGenerationMenu {
             if (this.keys && typeof this.keys.pause === 'function') this.keys.pause(0.12);
             if (this.mouse && typeof this.mouse.pause === 'function') this.mouse.pause(0.12);
         } catch (e) {}
+        // Update depth slider visibility on open
+        if (typeof this._updateDepthSliderVisibility === 'function') this._updateDepthSliderVisibility();
+        if (typeof this._reflowMenuSize === 'function') this._reflowMenuSize();
     }
 
     close() {
@@ -224,6 +291,9 @@ export default class AutoTileGenerationMenu {
     update(delta) {
         if (!this.visible) return;
         this.menu.update(delta);
+        // ensure depth slider visibility follows scene selection changes
+        if (typeof this._updateDepthSliderVisibility === 'function') this._updateDepthSliderVisibility();
+        if (typeof this._reflowMenuSize === 'function') this._reflowMenuSize();
         if (this.keys && (this.keys.released('Escape') || this.keys.released('Esc'))) {
             this.close();
             return;
@@ -242,7 +312,9 @@ export default class AutoTileGenerationMenu {
         UIDraw.text('47-Tile Outline Generator', base.add(new Vector(28, this.layout.titleY)), '#E8F0FFFF', 0, 30, { align: 'left', baseline: 'top', font: 'monospace' });
         UIDraw.text('Base adjust %', base.add(new Vector(28, this.layout.adjustY)), '#89C6DEFF', 0, 18, { align: 'left', baseline: 'top', font: 'monospace' });
 
+        // Draw only visible sliders (Depth may be hidden)
         for (const entry of this._sliders) {
+            if (!entry.slider || entry.slider.visible === false) continue;
             const labelPos = base.add(new Vector(this.layout.sliderLabelX, entry.y + 2));
             const valuePos = base.add(new Vector(this.layout.sliderValueX, entry.y + 2));
             const value = this._formatValue(entry.def, this.settings[entry.def.id]);
@@ -254,8 +326,9 @@ export default class AutoTileGenerationMenu {
         const adjust = this._getAdjustAmount(channel);
         UIDraw.text(`${Math.round(adjust * 100)}% (${channel.toUpperCase()})`, base.add(new Vector(178, this.layout.adjustY)), '#89C6DEFF', 0, 18, { align: 'left', baseline: 'top', font: 'monospace' });
 
-        // Custom outline hex label
-        const controlsY = this.layout.sliderStartY + this._sliderDefs.length * this.layout.sliderRowH + 8;
+        // Custom outline hex label (position after visible sliders)
+        const visibleSliderCount = this._sliders.reduce((acc, e) => acc + (e.slider && e.slider.visible ? 1 : 0), 0);
+        const controlsY = this.layout.sliderStartY + visibleSliderCount * this.layout.sliderRowH + 8;
         UIDraw.text('Outline Hex', base.add(new Vector(this.layout.sliderLabelX, controlsY + 8)), '#D7DFF2FF', 0, 14, { align: 'left', baseline: 'top', font: 'monospace' });
 
         UIDraw.text('Generate', base.add(new Vector(101, this.layout.buttonY + 22)), '#F2FFF5FF', 0, 17, { align: 'center', baseline: 'middle', font: 'monospace' });
@@ -285,6 +358,7 @@ export default class AutoTileGenerationMenu {
         out.sourceAnimation = this._sourceAnimation;
         out.useCustomOutline = !!this.settings.useCustomOutline;
         out.customOutlineHex = String(this.settings.customOutlineHex || '#00FF00');
+        out.depth = Math.max(0, Number(this.settings.depth) || 0);
         return out;
     }
 

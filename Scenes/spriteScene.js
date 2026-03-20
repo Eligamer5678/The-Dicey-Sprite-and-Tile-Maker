@@ -4865,8 +4865,72 @@ export class SpriteScene extends Scene {
                 }
             }
 
-            octx.putImageData(outImage, 0, 0);
-            return out;
+                    // After applying the normal outline logic, if depth is used
+                    // and two frames are multi-selected (top + wall), draw an
+                    // additional seam outline at the depth boundary using the
+                    // same outline parameters.
+                    if (depthPx > 0) {
+                        try {
+                            const fs = this.FrameSelect;
+                            if (fs && fs._multiSelected && fs._multiSelected.size >= 2) {
+                                const seamY = Math.max(0, bottomBoundary);
+                                const odata = outImage.data;
+                                const stepDivLocal = Math.max(1, colorSteps - 1);
+                                const stepUnitLocal = maxDelta / stepDivLocal;
+                                for (let dy = -outlineWidth; dy <= outlineWidth; dy++) {
+                                    const yy = seamY + dy;
+                                    if (yy < 0 || yy >= px) continue;
+                                    for (let xx = 0; xx < px; xx++) {
+                                        const i = (yy * px + xx) * 4;
+                                        const alpha = odata[i + 3] / 255;
+                                        if (alpha <= 0) continue;
+                                        const nearestLocal = Math.abs(dy);
+                                        const tLocal = clamp01(nearestLocal / Math.max(0.0001, outlineWidth));
+                                        const edgeBlendLocal = Math.pow(1 - tLocal, 1 + (falloff * 4));
+                                        const noiseLocal = ((this._noise01((xx * 1.37) + 9, (yy * 0.83) + 17, seed + 97) * 2) - 1) * maxDelta * noiseAmount;
+                                        let deltaLocal = (tone * edgeBlendLocal * maxDelta) + noiseLocal;
+                                        deltaLocal = Math.round(deltaLocal / stepUnitLocal) * stepUnitLocal;
+
+                                        if (useCustomOutline && _customBaseColor) {
+                                            try {
+                                                const srcRgb = new Color(odata[i], odata[i + 1], odata[i + 2], alpha, 'rgb');
+                                                const customRgb = (_customBaseColor.type === 'rgb') ? _customBaseColor : _customBaseColor.toRgb();
+                                                const noiseNorm = (maxDelta > 0) ? (noiseLocal / maxDelta) : 0;
+                                                let mixAmt = edgeBlendLocal + noiseNorm;
+                                                mixAmt = Math.max(0, Math.min(1, mixAmt));
+                                                const quantMix = Math.round(mixAmt * stepDivLocal) / stepDivLocal;
+                                                const r = Math.round(mix(srcRgb.a, customRgb.a, quantMix));
+                                                const g = Math.round(mix(srcRgb.b, customRgb.b, quantMix));
+                                                const b = Math.round(mix(srcRgb.c, customRgb.c, quantMix));
+                                                const aMix = mix(srcRgb.d ?? alpha, customRgb.d ?? 1, quantMix);
+                                                odata[i] = Math.max(0, Math.min(255, r));
+                                                odata[i + 1] = Math.max(0, Math.min(255, g));
+                                                odata[i + 2] = Math.max(0, Math.min(255, b));
+                                                odata[i + 3] = Math.max(0, Math.min(255, Math.round((aMix ?? alpha) * 255)));
+                                            } catch (e) {}
+                                            continue;
+                                        }
+
+                                        let cLocal = new Color(odata[i], odata[i + 1], odata[i + 2], alpha, 'rgb').toHsv();
+                                        if (!cLocal) continue;
+                                        if (colorChannel === 'h') cLocal.a = ((cLocal.a + deltaLocal) % 1 + 1) % 1;
+                                        if (colorChannel === 's') cLocal.b = clamp01(cLocal.b + deltaLocal);
+                                        if (colorChannel === 'v') cLocal.c = clamp01(cLocal.c + deltaLocal);
+                                        if (colorChannel === 'a') cLocal.d = clamp01(cLocal.d + deltaLocal);
+                                        const rgbLocal = cLocal.toRgb();
+                                        if (!rgbLocal) continue;
+                                        odata[i] = Math.max(0, Math.min(255, Math.round(rgbLocal.a)));
+                                        odata[i + 1] = Math.max(0, Math.min(255, Math.round(rgbLocal.b)));
+                                        odata[i + 2] = Math.max(0, Math.min(255, Math.round(rgbLocal.c)));
+                                        odata[i + 3] = Math.max(0, Math.min(255, Math.round((rgbLocal.d ?? alpha) * 255)));
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+                    }
+
+                    octx.putImageData(outImage, 0, 0);
+                    return out;
         } catch (e) {
             return null;
         }
@@ -4991,6 +5055,7 @@ export class SpriteScene extends Scene {
             if (!srcCtx) return null;
 
             const px = Math.max(1, Number(sourceFrame.width) || Number(this.currentSprite && this.currentSprite.slicePx) || 16);
+            const anim = String(options.sourceAnimation || this.selectedAnimation || 'idle');
             const bits = this._normalizeOpenConnectionKey(openKey).split('').map((b) => b === '1');
             const channel = (typeof options.channel === 'string' ? options.channel : 'h').toLowerCase();
             const colorChannel = (channel === 'h' || channel === 's' || channel === 'v' || channel === 'a') ? channel : 'h';
@@ -5017,6 +5082,147 @@ export class SpriteScene extends Scene {
             }
 
             const srcImage = srcCtx.getImageData(0, 0, px, px);
+            let _skipMainOutline = false;
+
+            // Helper: apply outline algorithm to a provided RGBA Uint8ClampedArray (width=px, height=px)
+            const applyOutlineToImage = (idata, bitsObj) => {
+                const edgeTopOutside = !!bitsObj[0];
+                const edgeRightOutside = !!bitsObj[1];
+                const edgeBottomOutside = !!bitsObj[2];
+                const edgeLeftOutside = !!bitsObj[3];
+                const cornerTLOutside = !!bitsObj[4];
+                const cornerTROutside = !!bitsObj[5];
+                const cornerBROutside = !!bitsObj[6];
+                const cornerBLOutside = !!bitsObj[7];
+
+                const hasOutsideBoundary = (edgeTopOutside || edgeRightOutside || edgeBottomOutside || edgeLeftOutside || cornerTLOutside || cornerTROutside || cornerBROutside || cornerBLOutside);
+                if (!hasOutsideBoundary) return;
+
+                const clamp01 = (v) => Math.max(0, Math.min(1, v));
+                const stepDiv = Math.max(1, colorSteps - 1);
+                const stepUnit = maxDelta / stepDiv;
+                const mix = (a, b, t) => (a * (1 - t)) + (b * t);
+                const cornerRadius = Math.max(1, Math.round(px * 0.32));
+                const radius = Math.max(0.0001, cornerRadius);
+                const cornerZone = Math.max(1, Math.floor(cornerRadius));
+                const cornerInwardDistance = (dx, dy) => {
+                    const squareIn = Math.min(dx, dy);
+                    const roundIn = radius - Math.hypot(dx - radius, dy - radius);
+                    return mix(squareIn, roundIn, cornerRoundness);
+                };
+                const applyRoundedCornerAlphaMaskLocal = (x, y, alphaByte) => {
+                    if (cornerRoundness <= 0 || alphaByte <= 0) return false;
+                    const cornerCutoff = radius * (1 - cornerRoundness);
+                    // Top-left
+                    if (edgeTopOutside && edgeLeftOutside && x <= cornerZone && y <= cornerZone) {
+                        const dist = Math.hypot(x - radius, y - radius);
+                        if (dist - radius > cornerCutoff) return true;
+                    }
+                    // Top-right
+                    if (edgeTopOutside && edgeRightOutside && (px - 1 - x) <= cornerZone && y <= cornerZone) {
+                        const dx = (px - 1 - x);
+                        const dist = Math.hypot(dx - radius, y - radius);
+                        if (dist - radius > cornerCutoff) return true;
+                    }
+                    // Bottom-right
+                    if (edgeBottomOutside && edgeRightOutside && (px - 1 - x) <= cornerZone && (px - 1 - y) <= cornerZone) {
+                        const dx = (px - 1 - x);
+                        const dy = (px - 1 - y);
+                        const dist = Math.hypot(dx - radius, dy - radius);
+                        if (dist - radius > cornerCutoff) return true;
+                    }
+                    // Bottom-left
+                    if (edgeBottomOutside && edgeLeftOutside && x <= cornerZone && (px - 1 - y) <= cornerZone) {
+                        const dy = (px - 1 - y);
+                        const dist = Math.hypot(x - radius, dy - radius);
+                        if (dist - radius > cornerCutoff) return true;
+                    }
+                    return false;
+                };
+                const innerCornerDistance = (dx, dy) => {
+                    const sq = Math.max(dx, dy);
+                    const rd = Math.hypot(dx, dy);
+                    return mix(sq, rd, cornerRoundness);
+                };
+
+                for (let y = 0; y < px; y++) {
+                    for (let x = 0; x < px; x++) {
+                        const i = (y * px + x) * 4;
+                        const alpha = idata[i + 3] / 255;
+                        if (alpha <= 0) continue;
+
+                        if (applyRoundedCornerAlphaMaskLocal(x, y, idata[i + 3])) {
+                            idata[i + 3] = 0;
+                            continue;
+                        }
+
+                        let nearest = Infinity;
+                        if (edgeTopOutside) nearest = Math.min(nearest, y);
+                        if (edgeRightOutside) nearest = Math.min(nearest, (px - 1 - x));
+                        if (edgeBottomOutside) nearest = Math.min(nearest, (px - 1 - y));
+                        if (edgeLeftOutside) nearest = Math.min(nearest, x);
+
+                        if (edgeTopOutside && edgeLeftOutside && x <= cornerZone && y <= cornerZone) {
+                            nearest = Math.min(nearest, cornerInwardDistance(x, y));
+                        }
+                        if (edgeTopOutside && edgeRightOutside && (px - 1 - x) <= cornerZone && y <= cornerZone) {
+                            nearest = Math.min(nearest, cornerInwardDistance((px - 1 - x), y));
+                        }
+                        if (edgeBottomOutside && edgeRightOutside && (px - 1 - x) <= cornerZone && (px - 1 - y) <= cornerZone) {
+                            nearest = Math.min(nearest, cornerInwardDistance((px - 1 - x), (px - 1 - y)));
+                        }
+                        if (edgeBottomOutside && edgeLeftOutside && x <= cornerZone && (px - 1 - y) <= cornerZone) {
+                            nearest = Math.min(nearest, cornerInwardDistance(x, (px - 1 - y)));
+                        }
+
+                        if (cornerTLOutside && !edgeTopOutside && !edgeLeftOutside) nearest = Math.min(nearest, innerCornerDistance(x, y));
+                        if (cornerTROutside && !edgeTopOutside && !edgeRightOutside) nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), y));
+                        if (cornerBROutside && !edgeBottomOutside && !edgeRightOutside) nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), (px - 1 - y)));
+                        if (cornerBLOutside && !edgeBottomOutside && !edgeLeftOutside) nearest = Math.min(nearest, innerCornerDistance(x, (px - 1 - y)));
+
+                        if (!Number.isFinite(nearest) || nearest > outlineWidth) continue;
+
+                        const t = clamp01(nearest / Math.max(0.0001, outlineWidth));
+                        const edgeBlend = Math.pow(1 - t, 1 + (falloff * 4));
+                        const noise = ((this._noise01((x * 1.37) + 9, (y * 0.83) + 17, seed + 97) * 2) - 1) * maxDelta * noiseAmount;
+                        let delta = (tone * edgeBlend * maxDelta) + noise;
+                        delta = Math.round(delta / stepUnit) * stepUnit;
+
+                        if (useCustomOutline && _customBaseColor) {
+                            try {
+                                const srcRgb = new Color(idata[i], idata[i + 1], idata[i + 2], alpha, 'rgb');
+                                const customRgb = (_customBaseColor.type === 'rgb') ? _customBaseColor : _customBaseColor.toRgb();
+                                const noiseNorm = (maxDelta > 0) ? (noise / maxDelta) : 0;
+                                let mixAmt = edgeBlend + noiseNorm;
+                                mixAmt = Math.max(0, Math.min(1, mixAmt));
+                                const quantMix = Math.round(mixAmt * stepDiv) / stepDiv;
+                                const r = Math.round(mix(srcRgb.a, customRgb.a, quantMix));
+                                const g = Math.round(mix(srcRgb.b, customRgb.b, quantMix));
+                                const b = Math.round(mix(srcRgb.c, customRgb.c, quantMix));
+                                const aMix = mix(srcRgb.d ?? alpha, customRgb.d ?? 1, quantMix);
+                                idata[i] = Math.max(0, Math.min(255, r));
+                                idata[i + 1] = Math.max(0, Math.min(255, g));
+                                idata[i + 2] = Math.max(0, Math.min(255, b));
+                                idata[i + 3] = Math.max(0, Math.min(255, Math.round((aMix ?? alpha) * 255)));
+                            } catch (e) { }
+                            continue;
+                        }
+
+                        let c = new Color(idata[i], idata[i + 1], idata[i + 2], alpha, 'rgb').toHsv();
+                        if (!c) continue;
+                        if (colorChannel === 'h') c.a = ((c.a + delta) % 1 + 1) % 1;
+                        if (colorChannel === 's') c.b = clamp01(c.b + delta);
+                        if (colorChannel === 'v') c.c = clamp01(c.c + delta);
+                        if (colorChannel === 'a') c.d = clamp01(c.d + delta);
+                        const rgb = c.toRgb();
+                        if (!rgb) continue;
+                        idata[i] = Math.max(0, Math.min(255, Math.round(rgb.a)));
+                        idata[i + 1] = Math.max(0, Math.min(255, Math.round(rgb.b)));
+                        idata[i + 2] = Math.max(0, Math.min(255, Math.round(rgb.c)));
+                        idata[i + 3] = Math.max(0, Math.min(255, Math.round((rgb.d ?? alpha) * 255)));
+                    }
+                }
+            };
             const out = document.createElement('canvas');
             out.width = px;
             out.height = px;
@@ -5024,6 +5230,159 @@ export class SpriteScene extends Scene {
             if (!octx) return null;
             const outImage = octx.createImageData(px, px);
             outImage.data.set(srcImage.data);
+
+            // If a depth value is provided and a multi-selected frame exists,
+            // composite the ledge/wall (first multi-selected frame) beneath
+            // the main tile starting at the depth threshold.
+            const depthPx = Math.max(0, Math.min(px, Math.round(Number(options.depth) || 0)));
+            const bottomBoundary = px - depthPx - 1; // last y index that belongs to the top tile
+            if (depthPx > 0) {
+                try {
+                    const fs = this.FrameSelect;
+                    if (fs && fs._multiSelected && fs._multiSelected.size >= 2) {
+                        // If two or more frames selected, use first as TOP, second as WALL
+                        // Preserve FrameSelect insertion order (first selected -> top)
+                        const multi = Array.from(fs._multiSelected).map(i => Number(i)).filter(Number.isFinite);
+                        const topIdx = multi[0];
+                        const wallIdx = multi[1];
+                        if (typeof this.currentSprite.getFrame === 'function') {
+                            const topFrame = this.currentSprite.getFrame(anim, topIdx);
+                            const wallFrame = this.currentSprite.getFrame(anim, wallIdx);
+                            if (topFrame && wallFrame && topFrame.getContext && wallFrame.getContext) {
+                                try {
+                                    const seamY = Math.max(0, bottomBoundary);
+                                    try { console.log('[gen] depth compositing', JSON.stringify({ openKey: openKey, bits, anim, topIdx, wallIdx, depthPx, seamY })); } catch (e) {}
+                                    const tctx = topFrame.getContext('2d');
+                                    const wctx = wallFrame.getContext('2d');
+                                    const topImg = tctx.getImageData(0, 0, px, px).data;
+                                    const wallImg = wctx.getImageData(0, 0, px, px).data;
+                                    const odata = outImage.data;
+                                    // Determine whether this openKey requests bottom/outside contributions
+                                    const edgeBottomOutside = !!bits[2];
+                                    const cornerBROutside = !!bits[6];
+                                    const cornerBLOutside = !!bits[7];
+                                    const needWall = edgeBottomOutside;
+                                    try { console.log('[gen] depth needWall', JSON.stringify({ openKey: openKey, edgeBottomOutside, cornerBROutside, cornerBLOutside, needWall })); } catch (e) {}
+                                    if (!needWall) {
+                                        // no bottom/outside contribution requested for this key; keep top frame entirely
+                                        outImage.data.set(topImg);
+                                    } else {
+                                        // Build separate layer buffers so we can apply outlines independently.
+                                        const wallBuf = new Uint8ClampedArray(wallImg); // full tile
+                                        const topBuf = new Uint8ClampedArray(topImg); // full tile; we'll mask below seam
+
+                                        // Mask topBuf to only include pixels above the seam (top face)
+                                        for (let yy = seamY + 1; yy < px; yy++) {
+                                            for (let xx = 0; xx < px; xx++) {
+                                                const idx = (yy * px + xx) * 4;
+                                                topBuf[idx + 3] = 0; // transparent below seam
+                                            }
+                                        }
+
+                                        // Carve rounded bottom corners from topBuf based on cornerRoundness
+                                        if (cornerRoundness > 0) {
+                                            const cornerRadiusLocal = Math.max(1, Math.round(px * 0.32));
+                                            const radiusLocal = Math.max(0.0001, cornerRadiusLocal);
+                                            const cornerZoneLocal = Math.max(1, Math.floor(cornerRadiusLocal));
+                                            const cornerCutoff = radiusLocal * (1 - cornerRoundness);
+                                            // centers for quarter-circles just above seam
+                                            const centerY = seamY - Math.max(0, Math.round(radiusLocal)) + 1;
+                                            const leftCenterX = Math.max(0, Math.round(radiusLocal));
+                                            const rightCenterX = Math.max(0, px - 1 - Math.round(radiusLocal));
+                                            for (let yy = Math.max(0, seamY - cornerZoneLocal); yy <= seamY; yy++) {
+                                                for (let xx = 0; xx < px; xx++) {
+                                                    // left corner - only round if left edge is an outside edge
+                                                    if (bits[3] && xx <= cornerZoneLocal) {
+                                                        const dx = xx - leftCenterX;
+                                                        const dy = yy - centerY;
+                                                        const dist = Math.hypot(dx, dy);
+                                                        if (dist - radiusLocal > cornerCutoff) {
+                                                            const idx = (yy * px + xx) * 4;
+                                                            topBuf[idx + 3] = 0;
+                                                        }
+                                                    }
+                                                    // right corner - only round if right edge is an outside edge
+                                                    if (bits[1] && ((px - 1 - xx) <= cornerZoneLocal)) {
+                                                        const dx = xx - rightCenterX;
+                                                        const dy = yy - centerY;
+                                                        const dist = Math.hypot(dx, dy);
+                                                        if (dist - radiusLocal > cornerCutoff) {
+                                                            const idx = (yy * px + xx) * 4;
+                                                            topBuf[idx + 3] = 0;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Apply outline to wall layer using original bits
+                                        try { applyOutlineToImage(wallBuf, bits); } catch (e) {}
+
+                                        // For the top face outline, force the bottom edge as an outside
+                                        // edge so the seam line receives an outline, but keep other
+                                        // edges as indicated by bits. We still ignore corner-only
+                                        // signals for deciding to composite (needWall was bottom-only).
+                                        const topBits = [bits[0], bits[1], true, bits[3], bits[4], bits[5], bits[6], bits[7]];
+                                        try { applyOutlineToImage(topBuf, topBits); } catch (e) {}
+
+                                        // Composite topBuf over wallBuf
+                                        for (let yy = 0; yy < px; yy++) {
+                                            for (let xx = 0; xx < px; xx++) {
+                                                const idx = (yy * px + xx) * 4;
+                                                const ta = topBuf[idx + 3] / 255;
+                                                if (ta <= 0) continue;
+                                                // simple overwrite (top face fully covers wall below)
+                                                wallBuf[idx] = topBuf[idx];
+                                                wallBuf[idx + 1] = topBuf[idx + 1];
+                                                wallBuf[idx + 2] = topBuf[idx + 2];
+                                                wallBuf[idx + 3] = topBuf[idx + 3];
+                                            }
+                                        }
+
+                                        // Set final output to wallBuf (which now has top overlaid)
+                                        outImage.data.set(wallBuf);
+                                        _skipMainOutline = true;
+                                    }
+                                } catch (e) {}
+                            }
+                        }
+                    } else {
+                        // fallback: previous behavior (sourceFrame top, first multi as ledge/wall)
+                        const fs2 = this.FrameSelect;
+                        if (fs2 && fs2._multiSelected && fs2._multiSelected.size > 0) {
+                            const multi2 = Array.from(fs2._multiSelected).map(i => Number(i)).filter(Number.isFinite);
+                            const srcIdxOpt = (typeof options.sourceFrame !== 'undefined' && options.sourceFrame !== null) ? Number(options.sourceFrame) : null;
+                            let ledgeIdx = null;
+                            for (const m of multi2) {
+                                if (srcIdxOpt !== null && Number.isFinite(srcIdxOpt) && m === srcIdxOpt) continue;
+                                ledgeIdx = m; break;
+                            }
+                            if (ledgeIdx === null && multi2.length > 0) ledgeIdx = multi2[0];
+                            if (ledgeIdx !== null && typeof this.currentSprite.getFrame === 'function') {
+                                const ledgeFrame = this.currentSprite.getFrame(anim, ledgeIdx);
+                                if (ledgeFrame && ledgeFrame.getContext) {
+                                    try {
+                                        const lctx = ledgeFrame.getContext('2d');
+                                        const ledgeImg = lctx.getImageData(0, 0, px, px);
+                                        const ldata = ledgeImg.data;
+                                        const odata = outImage.data;
+                                        const startY = Math.max(0, bottomBoundary + 1);
+                                        for (let yy = startY; yy < px; yy++) {
+                                            for (let xx = 0; xx < px; xx++) {
+                                                const idx = (yy * px + xx) * 4;
+                                                odata[idx] = ldata[idx];
+                                                odata[idx + 1] = ldata[idx + 1];
+                                                odata[idx + 2] = ldata[idx + 2];
+                                                odata[idx + 3] = ldata[idx + 3];
+                                            }
+                                        }
+                                    } catch (e) {}
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
 
             // Connection semantics follow frame-side UI toggles:
             // 1 = highlighted (outside edge / no neighbor), 0 = inside (connected).
@@ -5041,6 +5400,10 @@ export class SpriteScene extends Scene {
                 octx.putImageData(outImage, 0, 0);
                 return out;
             }
+
+            // If we've already applied per-layer outlines for depth compositing,
+            // skip the main outline pass below to avoid double outlining.
+            try { if (_skipMainOutline) { octx.putImageData(outImage, 0, 0); return out; } } catch (e) {}
 
             const clamp01 = (v) => Math.max(0, Math.min(1, v));
             const stepDiv = Math.max(1, colorSteps - 1);
@@ -5198,6 +5561,8 @@ export class SpriteScene extends Scene {
 
     _runProceduralAutotileGeneration(settings = {}) {
         try {
+            // remember requested depth for generation-time key expansion
+            try { this._lastGenerationDepth = Math.max(0, Number(settings.depth) || 0); } catch (e) { this._lastGenerationDepth = 0; }
             try { console.debug && console.debug('[gen] _runProceduralAutotileGeneration start', { anim: String(settings.sourceAnimation || this.selectedAnimation || 'idle'), sourceFrame: settings.sourceFrame, handshakeOnly: !!this.localState?.collab?.handshakeOnly, webrtcReady: !!this.localState?.collab?.webrtcReady, queued: (this.collabTransport && this.collabTransport._dataQueue) ? this.collabTransport._dataQueue.length : 0 }); } catch(e) {}
             const anim = String(settings.sourceAnimation || this.selectedAnimation || 'idle');
             const sourceFrameIndex = Number.isFinite(Number(settings.sourceFrame))
@@ -14055,28 +14420,66 @@ export class SpriteScene extends Scene {
             const base = document.createElement('canvas');
             base.width = ts * 2;
             base.height = ts * 2;
-            const bctx = base.getContext('2d');
-            if (!bctx) return null;
-            bctx.fillStyle = light;
-            bctx.fillRect(0, 0, ts, ts);
-            bctx.fillRect(ts, ts, ts, ts);
-            bctx.fillStyle = dark;
-            bctx.fillRect(ts, 0, ts, ts);
-            bctx.fillRect(0, ts, ts, ts);
+                                    const tctx = topFrame.getContext('2d');
+                                    const wctx = wallFrame.getContext('2d');
+                                    const topImg = tctx.getImageData(0, 0, px, px).data;
+                                    const wallImg = wctx.getImageData(0, 0, px, px).data;
+                                    const odata = outImage.data;
+                                    const seamY = Math.max(0, bottomBoundary);
+                                    // Determine which connection bits indicate bottom/outside
+                                    const edgeBottomOutside = !!bits[2];
+                                    const cornerBROutside = !!bits[6];
+                                    const cornerBLOutside = !!bits[7];
+                                    // Only trigger wall compositing when the bottom edge is outside.
+                                    // Ignore corner-only outside signals so left/right edges forcing
+                                    // corner bits don't cause bottom compositing.
+                                    const needWall = edgeBottomOutside;
+                                    try { console.log('[gen] depth needWall', JSON.stringify({ openKey: openKey, edgeBottomOutside, cornerBROutside, cornerBLOutside, needWall })); } catch (e) {}
+                                    if (!needWall) {
+                                        // copy top frame entirely
+                                        outImage.data.set(topImg);
+                                    } else {
+                                        // corner sizing - match later outline corner math
+                                        const cornerRadiusLocal = Math.max(1, Math.round(px * 0.32));
+                                        const cornerZone = Math.max(1, Math.floor(cornerRadiusLocal));
+                                        const isInBottomRightCorner = (xx, yy) => {
+                                            return ((px - 1 - xx) <= cornerZone) && ((px - 1 - yy) <= cornerZone);
+                                        };
+                                        const isInBottomLeftCorner = (xx, yy) => {
+                                            return (xx <= cornerZone) && ((px - 1 - yy) <= cornerZone);
+                                        };
+                                        for (let yy = 0; yy < px; yy++) {
+                                            for (let xx = 0; xx < px; xx++) {
+                                                const idx = (yy * px + xx) * 4;
+                                                // keep top pixels above seam
+                                                if (yy <= seamY) {
+                                                    odata[idx] = topImg[idx];
+                                                    odata[idx + 1] = topImg[idx + 1];
+                                                    odata[idx + 2] = topImg[idx + 2];
+                                                    odata[idx + 3] = topImg[idx + 3];
+                                                    continue;
+                                                }
+                                                // below seam: only replace where bottom/outside is requested
+                                                let useWall = false;
+                                                if (edgeBottomOutside) useWall = true;
+                                                else if (cornerBROutside && isInBottomRightCorner(xx, yy)) useWall = true;
+                                                else if (cornerBLOutside && isInBottomLeftCorner(xx, yy)) useWall = true;
 
-            const canvas = document.createElement('canvas');
-            canvas.width = w;
-            canvas.height = h;
-            const ctx = canvas.getContext('2d');
-            if (!ctx) return null;
-            const pattern = ctx.createPattern(base, 'repeat');
-            if (!pattern) return null;
-            ctx.fillStyle = pattern;
-            ctx.fillRect(0, 0, w, h);
-
-            if (!this._checkerboardCache) this._checkerboardCache = new Map();
-            this._checkerboardCache.set(key, canvas);
-            return canvas;
+                                                if (useWall) {
+                                                    odata[idx] = wallImg[idx];
+                                                    odata[idx + 1] = wallImg[idx + 1];
+                                                    odata[idx + 2] = wallImg[idx + 2];
+                                                    odata[idx + 3] = wallImg[idx + 3];
+                                                } else {
+                                                    // use the top frame pixel when wall isn't requested
+                                                    odata[idx] = topImg[idx];
+                                                    odata[idx + 1] = topImg[idx + 1];
+                                                    odata[idx + 2] = topImg[idx + 2];
+                                                    odata[idx + 3] = topImg[idx + 3];
+                                                }
+                                            }
+                                        }
+                                    }
         } catch (e) {
             return null;
         }

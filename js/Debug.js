@@ -129,6 +129,39 @@ class Debug {
         this._patchGlobal();
         this._setupInput();
         this._setupToggle();
+
+        this.createSignal('copylogs', () => {
+            try {
+                const text = this.logs
+                    .map(l => (typeof l === 'string' ? l : JSON.stringify(l)))
+                    .join('\n');
+
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).then(() => {
+                        this.log('[Debug] Logs copied to clipboard');
+                    }).catch(err => {
+                        this.error('Clipboard write failed: ' + err);
+                    });
+                } else {
+                    // Fallback for older browsers
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    textarea.style.position = 'fixed';
+                    textarea.style.opacity = '0';
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    try {
+                        document.execCommand('copy');
+                        this.log('[Debug] Logs copied (fallback)');
+                    } catch (err) {
+                        this.error('Fallback copy failed: ' + err);
+                    }
+                    document.body.removeChild(textarea);
+                }
+            } catch (err) {
+                this.error('copyLogs signal error: ' + err);
+            }
+        });
     }
     /**
      * Register a keyword and its action. When the keyword is entered in the debug input, the action will be executed.
@@ -420,7 +453,7 @@ class Debug {
             this.logs.unshift(entry);
         }
         // Keep up to a reasonable cap so older logs can still be scrolled through.
-        const MAX_LOGS = 50;
+        const MAX_LOGS = 200;
         if (this.logs.length > MAX_LOGS) {
             // Remove oldest entries so length == MAX_LOGS
             this.logs.splice(0, this.logs.length - MAX_LOGS);
