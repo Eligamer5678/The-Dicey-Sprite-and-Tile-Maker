@@ -232,7 +232,7 @@ export class SpriteScene extends Scene {
                                 if (typeof v !== 'string') continue;
                                 const norm = (typeof this._normalizeOpenConnectionKey === 'function')
                                     ? this._normalizeOpenConnectionKey(v)
-                                    : String(v).replace(/[^01]/g, '').padEnd(8, '0').slice(0, 8);
+                                    : String(v).replace(/[^01]/g, '').padEnd(10, '0').slice(0, 10);
                                 this._tileConnMap[k] = norm;
                             }
                         }
@@ -1910,8 +1910,8 @@ export class SpriteScene extends Scene {
             const idx = (Number.isFinite(Number(index)) ? Number(index) : null);
             if (idx === null) return false;
             const normalized = (typeof this._normalizeOpenConnectionKey === 'function')
-                ? this._normalizeOpenConnectionKey(key || '00000000')
-                : String(key || '00000000').replace(/[^01]/g, '').padEnd(8, '0').slice(0, 8);
+                ? this._normalizeOpenConnectionKey(key || '0000000000')
+                : String(key || '0000000000').replace(/[^01]/g, '').padEnd(10, '0').slice(0, 10);
             if (!this._tileConnMap || typeof this._tileConnMap !== 'object') this._tileConnMap = {};
             this._tileConnMap[a + '::' + (idx | 0)] = normalized;
             try { if (this.FrameSelect && typeof this.FrameSelect.rebuild === 'function') this.FrameSelect.rebuild(); } catch (e) {}
@@ -4441,7 +4441,8 @@ export class SpriteScene extends Scene {
         }
     }
 
-    // Compute an 8-bit connection key for tile at (col,row) for a given animation name.
+    // Compute a 10-bit connection key for tile at (col,row) for a given animation name.
+    // Bits 0-7: edges then corners (1 = outside, 0 = inside). Bits 8-9: extra flags.
     _computeConnectionKey(col, row, anim) {
         // bits: edges top,right,bottom,left then corners tl,tr,br,bl. '1' means closed (no neighbor)
         const hasNeighbor = (c, r) => {
@@ -4478,8 +4479,8 @@ export class SpriteScene extends Scene {
         if (eBottom === '1') { cBR = '1'; cBL = '1'; }
         if (eLeft === '1') { cTL = '1'; cBL = '1'; }
 
-        // Final key: edges then corners
-        return '' + eTop + eRight + eBottom + eLeft + cTL + cTR + cBR + cBL;
+        // Final key: edges then corners (append two zeros for extra flags)
+        return '' + eTop + eRight + eBottom + eLeft + cTL + cTR + cBR + cBL + '00';
     }
 
     _computeBinaryConnectionKey(col, row, predicate) {
@@ -4501,16 +4502,16 @@ export class SpriteScene extends Scene {
             const cBR = has(col + 1, row + 1) ? '1' : '0';
             const cBL = has(col - 1, row + 1) ? '1' : '0';
 
-            return '' + eTop + eRight + eBottom + eLeft + cTL + cTR + cBR + cBL;
+            return '' + eTop + eRight + eBottom + eLeft + cTL + cTR + cBR + cBL + '00';
         } catch (e) {
-            return '00000000';
+            return '0000000000';
         }
     }
 
     _computeTransitionConnectionKey(col, row, firstAnim, targetAnim = null) {
         try {
             const base = String(this._getAutotileLogicalAnimationName(firstAnim || '') || '').trim();
-            if (!base) return '00000000';
+            if (!base) return '0000000000';
             const target = String(this._getAutotileLogicalAnimationName(targetAnim || '') || '').trim();
 
             const basePlain = this._computeBinaryConnectionKey(col, row, (binding) => {
@@ -4549,13 +4550,13 @@ export class SpriteScene extends Scene {
             // Pure interior-corner transitions.
             if (edgeCount === 0) {
                 if (cornerCount === 1) {
-                    if (cTL) return '00001000';
-                    if (cTR) return '00000100';
-                    if (cBR) return '00000001';
-                    if (cBL) return '00000010';
+                    if (cTL) return '0000100000';
+                    if (cTR) return '0000010000';
+                    if (cBR) return '0000000100';
+                    if (cBL) return '0000001000';
                 }
-                // Fallback: keep plain binary semantics for scoring fallback.
-                return plain;
+                // Fallback: return normalized 10-bit form of plain binary semantics.
+                return this._normalizeOpenConnectionKey(plain);
             }
 
             // Single-edge transitions: center band + edge-outline variants.
@@ -4563,35 +4564,35 @@ export class SpriteScene extends Scene {
                 const hash = Math.abs((((Number(col) | 0) * 73856093) ^ ((Number(row) | 0) * 19349663)) >>> 0);
 
                 if (eTop) {
-                    if (baseTL && !baseTR) return '10001101';
-                    if (baseTR && !baseTL) return '10001110';
-                    if (baseTL && baseTR) return (hash & 1) ? '10001101' : '10001110';
-                    return '10001100';
+                    if (baseTL && !baseTR) return '1000110100';
+                    if (baseTR && !baseTL) return '1000111000';
+                    if (baseTL && baseTR) return (hash & 1) ? '1000110100' : '1000111000';
+                    return '1000110000';
                 }
                 if (eRight) {
-                    if (baseTR && !baseBR) return '01001110';
-                    if (baseBR && !baseTR) return '01000111';
-                    if (baseTR && baseBR) return (hash & 1) ? '01001110' : '01000111';
-                    return '01000110';
+                    if (baseTR && !baseBR) return '0100111000';
+                    if (baseBR && !baseTR) return '0100011100';
+                    if (baseTR && baseBR) return (hash & 1) ? '0100111000' : '0100011100';
+                    return '0100011000';
                 }
                 if (eBottom) {
-                    if (baseBL && !baseBR) return '00101011';
-                    if (baseBR && !baseBL) return '00100111';
-                    if (baseBL && baseBR) return (hash & 1) ? '00101011' : '00100111';
-                    return '00100011';
+                    if (baseBL && !baseBR) return '0010101100';
+                    if (baseBR && !baseBL) return '0010011100';
+                    if (baseBL && baseBR) return (hash & 1) ? '0010101100' : '0010011100';
+                    return '0010001100';
                 }
                 if (eLeft) {
-                    if (baseTL && !baseBL) return '00011101';
-                    if (baseBL && !baseTL) return '00011011';
-                    if (baseTL && baseBL) return (hash & 1) ? '00011101' : '00011011';
-                    return '00011001';
+                    if (baseTL && !baseBL) return '0001110100';
+                    if (baseBL && !baseTL) return '0001101100';
+                    if (baseTL && baseBL) return (hash & 1) ? '0001110100' : '0001101100';
+                    return '0001100100';
                 }
             }
 
             // Complex/multi-edge junctions: normalize for robust best-match fallback.
             return this._normalizeOpenConnectionKey(plain);
         } catch (e) {
-            return '00000000';
+            return '0000000000';
         }
     }
 
@@ -4690,10 +4691,12 @@ export class SpriteScene extends Scene {
     }
 
     _normalizeOpenConnectionKey(key) {
-        let bits = String(key || '00000000').replace(/[^01]/g, '');
-        while (bits.length < 8) bits += '0';
-        bits = bits.slice(0, 8);
+        // Support 10-bit open-connection keys (8 basic + 2 extra bits)
+        let bits = String(key || '0000000000').replace(/[^01]/g, '');
+        while (bits.length < 10) bits += '0';
+        bits = bits.slice(0, 10);
         const arr = bits.split('');
+        // Preserve original 8-bit semantics for edges/corners
         const edgeTop = arr[0] === '1';
         const edgeRight = arr[1] === '1';
         const edgeBottom = arr[2] === '1';
@@ -4702,22 +4705,35 @@ export class SpriteScene extends Scene {
         if (edgeRight) { arr[5] = '1'; arr[6] = '1'; }
         if (edgeBottom) { arr[6] = '1'; arr[7] = '1'; }
         if (edgeLeft) { arr[4] = '1'; arr[7] = '1'; }
+        // Bits 8 and 9 are preserved as-is (extra cliff/half-edge flags)
         return arr.join('');
     }
 
     _openConnectionToClosedKey(openKey) {
         const norm = this._normalizeOpenConnectionKey(openKey);
-        return norm;
+        // Return closed-key in legacy 8-bit form (edges then corners).
+        // Normalization produces 10 bits; trim to first 8 for closed-key comparisons.
+        return String(norm || '').slice(0, 8);
     }
 
     _getAllValidOpenConnectionKeys() {
-        const keys = [];
+        // Build canonical set based on original 8-bit semantics, then
+        // append the two extra 10-bit tiles used for cliff halves.
+        const set = new Set();
+        // First, collect stable 8-bit keys (legacy behavior)
         for (let mask = 0; mask < 256; mask++) {
-            const bits = mask.toString(2).padStart(8, '0');
-            const norm = this._normalizeOpenConnectionKey(bits);
-            if (norm === bits) keys.push(bits);
+            const bits8 = mask.toString(2).padStart(8, '0');
+            const norm8 = this._normalizeOpenConnectionKey(bits8);
+            // normalize returns 10-bit canonical, but ensure we store canonical form
+            set.add(norm8);
         }
-        return keys;
+        // Add the two extra 10-bit variants (bottom-left-half and flipped)
+        // These are trailing bits beyond the original 8; keep them canonical via normalize.
+        try {
+            set.add(this._normalizeOpenConnectionKey('0000000001'));
+            set.add(this._normalizeOpenConnectionKey('0000000010'));
+        } catch (e) {}
+        return Array.from(set.values());
     }
 
     _findConnectionFrameIndex(anim, normalizedOpenKey) {
@@ -4962,31 +4978,31 @@ export class SpriteScene extends Scene {
 
             const defs = [
                 // Keep these 4 as center transition bands.
-                { mode: 'top', key: '10001100', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
-                { mode: 'right', key: '01000110', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
-                { mode: 'bottom', key: '00100011', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
-                { mode: 'left', key: '00011001', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+                    { mode: 'top', key: '1000110000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+                    { mode: 'right', key: '0100011000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+                    { mode: 'bottom', key: '0010001100', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+                    { mode: 'left', key: '0001100100', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
 
-                // 8 true edge-outline transitions (mirror pairs per direction).
-                { mode: 'top', key: '10001101', sourceKey: '10001100', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
-                { mode: 'top', key: '10001110', sourceKey: '10001100', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
-                { mode: 'right', key: '01000111', sourceKey: '01000110', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
-                { mode: 'right', key: '01001110', sourceKey: '01000110', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
-                { mode: 'bottom', key: '00100111', sourceKey: '00100011', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
-                { mode: 'bottom', key: '00101011', sourceKey: '00100011', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
-                { mode: 'left', key: '00011101', sourceKey: '00011001', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
-                { mode: 'left', key: '00011011', sourceKey: '00011001', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
+                    // 8 true edge-outline transitions (mirror pairs per direction).
+                    { mode: 'top', key: '1000110100', sourceKey: '1000110000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
+                    { mode: 'top', key: '1000111000', sourceKey: '1000110000', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
+                    { mode: 'right', key: '0100011100', sourceKey: '0100011000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
+                    { mode: 'right', key: '0100111000', sourceKey: '0100011000', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
+                    { mode: 'bottom', key: '0010011100', sourceKey: '0010001100', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
+                    { mode: 'bottom', key: '0010101100', sourceKey: '0010001100', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
+                    { mode: 'left', key: '0001110100', sourceKey: '0001100100', useConnFrames: true, mirrorVariant: false, perpendicularSplit: true },
+                    { mode: 'left', key: '0001101100', sourceKey: '0001100100', useConnFrames: true, mirrorVariant: true, perpendicularSplit: true },
 
-                // 8 interior-corner transitions:
-                // 4 mostly-first + 1-part-second, and 4 mostly-second + 1-part-first.
-                { mode: 'corner-tl', key: '00001000', sourceKey: '00001000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
-                { mode: 'corner-tr', key: '00000100', sourceKey: '00000100', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
-                { mode: 'corner-br', key: '00000001', sourceKey: '00000001', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
-                { mode: 'corner-bl', key: '00000010', sourceKey: '00000010', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
-                { mode: 'corner-tl', key: '00001000', sourceKey: '00001000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
-                { mode: 'corner-tr', key: '00000100', sourceKey: '00000100', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
-                { mode: 'corner-br', key: '00000001', sourceKey: '00000001', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
-                { mode: 'corner-bl', key: '00000010', sourceKey: '00000010', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' }
+                    // 8 interior-corner transitions:
+                    // 4 mostly-first + 1-part-second, and 4 mostly-second + 1-part-first.
+                    { mode: 'corner-tl', key: '0000100000', sourceKey: '0000100000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                    { mode: 'corner-tr', key: '0000010000', sourceKey: '0000010000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                    { mode: 'corner-br', key: '0000000100', sourceKey: '0000000100', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                    { mode: 'corner-bl', key: '0000001000', sourceKey: '0000001000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                    { mode: 'corner-tl', key: '0000100000', sourceKey: '0000100000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
+                    { mode: 'corner-tr', key: '0000010000', sourceKey: '0000010000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
+                    { mode: 'corner-br', key: '0000000100', sourceKey: '0000000100', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
+                    { mode: 'corner-bl', key: '0000001000', sourceKey: '0000001000', useConnFrames: true, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' }
             ];
 
             if (!this._transitionVariantMeta || typeof this._transitionVariantMeta !== 'object') this._transitionVariantMeta = {};
@@ -4999,7 +5015,7 @@ export class SpriteScene extends Scene {
 
                 // For true edge transitions, blend matching connector frames from each source tilesheet.
                 if (def.useConnFrames) {
-                    const sourceKey = String(def.sourceKey || def.key || '00000000');
+                            const sourceKey = String(def.sourceKey || def.key || '0000000000');
                     const fromIdx = this._findConnectionFrameIndex(parsed.fromAnim, sourceKey);
                     const toIdx = this._findConnectionFrameIndex(parsed.toAnim, sourceKey);
                     const maybeFrom = (fromIdx !== null && Number.isFinite(fromIdx)) ? sheet.getFrame(parsed.fromAnim, fromIdx) : null;
@@ -5025,7 +5041,7 @@ export class SpriteScene extends Scene {
                 }
                 dctx.clearRect(0, 0, dstFrame.width, dstFrame.height);
                 dctx.drawImage(rendered, 0, 0, dstFrame.width, dstFrame.height);
-                try { this._setTileConnection(anim, dstIndex, def.key || '00000000', false); } catch (e) { this._tileConnMap[anim + '::' + dstIndex] = this._normalizeOpenConnectionKey(def.key); }
+                try { this._setTileConnection(anim, dstIndex, def.key || '0000000000', false); } catch (e) { this._tileConnMap[anim + '::' + dstIndex] = this._normalizeOpenConnectionKey(def.key); }
                 this._transitionVariantMeta[anim + '::' + dstIndex] = {
                     mode: String(def.mode || ''),
                     cornerDominant: def.cornerDominant || null
@@ -5340,6 +5356,103 @@ export class SpriteScene extends Scene {
                                         }
 
                                         // Set final output to wallBuf (which now has top overlaid)
+                                        // Draw an additional center-edge outline along the seam
+                                        try {
+                                            const seamYLocal = seamY;
+                                            const cornerRadiusLocal = Math.max(1, Math.round(px * 0.32));
+                                            const radiusLocal = Math.max(0.0001, cornerRadiusLocal);
+                                            const cornerZoneLocal = Math.max(1, Math.floor(cornerRadiusLocal));
+                                            const centerYLocal = seamYLocal - Math.max(0, Math.round(radiusLocal)) + 1;
+                                            const leftCenterX = Math.max(0, Math.round(radiusLocal));
+                                            const rightCenterX = Math.max(0, px - 1 - Math.round(radiusLocal));
+
+                                            const clamp01 = (v) => Math.max(0, Math.min(1, v));
+                                            const mix = (a, b, t) => (a * (1 - t)) + (b * t);
+                                            const stepDivLocal = Math.max(1, colorSteps - 1);
+                                            const stepUnitLocal = maxDelta / stepDivLocal;
+
+                                            // Compute seam per-column from topBuf alpha so the seam follows curvature
+                                            const seamPerColumn = new Int32Array(px);
+                                            for (let xx = 0; xx < px; xx++) {
+                                                let lastOpaque = -1;
+                                                for (let yy = 0; yy < px; yy++) {
+                                                    const idx = (yy * px + xx) * 4;
+                                                    if (topBuf[idx + 3] > 0) lastOpaque = yy;
+                                                }
+                                                seamPerColumn[xx] = lastOpaque;
+                                            }
+
+                                            const band = Math.max(1, outlineWidth);
+                                            for (let xx = 0; xx < px; xx++) {
+                                                const seamX = seamPerColumn[xx];
+                                                if (seamX < 0) continue; // no top pixel in this column
+                                                for (let yy = Math.max(0, seamX - band); yy <= Math.min(px - 1, seamX + band); yy++) {
+                                                    const yDist = Math.abs(yy - seamX);
+                                                    const t = clamp01(yDist / Math.max(0.0001, band));
+                                                    const edgeBlend = Math.pow(1 - t, 1 + (falloff * 4));
+
+                                                    // corner-aware falloff: reduce effect near rounded corners
+                                                    let cornerFall = 1.0;
+                                                    if (cornerRoundness > 0) {
+                                                        if (xx <= cornerZoneLocal && bits[3]) {
+                                                            const dx = xx - leftCenterX;
+                                                            const dy = yy - centerYLocal;
+                                                            const dist = Math.hypot(dx, dy);
+                                                            const cutoff = radiusLocal - band;
+                                                            if (dist > cutoff) cornerFall = Math.max(0, 1 - ((dist - cutoff) / Math.max(1, band)));
+                                                        } else if ((px - 1 - xx) <= cornerZoneLocal && bits[1]) {
+                                                            const dx = xx - rightCenterX;
+                                                            const dy = yy - centerYLocal;
+                                                            const dist = Math.hypot(dx, dy);
+                                                            const cutoff = radiusLocal - band;
+                                                            if (dist > cutoff) cornerFall = Math.max(0, 1 - ((dist - cutoff) / Math.max(1, band)));
+                                                        }
+                                                    }
+
+                                                    const idx = (yy * px + xx) * 4;
+                                                    const a = wallBuf[idx + 3] / 255;
+                                                    if (a <= 0) continue;
+
+                                                    const noise = ((this._noise01((xx * 1.37) + 9, (yy * 0.83) + 17, seed + 97) * 2) - 1) * maxDelta * noiseAmount;
+                                                    let delta = (tone * edgeBlend * maxDelta) + noise;
+                                                    delta = Math.round(delta / stepUnitLocal) * stepUnitLocal;
+
+                                                    if (useCustomOutline && _customBaseColor) {
+                                                        try {
+                                                            const srcRgb = new Color(wallBuf[idx], wallBuf[idx + 1], wallBuf[idx + 2], a, 'rgb');
+                                                            const customRgb = (_customBaseColor.type === 'rgb') ? _customBaseColor : _customBaseColor.toRgb();
+                                                            const noiseNorm = (maxDelta > 0) ? (noise / maxDelta) : 0;
+                                                            let mixAmt = edgeBlend + noiseNorm;
+                                                            mixAmt = Math.max(0, Math.min(1, mixAmt)) * cornerFall;
+                                                            const quantMix = Math.round(mixAmt * stepDivLocal) / stepDivLocal;
+                                                            const r = Math.round(mix(srcRgb.a, customRgb.a, quantMix));
+                                                            const g = Math.round(mix(srcRgb.b, customRgb.b, quantMix));
+                                                            const b = Math.round(mix(srcRgb.c, customRgb.c, quantMix));
+                                                            const aMix = mix(srcRgb.d ?? a, customRgb.d ?? 1, quantMix);
+                                                            wallBuf[idx] = Math.max(0, Math.min(255, r));
+                                                            wallBuf[idx + 1] = Math.max(0, Math.min(255, g));
+                                                            wallBuf[idx + 2] = Math.max(0, Math.min(255, b));
+                                                            wallBuf[idx + 3] = Math.max(0, Math.min(255, Math.round((aMix ?? a) * 255)));
+                                                        } catch (e) { }
+                                                        continue;
+                                                    }
+
+                                                    let c = new Color(wallBuf[idx], wallBuf[idx + 1], wallBuf[idx + 2], a, 'rgb').toHsv();
+                                                    if (!c) continue;
+                                                    if (colorChannel === 'h') c.a = ((c.a + delta) % 1 + 1) % 1;
+                                                    if (colorChannel === 's') c.b = clamp01(c.b + delta);
+                                                    if (colorChannel === 'v') c.c = clamp01(c.c + delta);
+                                                    if (colorChannel === 'a') c.d = clamp01(c.d + delta);
+                                                    const rgb = c.toRgb();
+                                                    if (!rgb) continue;
+                                                    wallBuf[idx] = Math.max(0, Math.min(255, Math.round(rgb.a)));
+                                                    wallBuf[idx + 1] = Math.max(0, Math.min(255, Math.round(rgb.b)));
+                                                    wallBuf[idx + 2] = Math.max(0, Math.min(255, Math.round(rgb.c)));
+                                                    wallBuf[idx + 3] = Math.max(0, Math.min(255, Math.round((rgb.d ?? a) * 255)));
+                                                }
+                                            }
+                                        } catch (e) {}
+
                                         outImage.data.set(wallBuf);
                                         _skipMainOutline = true;
                                     }
@@ -5705,20 +5818,20 @@ export class SpriteScene extends Scene {
 
             const anim = String(this.selectedAnimation || 'idle');
             const keyForFrame = (idx) => {
-                const raw = (this._tileConnMap && this._tileConnMap[anim + '::' + idx]) || '00000000';
+                const raw = (this._tileConnMap && this._tileConnMap[anim + '::' + idx]) || '0000000000';
                 return this._normalizeOpenConnectionKey(raw);
             };
 
-            const allKey = '11111111';
-            const noneKey = '00000000';
-            const cornersKey = '00001111';
+            const allKey = this._normalizeOpenConnectionKey('1111111100');
+            const noneKey = this._normalizeOpenConnectionKey('0000000000');
+            const cornersKey = this._normalizeOpenConnectionKey('0000111100');
 
             const allFrameIdx = selected.find(i => keyForFrame(i) === allKey);
             const noneFrameIdx = selected.find(i => keyForFrame(i) === noneKey);
             const cornersFrameIdx = selected.find(i => keyForFrame(i) === cornersKey);
 
             if (allFrameIdx === undefined || noneFrameIdx === undefined || cornersFrameIdx === undefined) {
-                return { ok: false, reason: 'Multi-select must include frames tagged as 11111111, 00000000, and 00001111.' };
+                return { ok: false, reason: 'Multi-select must include frames tagged as 1111111100, 0000000000, and 0000111100.' };
             }
 
             const sheet = this.currentSprite;
@@ -5897,10 +6010,14 @@ export class SpriteScene extends Scene {
             if (normalized.length !== 3) return false;
 
             const animation = String(anim || this.selectedAnimation || 'idle');
-            const expected = new Set(['11111111', '00000000', '00001111']);
+            const expected = new Set([
+                this._normalizeOpenConnectionKey('1111111100'),
+                this._normalizeOpenConnectionKey('0000000000'),
+                this._normalizeOpenConnectionKey('0000111100')
+            ]);
             const found = new Set();
             for (const idx of normalized) {
-                const raw = (this._tileConnMap && this._tileConnMap[animation + '::' + idx]) || '00000000';
+                const raw = (this._tileConnMap && this._tileConnMap[animation + '::' + idx]) || '0000000000';
                 found.add(this._normalizeOpenConnectionKey(raw));
             }
             if (found.size !== 3) return false;
@@ -5956,8 +6073,8 @@ export class SpriteScene extends Scene {
             const exact = [];
             for (let i = 0; i < frames.length; i++) {
                 const key = String(anim) + '::' + i;
-                const openBits = this._tileConnMap[key];
-                if (typeof openBits !== 'string' || !/^[01]{8}$/.test(openBits)) continue;
+                    const openBits = this._tileConnMap[key];
+                    if (typeof openBits !== 'string' || !/^[01]{10}$/.test(openBits)) continue;
                 const candClosed = this._openConnectionToClosedKey(openBits);
                 if (candClosed === desiredClosedKey) exact.push(i);
                 const score = scoreFor(candClosed);
@@ -5998,6 +6115,12 @@ export class SpriteScene extends Scene {
         if (!this._availableTileConn) return null;
         const candidates = this._availableTileKeys || Object.keys(this._availableTileConn || {});
         if (candidates.includes(desiredKey)) return this._availableTileConn[desiredKey];
+        // Backwards-compat: if desiredKey is 10-bit but mapping uses 8-bit keys,
+        // try matching on the first 8 bits as a fallback.
+        if ((typeof desiredKey === 'string') && desiredKey.length === 10) {
+            const short = desiredKey.slice(0, 8);
+            if (candidates.includes(short)) return this._availableTileConn[short];
+        }
 
         // scoring priorities: same closed edges, same open edges, same open corners, same closed corners
         const scoreFor = (candKey) => {

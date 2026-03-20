@@ -58,10 +58,10 @@ export default class AutoTileGenerationMenu {
         this._statusUntil = 0;
 
         this._previewDefs = [
-            { key: '11111111' },
-            { key: '00000000' },
-            { key: '10001100' },
-            { corners: ['00001000', '00000100', '00000001', '00000010'] },
+            { key: '1111111100' },
+            { key: '0000000000' },
+            { key: '1000110000' },
+            { corners: ['0000100000', '0000010000', '0000000100', '0000001000'] },
         ];
 
         this._sliderDefs = [

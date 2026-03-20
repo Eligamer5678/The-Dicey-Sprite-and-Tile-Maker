@@ -103,9 +103,10 @@ export default class FrameSelect {
     }
 
     _normalizeOpenConnKey(key){
-        let bits = String(key || '00000000').replace(/[^01]/g, '');
-        while (bits.length < 8) bits += '0';
-        bits = bits.slice(0, 8);
+        // Support 10-bit connection keys (preserve original 8-bit behavior)
+        let bits = String(key || '0000000000').replace(/[^01]/g, '');
+        while (bits.length < 10) bits += '0';
+        bits = bits.slice(0, 10);
         const arr = bits.split('');
         const edgeTop = arr[0] === '1';
         const edgeRight = arr[1] === '1';
@@ -116,17 +117,18 @@ export default class FrameSelect {
         if (edgeRight) { arr[5] = '1'; arr[6] = '1'; }
         if (edgeBottom) { arr[6] = '1'; arr[7] = '1'; }
         if (edgeLeft) { arr[4] = '1'; arr[7] = '1'; }
+        // bits 8 and 9 remain as extra flags
         return arr.join('');
     }
 
     _getFrameConnKey(anim, frame){
         try {
-            if (!this.scene) return '00000000';
+            if (!this.scene) return '0000000000';
             if (!this.scene._tileConnMap) this.scene._tileConnMap = {};
             const k = String(anim || '') + '::' + Number(frame || 0);
-            return this._normalizeOpenConnKey(this.scene._tileConnMap[k] || '00000000');
+            return this._normalizeOpenConnKey(this.scene._tileConnMap[k] || '0000000000');
         } catch (e) {
-            return '00000000';
+            return '0000000000';
         }
     }
 
@@ -734,7 +736,7 @@ export default class FrameSelect {
                 const k = anim + '::' + i;
                 const existing = scene._tileConnMap[k];
                 if (!overwrite && typeof existing === 'string' && existing.length > 0) continue;
-                scene._tileConnMap[k] = this._normalizeOpenConnKey(order[i] || '00000000');
+                scene._tileConnMap[k] = this._normalizeOpenConnKey(order[i] || '0000000000');
                 wrote++;
             }
             return wrote;
