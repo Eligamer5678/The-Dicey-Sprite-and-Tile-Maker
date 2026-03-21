@@ -5065,6 +5065,8 @@ export class SpriteScene extends Scene {
     }
 
     _renderProceduralConnectionFrame(sourceFrame, openKey, options = {}) {
+        options = options || {};
+        options.depth = Math.max(0, Number(options.depth) || 0);
         try {
             if (!sourceFrame || typeof sourceFrame.getContext !== 'function') return null;
             const srcCtx = sourceFrame.getContext('2d');
@@ -5099,9 +5101,11 @@ export class SpriteScene extends Scene {
 
             const srcImage = srcCtx.getImageData(0, 0, px, px);
             let _skipMainOutline = false;
+            let _usedDepthComposite = false;
 
             // Helper: apply outline algorithm to a provided RGBA Uint8ClampedArray (width=px, height=px)
-            const applyOutlineToImage = (idata, bitsObj) => {
+            const applyOutlineToImage = (idata, bitsObj, opts = {}) => {
+                const origBits = (opts && opts.originalBits) ? opts.originalBits : bitsObj;
                 const edgeTopOutside = !!bitsObj[0];
                 const edgeRightOutside = !!bitsObj[1];
                 const edgeBottomOutside = !!bitsObj[2];
@@ -5193,8 +5197,25 @@ export class SpriteScene extends Scene {
 
                         if (cornerTLOutside && !edgeTopOutside && !edgeLeftOutside) nearest = Math.min(nearest, innerCornerDistance(x, y));
                         if (cornerTROutside && !edgeTopOutside && !edgeRightOutside) nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), y));
-                        if (cornerBROutside && !edgeBottomOutside && !edgeRightOutside) nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), (px - 1 - y)));
-                        if (cornerBLOutside && !edgeBottomOutside && !edgeLeftOutside) nearest = Math.min(nearest, innerCornerDistance(x, (px - 1 - y)));
+                        // For bottom inner-corners, compute a corner raise value.
+                        // If both extra bits are false (top-only) and depth==0, force a raise
+                        // so the corner outline moves up toward the center line.
+                        let cornerRaise = Math.max(0, Math.min(px, Math.round(Number(options.depth) || 0)));
+                        try {
+                            // Only force a corner raise when we're doing depth compositing
+                            // and the original connection bits explicitly signal no extra bits.
+                            if (opts && opts.depthComposite && origBits && typeof origBits[8] !== 'undefined' && !origBits[8] && !origBits[9] && Math.round(Number(options.depth) || 0) === 0) {
+                                cornerRaise = Math.max(1, Math.round(px * 0.32));
+                            }
+                        } catch (e) {}
+                        if (cornerBROutside && !edgeBottomOutside && !edgeRightOutside) {
+                            const adjDY = Math.max(0, (px - 1 - y) - cornerRaise);
+                            nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), adjDY));
+                        }
+                        if (cornerBLOutside && !edgeBottomOutside && !edgeLeftOutside) {
+                            const adjDY = Math.max(0, (px - 1 - y) - cornerRaise);
+                            nearest = Math.min(nearest, innerCornerDistance(x, adjDY));
+                        }
 
                         if (!Number.isFinite(nearest) || nearest > outlineWidth) continue;
 
@@ -5332,14 +5353,14 @@ export class SpriteScene extends Scene {
                                         }
 
                                         // Apply outline to wall layer using original bits
-                                        try { applyOutlineToImage(wallBuf, bits); } catch (e) {}
+                                        try { applyOutlineToImage(wallBuf, bits, { originalBits: bits, depthComposite: true }); } catch (e) {}
 
                                         // For the top face outline, force the bottom edge as an outside
                                         // edge so the seam line receives an outline, but keep other
                                         // edges as indicated by bits. We still ignore corner-only
                                         // signals for deciding to composite (needWall was bottom-only).
                                         const topBits = [bits[0], bits[1], true, bits[3], bits[4], bits[5], bits[6], bits[7]];
-                                        try { applyOutlineToImage(topBuf, topBits); } catch (e) {}
+                                        try { applyOutlineToImage(topBuf, topBits, { originalBits: bits, depthComposite: true }); } catch (e) {}
 
                                         // Composite topBuf over wallBuf
                                         for (let yy = 0; yy < px; yy++) {
@@ -5455,6 +5476,7 @@ export class SpriteScene extends Scene {
 
                                         outImage.data.set(wallBuf);
                                         _skipMainOutline = true;
+                                        _usedDepthComposite = true;
                                     }
                                 } catch (e) {}
                             }
@@ -5610,8 +5632,21 @@ export class SpriteScene extends Scene {
                     // Handle inner-corner seams where only the diagonal is outside.
                     if (cornerTLOutside && !edgeTopOutside && !edgeLeftOutside) nearest = Math.min(nearest, innerCornerDistance(x, y));
                     if (cornerTROutside && !edgeTopOutside && !edgeRightOutside) nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), y));
-                    if (cornerBROutside && !edgeBottomOutside && !edgeRightOutside) nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), (px - 1 - y)));
-                    if (cornerBLOutside && !edgeBottomOutside && !edgeLeftOutside) nearest = Math.min(nearest, innerCornerDistance(x, (px - 1 - y)));
+                        // For inner-corner seams in the helper, also raise bottom corners toward center
+                        let cornerRaiseLocal = Math.max(0, Math.min(px, Math.round(Number(options.depth) || 0)));
+                        try {
+                            if (_usedDepthComposite && !bits[8] && !bits[9] && Math.round(Number(options.depth) || 0) === 0) {
+                                cornerRaiseLocal = Math.max(1, Math.round(px * 0.32));
+                            }
+                        } catch (e) {}
+                        if (cornerBROutside && !edgeBottomOutside && !edgeRightOutside) {
+                            const adjDY = Math.max(0, (px - 1 - y) - cornerRaiseLocal);
+                            nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), adjDY));
+                        }
+                        if (cornerBLOutside && !edgeBottomOutside && !edgeLeftOutside) {
+                            const adjDY = Math.max(0, (px - 1 - y) - cornerRaiseLocal);
+                            nearest = Math.min(nearest, innerCornerDistance(x, adjDY));
+                        }
 
                     if (!Number.isFinite(nearest) || nearest > outlineWidth) continue;
 
@@ -5705,17 +5740,28 @@ export class SpriteScene extends Scene {
                 if (typeof raw !== 'string') continue;
                 const norm = this._normalizeOpenConnectionKey(raw);
                 if (!existingByConnKey.has(norm)) existingByConnKey.set(norm, i);
+                try {
+                    const closed = this._openConnectionToClosedKey(norm);
+                    if (!existingByConnKey.has(closed)) existingByConnKey.set(closed, i);
+                } catch (e) {}
             }
 
             let created = 0;
             let updated = 0;
             let skipped = 0;
-            const replaceExisting = !!settings.replaceExisting;
+            const replaceExisting = (typeof settings.replaceExisting === 'boolean') ? !!settings.replaceExisting : true;
             let nextInsertIndex = initialLogicalCount;
 
             for (const rawKey of keys) {
                 const key = this._normalizeOpenConnectionKey(rawKey);
-                const existingIndex = existingByConnKey.has(key) ? existingByConnKey.get(key) : null;
+                let existingIndex = null;
+                if (existingByConnKey.has(key)) existingIndex = existingByConnKey.get(key);
+                else {
+                    try {
+                        const closedKey = this._openConnectionToClosedKey(key);
+                        if (existingByConnKey.has(closedKey)) existingIndex = existingByConnKey.get(closedKey);
+                    } catch (e) {}
+                }
                 if (existingIndex !== null && !replaceExisting) {
                     skipped++;
                     continue;
@@ -5786,7 +5832,10 @@ export class SpriteScene extends Scene {
                         dctx.drawImage(rendered, 0, 0, dstFrame.width, dstFrame.height);
                     }
                         try { this._setTileConnection(anim, dstIndex, key, false); } catch (e) { this._tileConnMap[anim + '::' + dstIndex] = key; }
-                        try { existingByConnKey.set(key, dstIndex); } catch (e) {}
+                        try {
+                            existingByConnKey.set(key, dstIndex);
+                            try { const closedKey = this._openConnectionToClosedKey(key); existingByConnKey.set(closedKey, dstIndex); } catch (e) {}
+                        } catch (e) {}
                         try { console.debug && console.debug('[gen] about to send frameData', { anim, dstIndex, handshakeOnly: !!this.localState?.collab?.handshakeOnly, webrtcReady: !!this.localState?.collab?.webrtcReady, queued: (this.collabTransport && this.collabTransport._dataQueue) ? this.collabTransport._dataQueue.length : 0 }); } catch(e) {}
                         try { this._sendFrameDataForFrame(anim, dstIndex, dstFrame); } catch (e) {}
                 } catch (e) {
