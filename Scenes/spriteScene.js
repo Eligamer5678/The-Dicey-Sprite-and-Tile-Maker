@@ -4710,10 +4710,8 @@ export class SpriteScene extends Scene {
     }
 
     _openConnectionToClosedKey(openKey) {
-        const norm = this._normalizeOpenConnectionKey(openKey);
-        // Return closed-key in legacy 8-bit form (edges then corners).
-        // Normalization produces 10 bits; trim to first 8 for closed-key comparisons.
-        return String(norm || '').slice(0, 8);
+        // For modern usage, return the normalized 10-bit canonical key.
+        return this._normalizeOpenConnectionKey(openKey);
     }
 
     _getAllValidOpenConnectionKeys() {
@@ -5051,12 +5049,102 @@ export class SpriteScene extends Scene {
             }
 
             try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
+            try { if (sheet && typeof sheet.ensurePackedSheet === 'function') sheet.ensurePackedSheet(); } catch (e) {}
+            try { if (this.FrameSelect && typeof this.FrameSelect.rebuild === 'function') this.FrameSelect.rebuild(); } catch (e) {}
+            try { if (sheet && typeof sheet._materializeAnimation === 'function') sheet._materializeAnimation(parsed.fromAnim); } catch (e) {}
             if (created > 0) {
                 try {
                     if (this.stateController && typeof this.stateController.setActiveFrame === 'function') this.stateController.setActiveFrame(0);
                     else this.selectedFrame = 0;
                 } catch (e) {}
                 return { ok: true, created, total: defs.length, fromAnim: parsed.fromAnim, toAnim: parsed.toAnim };
+            }
+            return { ok: false, reason: 'No transition tiles were generated.' };
+        } catch (e) {
+            return { ok: false, reason: String((e && e.message) || e || 'Unknown error') };
+        }
+    }
+
+    // Generate transition tiles using two selected frames from the current animation.
+    // This uses the same transition defs as named transition generation but accepts
+    // concrete from/to frames (selected via FrameSelect multi-selection).
+    _runProceduralAutotileGenerationForSelectedFrames(settings = {}) {
+        try {
+            const frameSelect = this.FrameSelect;
+            const selected = Array.from((frameSelect && frameSelect._multiSelected) || [])
+                .filter(i => Number.isFinite(i))
+                .map(i => Number(i) | 0)
+                .sort((a, b) => a - b);
+            if (selected.length < 2) return { ok: false, reason: 'Select 2 frames first: source and target.' };
+
+            const anim = String(this.selectedAnimation || 'idle');
+            const sheet = this.currentSprite;
+            if (!sheet || typeof sheet.getFrame !== 'function' || typeof sheet.insertFrame !== 'function') {
+                return { ok: false, reason: 'Sprite sheet is not ready.' };
+            }
+
+            const srcIdx = Number.isFinite(Number(settings.sourceFrame)) ? (Number(settings.sourceFrame) | 0) : (Number(this.selectedFrame) | 0);
+            const otherIdx = selected.find(i => i !== srcIdx) || selected[0];
+            const fromFrame = sheet.getFrame(anim, srcIdx);
+            const toFrame = sheet.getFrame(anim, otherIdx);
+            if (!fromFrame || !toFrame) return { ok: false, reason: 'Could not read one or more selected frames.' };
+
+            // Reuse transition defs from named transition generation
+            const defs = [
+                { mode: 'top', key: '1000110000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+                { mode: 'right', key: '0100011000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+                { mode: 'bottom', key: '0010001100', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+                { mode: 'left', key: '0001100100', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false },
+
+                { mode: 'top', key: '1000110100', sourceKey: '1000110000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: true },
+                { mode: 'top', key: '1000111000', sourceKey: '1000110000', useConnFrames: false, mirrorVariant: true, perpendicularSplit: true },
+                { mode: 'right', key: '0100011100', sourceKey: '0100011000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: true },
+                { mode: 'right', key: '0100111000', sourceKey: '0100011000', useConnFrames: false, mirrorVariant: true, perpendicularSplit: true },
+                { mode: 'bottom', key: '0010011100', sourceKey: '0010001100', useConnFrames: false, mirrorVariant: false, perpendicularSplit: true },
+                { mode: 'bottom', key: '0010101100', sourceKey: '0010001100', useConnFrames: false, mirrorVariant: true, perpendicularSplit: true },
+                { mode: 'left', key: '0001110100', sourceKey: '0001100100', useConnFrames: false, mirrorVariant: false, perpendicularSplit: true },
+                { mode: 'left', key: '0001101100', sourceKey: '0001100100', useConnFrames: false, mirrorVariant: true, perpendicularSplit: true },
+
+                { mode: 'corner-tl', key: '0000100000', sourceKey: '0000100000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                { mode: 'corner-tr', key: '0000010000', sourceKey: '0000010000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                { mode: 'corner-br', key: '0000000100', sourceKey: '0000000100', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                { mode: 'corner-bl', key: '0000001000', sourceKey: '0000001000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'from' },
+                { mode: 'corner-tl', key: '0000100000', sourceKey: '0000100000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
+                { mode: 'corner-tr', key: '0000010000', sourceKey: '0000010000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
+                { mode: 'corner-br', key: '0000000100', sourceKey: '0000000100', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' },
+                { mode: 'corner-bl', key: '0000001000', sourceKey: '0000001000', useConnFrames: false, mirrorVariant: false, perpendicularSplit: false, cornerDominant: 'to' }
+            ];
+
+            let created = 0;
+            let dstIndex = 0;
+            const outAnim = `${anim}-sel-${srcIdx}-to-${otherIdx}`;
+
+            for (const def of defs) {
+                const rendered = this._renderTransitionBlendFrame(fromFrame, toFrame, def.mode, { ...settings, mirrorVariant: !!def.mirrorVariant, perpendicularSplit: !!def.perpendicularSplit, cornerDominant: def.cornerDominant || 'from' });
+                if (!rendered) continue;
+                // ensure destination animation exists
+                if (this._getAnimationLogicalFrameCountExact(outAnim) === 0) {
+                    // create first frame placeholder by inserting into anim name
+                    sheet.insertFrame(outAnim);
+                } else {
+                    sheet.insertFrame(outAnim);
+                }
+                const dstFrame = sheet.getFrame(outAnim, dstIndex);
+                const dctx = dstFrame && dstFrame.getContext ? dstFrame.getContext('2d') : null;
+                if (!dctx) { dstIndex++; continue; }
+                dctx.clearRect(0, 0, dstFrame.width, dstFrame.height);
+                dctx.drawImage(rendered, 0, 0, dstFrame.width, dstFrame.height);
+                try { this._setTileConnection(outAnim, dstIndex, def.key || '0000000000', false); } catch (e) { this._tileConnMap[outAnim + '::' + dstIndex] = this._normalizeOpenConnectionKey(def.key); }
+                created++; dstIndex++;
+            }
+
+            try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
+            try { if (sheet && typeof sheet.ensurePackedSheet === 'function') sheet.ensurePackedSheet(); } catch (e) {}
+            try { if (this.FrameSelect && typeof this.FrameSelect.rebuild === 'function') this.FrameSelect.rebuild(); } catch (e) {}
+            try { if (sheet && typeof sheet._materializeAnimation === 'function') sheet._materializeAnimation(outAnim); } catch (e) {}
+            if (created > 0) {
+                try { if (this.stateController && typeof this.stateController.setActiveFrame === 'function') this.stateController.setActiveFrame(0); else this.selectedFrame = 0; } catch (e) {}
+                return { ok: true, created, total: defs.length, outAnim };
             }
             return { ok: false, reason: 'No transition tiles were generated.' };
         } catch (e) {
@@ -5204,17 +5292,32 @@ export class SpriteScene extends Scene {
                         try {
                             // Only force a corner raise when we're doing depth compositing
                             // and the original connection bits explicitly signal no extra bits.
-                            if (opts && opts.depthComposite && origBits && typeof origBits[8] !== 'undefined' && !origBits[8] && !origBits[9] && Math.round(Number(options.depth) || 0) === 0) {
-                                cornerRaise = Math.max(1, Math.round(px * 0.32));
+                            if (opts && opts.depthComposite) {
+                                if (origBits && (origBits[8] || origBits[9])) {
+                                    // Extra bits present: do not force raise; keep depth value
+                                } else if (origBits && typeof origBits[8] !== 'undefined' && !origBits[8] && !origBits[9] && Math.round(Number(options.depth) || 0) === 0) {
+                                    cornerRaise = Math.max(1, Math.round(px * 0.32));
+                                }
                             }
                         } catch (e) {}
                         if (cornerBROutside && !edgeBottomOutside && !edgeRightOutside) {
                             const adjDY = Math.max(0, (px - 1 - y) - cornerRaise);
-                            nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), adjDY));
+                            // If original bits request extra cliff semantics, do not apply the forced raise
+                            if (origBits && (origBits[8] || origBits[9])) {
+                                const adjDY_noRaise = Math.max(0, (px - 1 - y));
+                                nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), adjDY_noRaise));
+                            } else {
+                                nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), adjDY));
+                            }
                         }
                         if (cornerBLOutside && !edgeBottomOutside && !edgeLeftOutside) {
                             const adjDY = Math.max(0, (px - 1 - y) - cornerRaise);
-                            nearest = Math.min(nearest, innerCornerDistance(x, adjDY));
+                            if (origBits && (origBits[8] || origBits[9])) {
+                                const adjDY_noRaise = Math.max(0, (px - 1 - y));
+                                nearest = Math.min(nearest, innerCornerDistance(x, adjDY_noRaise));
+                            } else {
+                                nearest = Math.min(nearest, innerCornerDistance(x, adjDY));
+                            }
                         }
 
                         if (!Number.isFinite(nearest) || nearest > outlineWidth) continue;
@@ -5298,7 +5401,10 @@ export class SpriteScene extends Scene {
                                     const edgeBottomOutside = !!bits[2];
                                     const cornerBROutside = !!bits[6];
                                     const cornerBLOutside = !!bits[7];
-                                    const needWall = edgeBottomOutside;
+                                    const extraBit8 = !!bits[8]; // bottom-cleared / cliff-edge
+                                    const extraBit9 = !!bits[9]; // cliff-only / wall-only
+                                    // If either extra-bit requests a wall, treat as needing the wall layer.
+                                    const needWall = edgeBottomOutside || extraBit8 || extraBit9;
                                     try { console.log('[gen] depth needWall', JSON.stringify({ openKey: openKey, edgeBottomOutside, cornerBROutside, cornerBLOutside, needWall })); } catch (e) {}
                                     if (!needWall) {
                                         // no bottom/outside contribution requested for this key; keep top frame entirely
@@ -5315,6 +5421,39 @@ export class SpriteScene extends Scene {
                                                 topBuf[idx + 3] = 0; // transparent below seam
                                             }
                                         }
+
+                                        // Extra semantics for 10-bit keys:
+                                        // - bit9 (cliff-only): remove the top face entirely so only the wall remains.
+                                        // - bit8 (bottom-cleared / cliff-edge): clear a small band above the seam
+                                        //   to create a bottom-cleared cliff edge visual.
+                                        try {
+                                            if (extraBit9) {
+                                                // make entire top face transparent
+                                                for (let yy = 0; yy < px; yy++) {
+                                                    for (let xx = 0; xx < px; xx++) {
+                                                        const idx = (yy * px + xx) * 4;
+                                                        topBuf[idx + 3] = 0;
+                                                    }
+                                                }
+                                            } else if (extraBit8) {
+                                                // Only synthesize the bottom-cleared look when no depth
+                                                // (depthPx === 0). When depthPx > 0 the standard
+                                                // depth compositing already masks the seam area.
+                                                if (depthPx === 0) {
+                                                    const maxBand = Math.max(0, Math.round(px * 0.25));
+                                                    const band = Math.max(0, Math.round(Math.min(px, maxBand)));
+                                                    if (band > 0) {
+                                                        const startClear = Math.max(0, seamY - band + 1);
+                                                        for (let yy = startClear; yy <= seamY; yy++) {
+                                                            for (let xx = 0; xx < px; xx++) {
+                                                                const idx = (yy * px + xx) * 4;
+                                                                topBuf[idx + 3] = 0;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } catch (e) {}
 
                                         // Carve rounded bottom corners from topBuf based on cornerRoundness
                                         if (cornerRoundness > 0) {
@@ -5635,17 +5774,31 @@ export class SpriteScene extends Scene {
                         // For inner-corner seams in the helper, also raise bottom corners toward center
                         let cornerRaiseLocal = Math.max(0, Math.min(px, Math.round(Number(options.depth) || 0)));
                         try {
-                            if (_usedDepthComposite && !bits[8] && !bits[9] && Math.round(Number(options.depth) || 0) === 0) {
-                                cornerRaiseLocal = Math.max(1, Math.round(px * 0.32));
+                            if (_usedDepthComposite) {
+                                if (bits[8] || bits[9]) {
+                                    // extra bits present: do not force a corner raise
+                                } else if (Math.round(Number(options.depth) || 0) === 0) {
+                                    cornerRaiseLocal = Math.max(1, Math.round(px * 0.32));
+                                }
                             }
                         } catch (e) {}
                         if (cornerBROutside && !edgeBottomOutside && !edgeRightOutside) {
                             const adjDY = Math.max(0, (px - 1 - y) - cornerRaiseLocal);
-                            nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), adjDY));
+                            if (bits[8] || bits[9]) {
+                                const adjDY_noRaise = Math.max(0, (px - 1 - y));
+                                nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), adjDY_noRaise));
+                            } else {
+                                nearest = Math.min(nearest, innerCornerDistance((px - 1 - x), adjDY));
+                            }
                         }
                         if (cornerBLOutside && !edgeBottomOutside && !edgeLeftOutside) {
                             const adjDY = Math.max(0, (px - 1 - y) - cornerRaiseLocal);
-                            nearest = Math.min(nearest, innerCornerDistance(x, adjDY));
+                            if (bits[8] || bits[9]) {
+                                const adjDY_noRaise = Math.max(0, (px - 1 - y));
+                                nearest = Math.min(nearest, innerCornerDistance(x, adjDY_noRaise));
+                            } else {
+                                nearest = Math.min(nearest, innerCornerDistance(x, adjDY));
+                            }
                         }
 
                     if (!Number.isFinite(nearest) || nearest > outlineWidth) continue;
@@ -5728,7 +5881,18 @@ export class SpriteScene extends Scene {
 
             if (!this._tileConnMap || typeof this._tileConnMap !== 'object') this._tileConnMap = {};
 
-            const keys = this._getAllValidOpenConnectionKeys();
+            // If caller requested legacy 47-set generation, use canonical 8-bit-derived keys
+            let keys = null;
+            if (settings && settings.legacy47) {
+                keys = this._getAllValidOpenConnectionKeys();
+            } else {
+                // Prefer explicit mapping from tiles.json when present (expanded 10-bit set)
+                keys = (Array.isArray(this._availableTileKeys) && this._availableTileKeys.length > 0)
+                    ? this._availableTileKeys.slice()
+                    : this._getAllValidOpenConnectionKeys();
+            }
+            // Normalize and dedupe keys to canonical 10-bit form
+            keys = Array.from(new Set((keys || []).map(k => this._normalizeOpenConnectionKey(k || '0000000000'))));
             if (!Array.isArray(keys) || keys.length === 0) {
                 return { ok: false, reason: 'No connection keys available.' };
             }
@@ -5740,10 +5904,6 @@ export class SpriteScene extends Scene {
                 if (typeof raw !== 'string') continue;
                 const norm = this._normalizeOpenConnectionKey(raw);
                 if (!existingByConnKey.has(norm)) existingByConnKey.set(norm, i);
-                try {
-                    const closed = this._openConnectionToClosedKey(norm);
-                    if (!existingByConnKey.has(closed)) existingByConnKey.set(closed, i);
-                } catch (e) {}
             }
 
             let created = 0;
@@ -5756,12 +5916,19 @@ export class SpriteScene extends Scene {
                 const key = this._normalizeOpenConnectionKey(rawKey);
                 let existingIndex = null;
                 if (existingByConnKey.has(key)) existingIndex = existingByConnKey.get(key);
-                else {
-                    try {
-                        const closedKey = this._openConnectionToClosedKey(key);
-                        if (existingByConnKey.has(closedKey)) existingIndex = existingByConnKey.get(closedKey);
-                    } catch (e) {}
-                }
+                // do not fallback to legacy 8-bit closed-key matching; rely on
+                // canonical 10-bit normalized keys exclusively
+                // Prevent overwriting any currently multi-selected template frames
+                try {
+                    const fsCheck = this.FrameSelect;
+                    if (fsCheck && fsCheck._multiSelected && fsCheck._multiSelected.size > 0 && existingIndex !== null) {
+                        const sel = Array.from(fsCheck._multiSelected).map(i => Number(i)).filter(Number.isFinite);
+                        if (sel.includes(existingIndex)) {
+                            // Force creation of a new frame instead of replacing the template
+                            existingIndex = null;
+                        }
+                    }
+                } catch (e) {}
                 if (existingIndex !== null && !replaceExisting) {
                     skipped++;
                     continue;
@@ -5834,7 +6001,6 @@ export class SpriteScene extends Scene {
                         try { this._setTileConnection(anim, dstIndex, key, false); } catch (e) { this._tileConnMap[anim + '::' + dstIndex] = key; }
                         try {
                             existingByConnKey.set(key, dstIndex);
-                            try { const closedKey = this._openConnectionToClosedKey(key); existingByConnKey.set(closedKey, dstIndex); } catch (e) {}
                         } catch (e) {}
                         try { console.debug && console.debug('[gen] about to send frameData', { anim, dstIndex, handshakeOnly: !!this.localState?.collab?.handshakeOnly, webrtcReady: !!this.localState?.collab?.webrtcReady, queued: (this.collabTransport && this.collabTransport._dataQueue) ? this.collabTransport._dataQueue.length : 0 }); } catch(e) {}
                         try { this._sendFrameDataForFrame(anim, dstIndex, dstFrame); } catch (e) {}
@@ -5848,6 +6014,50 @@ export class SpriteScene extends Scene {
             }
 
             try { if (typeof sheet._rebuildSheetCanvas === 'function') sheet._rebuildSheetCanvas(); } catch (e) {}
+            // Ensure packed sheet is available even when large (may set _packedDirty=false)
+            try { if (sheet && typeof sheet.ensurePackedSheet === 'function') sheet.ensurePackedSheet(); } catch (e) {}
+            // Refresh UI caches so FrameSelect sees new frames
+            try { if (this.FrameSelect && typeof this.FrameSelect.rebuild === 'function') this.FrameSelect.rebuild(); } catch (e) {}
+            // Materialize animation frames to populate any lazy descriptors
+            try { if (sheet && typeof sheet._materializeAnimation === 'function') sheet._materializeAnimation(String(settings.sourceAnimation || this.selectedAnimation || 'idle')); } catch (e) {}
+            // Prune duplicate logical frames (same normalized connection key) so
+            // generated set stays canonical and we don't leave duplicate source
+            // frames appended at the end.
+            try {
+                const targetSet = new Set((keys || []).map(k => this._normalizeOpenConnectionKey(k || '0000000000')));
+                const dupLogicalIndices = [];
+                const seenKey = new Map();
+                let currentLogicalCount = Math.max(1, Number(this._getAnimationLogicalFrameCount(anim)) || 1);
+                for (let i = 0; i < currentLogicalCount; i++) {
+                    const raw = this._tileConnMap[anim + '::' + i];
+                    if (typeof raw !== 'string') continue;
+                    const norm = this._normalizeOpenConnectionKey(raw);
+                    if (!targetSet.has(norm)) continue;
+                    if (!seenKey.has(norm)) seenKey.set(norm, i);
+                    else dupLogicalIndices.push(i);
+                }
+
+                const shiftConnMapAfterPop = (removedIdx, countBefore) => {
+                    for (let j = removedIdx; j < countBefore - 1; j++) {
+                        const nextKey = this._tileConnMap[anim + '::' + (j + 1)];
+                        if (typeof nextKey === 'string') this._tileConnMap[anim + '::' + j] = nextKey;
+                        else delete this._tileConnMap[anim + '::' + j];
+                    }
+                    delete this._tileConnMap[anim + '::' + (countBefore - 1)];
+                };
+
+                dupLogicalIndices.sort((a, b) => b - a);
+                for (const idx of dupLogicalIndices) {
+                    const before = Math.max(1, Number(this._getAnimationLogicalFrameCount(anim)) || 1);
+                    if (idx < 0 || idx >= before) continue;
+                    try {
+                        sheet.popFrame(anim, idx);
+                        shiftConnMapAfterPop(idx, before);
+                        // adjust counters
+                    } catch (e) {}
+                }
+            } catch (e) {}
+
             return { ok: true, created, updated, skipped, total: keys.length };
         } catch (e) {
             return { ok: false, reason: String((e && e.message) || e || 'Unknown error') };
@@ -5908,7 +6118,11 @@ export class SpriteScene extends Scene {
                 existing.add(this._normalizeOpenConnectionKey(raw));
             }
 
-            const targetKeys = this._getAllValidOpenConnectionKeys();
+            // Prefer explicit mapping from tiles.json when present (expanded 10-bit set)
+            let targetKeys = (Array.isArray(this._availableTileKeys) && this._availableTileKeys.length > 0)
+                ? this._availableTileKeys.slice()
+                : this._getAllValidOpenConnectionKeys();
+            targetKeys = Array.from(new Set((targetKeys || []).map(k => this._normalizeOpenConnectionKey(k || '0000000000'))));
             const srcAreas = {
                 top: [0, 0, px, edgeW],
                 right: [px - edgeW, 0, edgeW, px],
@@ -6079,7 +6293,7 @@ export class SpriteScene extends Scene {
         }
     }
 
-    _chooseBestFrameByConnections(desiredClosedKey, anim, context = null) {
+    _chooseBestFrameByConnections(desiredKey, anim, context = null) {
         try {
             if (!anim || !this.currentSprite || !this.currentSprite._frames) return null;
             const frames = this.currentSprite._frames.get(anim) || [];
@@ -6092,17 +6306,17 @@ export class SpriteScene extends Scene {
                 ? context.preferredDominant
                 : null;
 
-            const scoreFor = (candClosedKey) => {
+            const scoreFor = (candKey) => {
                 let scClosedEdges = 0, scOpenEdges = 0, scOpenCorners = 0, scClosedCorners = 0;
                 for (let i = 0; i < 4; i++) {
-                    const d = desiredClosedKey[i];
-                    const c = candClosedKey[i];
+                    const d = desiredKey[i];
+                    const c = candKey[i];
                     if (d === '1' && c === '1') scClosedEdges++;
                     if (d === '0' && c === '0') scOpenEdges++;
                 }
                 for (let i = 4; i < 8; i++) {
-                    const d = desiredClosedKey[i];
-                    const c = candClosedKey[i];
+                    const d = desiredKey[i];
+                    const c = candKey[i];
                     if (d === '0' && c === '0') scOpenCorners++;
                     if (d === '1' && c === '1') scClosedCorners++;
                 }
@@ -6124,9 +6338,10 @@ export class SpriteScene extends Scene {
                 const key = String(anim) + '::' + i;
                     const openBits = this._tileConnMap[key];
                     if (typeof openBits !== 'string' || !/^[01]{10}$/.test(openBits)) continue;
-                const candClosed = this._openConnectionToClosedKey(openBits);
-                if (candClosed === desiredClosedKey) exact.push(i);
-                const score = scoreFor(candClosed);
+                const candOpen = this._normalizeOpenConnectionKey(openBits);
+                const desiredNorm = this._normalizeOpenConnectionKey(desiredKey);
+                if (candOpen === desiredNorm) exact.push(i);
+                const score = scoreFor(candOpen);
                 if (!bestScore || compareScore(score, bestScore) > 0) {
                     bestScore = score;
                     bestIndex = i;
@@ -6164,12 +6379,6 @@ export class SpriteScene extends Scene {
         if (!this._availableTileConn) return null;
         const candidates = this._availableTileKeys || Object.keys(this._availableTileConn || {});
         if (candidates.includes(desiredKey)) return this._availableTileConn[desiredKey];
-        // Backwards-compat: if desiredKey is 10-bit but mapping uses 8-bit keys,
-        // try matching on the first 8 bits as a fallback.
-        if ((typeof desiredKey === 'string') && desiredKey.length === 10) {
-            const short = desiredKey.slice(0, 8);
-            if (candidates.includes(short)) return this._availableTileConn[short];
-        }
 
         // scoring priorities: same closed edges, same open edges, same open corners, same closed corners
         const scoreFor = (candKey) => {

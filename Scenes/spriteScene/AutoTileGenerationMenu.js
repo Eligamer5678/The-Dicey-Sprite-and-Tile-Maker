@@ -89,7 +89,7 @@ export default class AutoTileGenerationMenu {
             const fs = this.scene && this.scene.FrameSelect;
             if (!fs) return false;
             const multi = Array.from(fs._multiSelected || []);
-            return multi.length > 0;
+            return multi.length > 1;
         } catch (e) {
             return false;
         }
@@ -369,7 +369,46 @@ export default class AutoTileGenerationMenu {
     }
 
     _runGeneration() {
-        if (!this.scene || typeof this.scene._runProceduralAutotileGeneration !== 'function') return;
+        if (!this.scene) return;
+        // If two tile types are selected in FrameSelect, generate transition textures
+        try {
+            // Determine multi-selected frames count to decide generation mode.
+            const fs = this.scene && this.scene.FrameSelect;
+            const multi = Array.from((fs && fs._multiSelected) || []).filter(i => Number.isFinite(i));
+            // Treat "multi" as a true multi-selection only when it contains more than one index.
+            if (multi.length > 1 && typeof this.scene._runProceduralAutotileGenerationForSelectedFrames === 'function') {
+                const result = this.scene._runProceduralAutotileGenerationForSelectedFrames(this.getSettings());
+                if (result && result.ok) {
+                    const total = Number(result.total || 0);
+                    this.setStatus(`Transition set done: ${result.created || 0} created (${total} keys).`, false);
+                    try { if (this.scene && typeof this.scene._playSfx === 'function') this.scene._playSfx('frame.duplicate'); } catch (e) {}
+                    return;
+                }
+                // If 2-frame generator failed, fall back to the original 47-set generator below.
+            } else if (multi.length === 0) {
+                // Single basic selection (no multi-selected indices): generate legacy 47-set and force flat (depth=0).
+                const settings = this.getSettings();
+                settings.depth = 0;
+                settings.legacy47 = true;
+                try {
+                    const result = this.scene._runProceduralAutotileGeneration(settings);
+                    if (!result || !result.ok) {
+                        this.setStatus((result && result.reason) ? result.reason : 'Generation failed.', true);
+                        return;
+                    }
+                    const total = Number(result.total || 47);
+                    this.setStatus(`47-set done: ${result.created || 0} new, ${result.updated || 0} updated, ${result.skipped || 0} skipped (${total} keys).`, false);
+                    try { if (this.scene && typeof this.scene._playSfx === 'function') this.scene._playSfx('frame.duplicate'); } catch (e) {}
+                    return;
+                } catch (e) {
+                    // If the single-run threw, treat as failure and do not fall back to expanded generator.
+                    this.setStatus('Generation failed.', true);
+                    return;
+                }
+            }
+        } catch (e) {}
+
+        if (typeof this.scene._runProceduralAutotileGeneration !== 'function') return;
         const result = this.scene._runProceduralAutotileGeneration(this.getSettings());
         if (!result || !result.ok) {
             this.setStatus((result && result.reason) ? result.reason : 'Generation failed.', true);
