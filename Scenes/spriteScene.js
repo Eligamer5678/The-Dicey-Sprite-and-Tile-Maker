@@ -15169,15 +15169,27 @@ export class SpriteScene extends Scene {
 
             sheet.setPixel = function(anim, frameIdx, x, y, color, blendType = 'replace') {
                 const li = Math.max(0, Math.min((scene._activePixelLayerIndex | 0), Math.max(0, (scene._pixelLayers?.length || 1) - 1)));
-                if (li === 0) return rawSetPixel(anim, frameIdx, x, y, color, blendType);
-                return scene._applyPixelsToPixelLayer(anim, frameIdx, [{ x, y, color }], li);
+                if (li === 0) {
+                    const res = rawSetPixel(anim, frameIdx, x, y, color, blendType);
+                    try { scene._onPixelFrameModified(anim, frameIdx); } catch (e) {}
+                    return res;
+                }
+                const res = scene._applyPixelsToPixelLayer(anim, frameIdx, [{ x, y, color }], li);
+                try { scene._onPixelFrameModified(anim, frameIdx); } catch (e) {}
+                return res;
             };
 
             sheet.modifyFrame = function(anim, frameIdx, changes) {
                 const li = Math.max(0, Math.min((scene._activePixelLayerIndex | 0), Math.max(0, (scene._pixelLayers?.length || 1) - 1)));
-                if (li === 0) return rawModifyFrame(anim, frameIdx, changes);
+                if (li === 0) {
+                    const res = rawModifyFrame(anim, frameIdx, changes);
+                    try { scene._onPixelFrameModified(anim, frameIdx); } catch (e) {}
+                    return res;
+                }
                 const arr = Array.isArray(changes) ? changes : [changes];
-                return scene._applyPixelsToPixelLayer(anim, frameIdx, arr, li);
+                const res = scene._applyPixelsToPixelLayer(anim, frameIdx, arr, li);
+                try { scene._onPixelFrameModified(anim, frameIdx); } catch (e) {}
+                return res;
             };
 
             sheet.__pixelLayerHookInstalled = true;
@@ -15589,6 +15601,42 @@ export class SpriteScene extends Scene {
                     if (frameCache.size > 256) frameCache.clear();
                 }
             } catch (e) {}
+        } catch (e) {}
+    }
+
+    _onPixelFrameModified(anim, frameIdx) {
+        try {
+            const a = String(anim || '');
+            const fi = Math.max(0, Number(frameIdx) | 0);
+
+            // Invalidate composited per-frame caches
+            try {
+                const c = this._compositedFrameCache;
+                if (c && typeof c.delete === 'function') {
+                    for (const k of Array.from(c.keys())) {
+                        if (typeof k !== 'string') continue;
+                        if (k.startsWith(a + '|' + fi + '|') || k.startsWith(a + '|' + fi + '|')) c.delete(k);
+                    }
+                }
+            } catch (e) {}
+
+            // Invalidate render-only frame cache entries for this anim/frame
+            try {
+                const fc = this._renderOnlyFrameCache;
+                if (fc && typeof fc.delete === 'function') {
+                    const key = a + '::' + fi;
+                    if (fc.has(key)) fc.delete(key);
+                    // also remove any variant keys that might reference this frame
+                    for (const k of Array.from(fc.keys())) {
+                        if (typeof k !== 'string') continue;
+                        if (k.indexOf(a + '::' + fi) !== -1) fc.delete(k);
+                    }
+                }
+            } catch (e) {}
+
+            // Conservative prune of other render-only caches so they will rebuild
+            try { if (this._renderOnlyEntryCache && this._renderOnlyEntryCache instanceof Map) this._renderOnlyEntryCache.clear(); } catch (e) {}
+            try { if (this._compositedFrameCache && this._compositedFrameCache instanceof Map && this._compositedFrameCache.size > 512) this._compositedFrameCache.clear(); } catch (e) {}
         } catch (e) {}
     }
 
