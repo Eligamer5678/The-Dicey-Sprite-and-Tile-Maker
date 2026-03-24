@@ -101,6 +101,14 @@ export class SpriteCollabTransport {
             // IMPORTANT: we do NOT send diffs through the server to avoid server-side
             // data routing and billing. The queued diffs will be flushed when the
             // WebRTC data channel becomes available again.
+            // However, do not start queuing diffs when there is no active room
+            // (e.g. user not joined to any room) — that causes unbounded caching
+            // of local edits that will later be replayed incorrectly when joining.
+            const hasRoom = !!(this.scene && this.scene.server && this.scene.server.roomId);
+            if (!hasRoom) {
+                // drop the diff when not in a room instead of enqueueing it
+                return false;
+            }
             try { this._enqueueDiff(diff); } catch (e) { /* ignore enqueue errors */ }
             return false;
         } catch (e) {

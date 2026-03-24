@@ -15,6 +15,7 @@ import { createSpriteSceneStateController } from './spriteScene/stateController.
 import { createSpriteWebRTCCollabController } from './spriteScene/webrtcCollab.js';
 import AutoTileGenerationMenu from './spriteScene/AutoTileGenerationMenu.js';
 import AutoTileGenerator from './AutoTileGenerator.js';
+import installDebugTextures from './debugTextures.js';
 
 export class SpriteScene extends Scene {
     constructor(...args) {
@@ -604,7 +605,9 @@ export class SpriteScene extends Scene {
                 window.Debug && window.Debug.error && window.Debug.error('tileArray signal failed: ' + err);
             }
         });
-
+        
+        // Install additional modular debug texture signals (wave, posterize, striped)
+        try { installDebugTextures(this); } catch (e) {}
         // Register SelectColor debug signal: select(hex, buffer=1)
         window.Debug.createSignal('select', (hex, buffer = 1) => {
             try {
@@ -4253,24 +4256,24 @@ export class SpriteScene extends Scene {
                 const sx = pos.x - half;
                 const sy = pos.y - half;
                 const worldPixels = worldPixelsFromBrush(sx, sy, this._worldPixelBrushBuffer);
+                let _wpChanged = false;
                 try {
-                    if (this.mouse.pressed('left') && this._anyWorldPixelWouldChange(worldPixels, color)) {
-                        this._playSfx('pixel.place');
-                    }
+                    _wpChanged = !!this._anyWorldPixelWouldChange(worldPixels, color);
+                    if (this.mouse.pressed('left') && _wpChanged) this._playSfx('pixel.place');
                 } catch (e) {}
-                this._paintWorldPixels(worldPixels, color, { dedupe: false });
+                if (_wpChanged) this._paintWorldPixels(worldPixels, color);
             }
             if (this.mouse.held('right')) { // erase NxN square
                 const eraseColor = '#00000000';
                 const sx = pos.x - half;
                 const sy = pos.y - half;
                 const worldPixels = worldPixelsFromBrush(sx, sy, this._worldPixelBrushBuffer);
+                let _wpChanged2 = false;
                 try {
-                    if (this.mouse.pressed('right') && this._anyWorldPixelWouldChange(worldPixels, eraseColor)) {
-                        this._playSfx('pixel.remove');
-                    }
+                    _wpChanged2 = !!this._anyWorldPixelWouldChange(worldPixels, eraseColor);
+                    if (this.mouse.pressed('right') && _wpChanged2) this._playSfx('pixel.remove');
                 } catch (e) {}
-                this._paintWorldPixels(worldPixels, eraseColor, { dedupe: false });
+                if (_wpChanged2) this._paintWorldPixels(worldPixels, eraseColor);
             }
 
             } finally {
@@ -9829,6 +9832,11 @@ export class SpriteScene extends Scene {
                 const r = v % m;
                 return r < 0 ? r + m : r;
             };
+
+            // Batch changes per (anim, frame) to avoid per-pixel API calls and
+            // to reduce the number of collab ops emitted for large brushes.
+            const batches = new Map();
+
             for (const wp of worldPixels) {
                 if (!wp) continue;
                 const wx = Number(wp.x) | 0;
@@ -9878,10 +9886,34 @@ export class SpriteScene extends Scene {
                     try {
                         this._applyPixelPerfectPixel(sheet, anim, frameIdx, localX, localY, color, areaIndex);
                     } catch (e) { /* ignore pixel-perfect write errors */ }
-                } else if (typeof sheet.setPixel === 'function') {
-                    try { sheet.setPixel(anim, frameIdx, localX, localY, color, 'replace'); } catch (e) { /* ignore per-pixel errors */ }
-                } else if (typeof sheet.modifyFrame === 'function') {
-                    try { sheet.modifyFrame(anim, frameIdx, { x: localX, y: localY, color, blendType: 'replace' }); } catch (e) { /* ignore per-pixel errors */ }
+                    continue;
+                }
+
+                // Accumulate into per-frame batch
+                const batchKey = String(anim) + '::' + String(frameIdx);
+                let entry = batches.get(batchKey);
+                if (!entry) {
+                    entry = { anim, frameIdx, pixels: [] };
+                    batches.set(batchKey, entry);
+                }
+                entry.pixels.push({ x: localX, y: localY, color: color, blendType: 'replace' });
+            }
+
+            // Apply batches with modifyFrame/drawPixels where available to minimize
+            // per-pixel operations and to produce a single update per frame.
+            for (const [k, b] of batches) {
+                try {
+                    if (typeof sheet.modifyFrame === 'function') {
+                        sheet.modifyFrame(b.anim, b.frameIdx, b.pixels);
+                    } else if (typeof sheet.drawPixels === 'function') {
+                        sheet.drawPixels(b.anim, b.frameIdx, b.pixels);
+                    } else if (typeof sheet.setPixel === 'function') {
+                        for (const p of b.pixels) {
+                            try { sheet.setPixel(b.anim, b.frameIdx, p.x, p.y, p.color, p.blendType); } catch (e) { /* ignore */ }
+                        }
+                    }
+                } catch (e) {
+                    /* ignore batch write errors for a best-effort update */
                 }
             }
 
@@ -15692,6 +15724,23 @@ export class SpriteScene extends Scene {
         const cur = this._normalizeTileLayerVisibility(this._tileLayers[i] && this._tileLayers[i].visibility, 0);
         const next = (cur + 1) % 3;
         this._tileLayers[i].visibility = next;
+        try {
+            if (typeof this.modifyState === 'function') this.modifyState(this._tileLayers, false, false, ['tilemap', 'tileLayers']);
+        } catch (e) {}
+
+        // Visibility affects composited render caches — clear them so visuals update.
+        try { if (this._renderOnlyEntryCache && this._renderOnlyEntryCache instanceof Map) this._renderOnlyEntryCache.clear(); } catch (e) {}
+        try { if (this._renderOnlyFrameCache && this._renderOnlyFrameCache instanceof Map) this._renderOnlyFrameCache.clear(); } catch (e) {}
+        try { if (this._compositedFrameCache && this._compositedFrameCache instanceof Map) this._compositedFrameCache.clear(); } catch (e) {}
+
+        // Conservative invalidation for area-specific caches
+        try {
+            const areas = Array.isArray(this._areaBindings) ? this._areaBindings.length : 0;
+            for (let ai = 0; ai < areas; ai++) {
+                try { if (typeof this._invalidateTileCachesForArea === 'function') this._invalidateTileCachesForArea(ai); } catch (e) {}
+            }
+        } catch (e) {}
+
         return next;
     }
 
