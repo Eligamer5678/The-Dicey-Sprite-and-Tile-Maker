@@ -14,6 +14,7 @@ import { installSpriteSceneStateBindings } from './spriteScene/stateBindings.js'
 import { createSpriteSceneStateController } from './spriteScene/stateController.js';
 import { createSpriteWebRTCCollabController } from './spriteScene/webrtcCollab.js';
 import AutoTileGenerationMenu from './spriteScene/AutoTileGenerationMenu.js';
+import AutoTileGenerator from './AutoTileGenerator.js';
 
 export class SpriteScene extends Scene {
     constructor(...args) {
@@ -97,8 +98,8 @@ export class SpriteScene extends Scene {
         this.autoTileGenerationMenu = new AutoTileGenerationMenu(this, this.mouse, this.keys, this.UIDraw, 80);
         // load available tile connection mapping (tiles.json) for autotile matching
         try {
-            fetch('tiles.json').then(r=>r.json()).then(obj=>{ this._availableTileConn = obj || {}; this._availableTileKeys = Object.keys(this._availableTileConn || {}); }).catch(()=>{});
-        } catch(e){}
+            try { this._autoTileGenerator = new AutoTileGenerator(this); } catch (e) { this._autoTileGenerator = null; }
+        } catch (e) {}
         // create a simple color picker input positioned to the right of the left menu (shifted 200px)
         try {
             // ensure a default pen color exists
@@ -5902,15 +5903,22 @@ export class SpriteScene extends Scene {
 
             if (!this._tileConnMap || typeof this._tileConnMap !== 'object') this._tileConnMap = {};
 
-            // If caller requested legacy 47-set generation, use canonical 8-bit-derived keys
+            // Always prefer tiles.json via AutoTileGenerator; if missing, fail fast
+            if (!this._autoTileGenerator || !this._autoTileGenerator.loaded) {
+                return { ok: false, reason: 'tiles.json not available' };
+            }
+            // Determine whether the user has multi-selected template frames
+            const fsCheck = this.FrameSelect;
+            const multiCount = (fsCheck && fsCheck._multiSelected) ? Array.from(fsCheck._multiSelected).length : 0;
             let keys = null;
             if (settings && settings.legacy47) {
-                keys = this._getAllValidOpenConnectionKeys();
+                // legacy behavior: treat as single-source 47-set but skip the base
+                keys = this._autoTileGenerator.getKeysForMode('single');
             } else {
-                // Prefer explicit mapping from tiles.json when present (expanded 10-bit set)
-                keys = (Array.isArray(this._availableTileKeys) && this._availableTileKeys.length > 0)
-                    ? this._availableTileKeys.slice()
-                    : this._getAllValidOpenConnectionKeys();
+                keys = (multiCount > 1) ? this._autoTileGenerator.getKeysForMode('two') : this._autoTileGenerator.getKeysForMode('single');
+            }
+            if (!Array.isArray(keys) || keys.length === 0) {
+                return { ok: false, reason: 'No connection keys available (tiles.json missing or empty).' };
             }
             // Normalize and dedupe keys to canonical 10-bit form
             keys = Array.from(new Set((keys || []).map(k => this._normalizeOpenConnectionKey(k || '0000000000'))));
