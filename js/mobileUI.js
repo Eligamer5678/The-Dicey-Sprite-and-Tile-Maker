@@ -281,6 +281,8 @@ const buildUI = () => {
         const c = getCanvasForPoint();
         if (!c) return;
         const r = c.getBoundingClientRect();
+        // Prefer visualViewport when available so panels follow the visible viewport
+        const vv = (window.visualViewport) ? window.visualViewport : null;
         const screenW = window.innerWidth;
         // panel width is 10% of full screen width (clamped to a reasonable min/max)
         const rawPanel = Math.round(screenW * 0.10);
@@ -288,14 +290,17 @@ const buildUI = () => {
         // left panel anchors to the left edge (0 .. 10% area)
         left.style.position = 'absolute';
         left.style.left = '0px';
-        left.style.top = r.top + 'px';
-        left.style.height = r.height + 'px';
+        // Use visualViewport offset/height if available so panels remain aligned
+        const topOffset = vv ? (r.top - (window.innerHeight - vv.height) + (vv.offsetTop || 0)) : r.top;
+        const panelHeight = vv ? vv.height : r.height;
+        left.style.top = topOffset + 'px';
+        left.style.height = panelHeight + 'px';
         left.style.width = panelWidth + 'px';
         // right panel anchors to the right edge (screenWidth - 10%)
         right.style.position = 'absolute';
         right.style.left = (screenW - panelWidth) + 'px';
-        right.style.top = r.top + 'px';
-        right.style.height = r.height + 'px';
+        right.style.top = topOffset + 'px';
+        right.style.height = panelHeight + 'px';
         right.style.width = panelWidth + 'px';
 
         // size big elements to 1/4 of panel height

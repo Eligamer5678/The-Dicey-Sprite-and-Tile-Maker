@@ -6,6 +6,7 @@ import UIRect from './Rect.js';
 import UISlider from './Slider.js';
 import Geometry from '../Geometry.js';
 import UITextInput from './UITextInput.js';
+import createHInput from '../htmlElements/createHInput.js';
 import SpriteSheet from '../Spritesheet.js';
 import AnimationPreviewMenu from './AnimationPreviewMenu.js';
 
@@ -54,6 +55,8 @@ export default class FrameSelect {
         // inline text input for renaming/adding animations
         this._textInput = null;
         this._animEditTarget = null; // animation name being edited
+        // lightweight confirmation dialog state: { msg, onYes, onNo }
+        this._confirm = null;
         // import/export UI elements (created in constructor)
         this._importInput = null;
         this._importBtn = null;
@@ -581,22 +584,51 @@ export default class FrameSelect {
         const listY = contentPos.y + contentSize.y + 8 + this._listYOffset;
         const names = this._getAnimationNames();
         const idx = names.indexOf(animName);
-        const rowH = 28;
+        const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+        const baseRowH = 28;
+        const rowH = isTouch ? (baseRowH * 2) : baseRowH;
         const rowY = listY + idx * rowH;
         const pos = new Vector(listX + 4, rowY + 4);
         const size = new Vector(contentSize.x - 8 - 80, rowH - 8);
-        this._textInput = new UITextInput(this.mouse, this.keys, pos, size, this.layer+1, animName, 'name');
         this._animEditTarget = animName;
-        // wire submit
-        this._textInput.onSubmit.connect((val)=>{
-            if (val && String(val).trim().length>0){
-                const ok = this.renameAnimation(this._animEditTarget, val);
-                // if rename failed (collision/idle), leave old name
-            }
-            this._textInput = null;
-            this._animEditTarget = null;
-        });
-        this._textInput.focus();
+        if (isTouch) {
+            // Use a real DOM input on touch devices so the virtual keyboard appears
+            const inp = createHInput(null, pos, size, 'text', { borderRadius: '4px', border: '1px solid #444', padding: '4px', background: '#222', color: '#fff' }, 'UI');
+            inp.value = animName;
+            inp.setAttribute('data-ui', '1');
+            inp.style.zIndex = 2000;
+            inp.addEventListener('keydown', (ev) => {
+                if (ev.key === 'Enter') {
+                    const val = String(inp.value || '').trim();
+                    if (val.length > 0) this.renameAnimation(this._animEditTarget, val);
+                    try { inp.blur(); } catch (e) {}
+                }
+                if (ev.key === 'Escape') {
+                    try { inp.blur(); } catch (e) {}
+                }
+            });
+            inp.addEventListener('blur', () => {
+                // cleanup
+                try { if (inp.parentNode) inp.parentNode.removeChild(inp); } catch (e) {}
+                this._animEditTarget = null;
+                this._textInput = null;
+            }, { passive: true });
+            // ensure focus (bring up keyboard)
+            setTimeout(() => { try { inp.focus(); } catch (e) {} }, 50);
+            this._textInput = null; // mark that we're using DOM input
+        } else {
+            this._textInput = new UITextInput(this.mouse, this.keys, pos, size, this.layer+1, animName, 'name');
+            // wire submit
+            this._textInput.onSubmit.connect((val)=>{
+                if (val && String(val).trim().length>0){
+                    const ok = this.renameAnimation(this._animEditTarget, val);
+                    // if rename failed (collision/idle), leave old name
+                }
+                this._textInput = null;
+                this._animEditTarget = null;
+            });
+            this._textInput.focus();
+        }
     }
 
     _resolveLayerListType() {
@@ -3188,6 +3220,33 @@ export default class FrameSelect {
 
         try {
             if (this.mouse && this.mouse.released && this.mouse.released('left')) {
+                // If a confirmation dialog is active, handle it first
+                try {
+                    if (this._confirm) {
+                        const mp = this.mouse.pos || { x: 0, y: 0 };
+                        const w = 700; const h = 160;
+                        const cx = 1920/2 - w/2; const cy = 1080/2 - h/2;
+                        const yesRect = { x: cx + 40, y: cy + h - 56, w: 120, h: 40 };
+                        const noRect = { x: cx + w - 160, y: cy + h - 56, w: 120, h: 40 };
+                        const inside = (x, y, r) => (x >= r.x && y >= r.y && x <= r.x + r.w && y <= r.y + r.h);
+                        if (inside(mp.x, mp.y, yesRect)) {
+                            try { if (typeof this._confirm.onYes === 'function') this._confirm.onYes(); } catch (e) {}
+                            this._confirm = null;
+                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                            return;
+                        } else if (inside(mp.x, mp.y, noRect)) {
+                            try { if (typeof this._confirm.onNo === 'function') this._confirm.onNo(); } catch (e) {}
+                            this._confirm = null;
+                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                            return;
+                        } else {
+                            // click outside modal cancels
+                            this._confirm = null;
+                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
+                            return;
+                        }
+                    }
+                } catch (e) {}
                 // handle click on the top-left preview to open the animation preview menu
                 try {
                     const outerPos = new Vector(1920 - this._previewBuffer * 3 - this._previewSize, this._previewBuffer);
@@ -3219,59 +3278,72 @@ export default class FrameSelect {
                 }
                 // Clear tilemap button
                 if (Geometry.pointInRect(this.mouse.pos, layout.clearPos, layout.btnSize)) {
+                    // ask for confirmation before clearing the tilemap
                     try {
-                        // Clear in-scene tile structures
-                        if (this.scene) {
-                            try { this.scene._tileActive = new Set(); } catch (e) {}
-                            try { this.scene._tileActiveVersion = (Number.isFinite(this.scene._tileActiveVersion) ? this.scene._tileActiveVersion : 0) + 1; } catch (e) {}
-                            try { this.scene._areaBindings = []; } catch (e) {}
-                            try { this.scene._areaTransforms = []; } catch (e) {}
-                            try { this.scene._tileIndexToCoord = []; } catch (e) {}
-                            try { this.scene._tileCoordToIndex = new Map(); } catch (e) {}
-                            try { if (Array.isArray(this.scene._tileLayers)) { for (const l of this.scene._tileLayers) { if (l && Array.isArray(l.bindings)) l.bindings = []; if (l && Array.isArray(l.transforms)) l.transforms = []; } } } catch (e) {}
-                            try { if (typeof this.scene._scheduleTilemapSync === 'function') this.scene._scheduleTilemapSync(); else if (typeof this.scene._queueTileStateOp === 'function') this.scene._queueTileStateOp(); } catch (e) {}
+                        const onYes = () => {
                             try {
-                                if (typeof this.scene._startCameraOffsetTween === 'function') {
+                                // Clear in-scene tile structures
+                                if (this.scene) {
+                                    try { this.scene._tileActive = new Set(); } catch (e) {}
+                                    try { this.scene._tileActiveVersion = (Number.isFinite(this.scene._tileActiveVersion) ? this.scene._tileActiveVersion : 0) + 1; } catch (e) {}
+                                    try { this.scene._areaBindings = []; } catch (e) {}
+                                    try { this.scene._areaTransforms = []; } catch (e) {}
+                                    try { this.scene._tileIndexToCoord = []; } catch (e) {}
+                                    try { this.scene._tileCoordToIndex = new Map(); } catch (e) {}
+                                    try { if (Array.isArray(this.scene._tileLayers)) { for (const l of this.scene._tileLayers) { if (l && Array.isArray(l.bindings)) l.bindings = []; if (l && Array.isArray(l.transforms)) l.transforms = []; } } } catch (e) {}
+                                    try { if (typeof this.scene._scheduleTilemapSync === 'function') this.scene._scheduleTilemapSync(); else if (typeof this.scene._queueTileStateOp === 'function') this.scene._queueTileStateOp(); } catch (e) {}
                                     try {
-                                        const baseArea = (typeof this.scene.computeDrawArea === 'function') ? this.scene.computeDrawArea() : null;
-                                        const slice = Math.max(1, Number((this.scene && this.scene.currentSprite && this.scene.currentSprite.slicePx) || 16));
-                                        if (baseArea && typeof this.scene._worldPixelToDrawWorld === 'function') {
-                                            const worldCenter = new Vector(0, 0);
-                                            const centerDraw = this.scene._worldPixelToDrawWorld(worldCenter, baseArea.topLeft, baseArea.size, slice);
-                                            if (centerDraw && this.scene.zoom && typeof this.scene.zoom.x === 'number') {
-                                                const targetOffsetX = (1920 / (2 * this.scene.zoom.x)) - centerDraw.x;
-                                                const targetOffsetY = (1080 / (2 * this.scene.zoom.y)) - centerDraw.y;
-                                                this.scene._startCameraOffsetTween(new Vector(targetOffsetX, targetOffsetY), 0.28);
-                                            } else {
-                                                this.scene._startCameraOffsetTween(new Vector(1920/2, 1080/2), 0.28);
+                                        if (typeof this.scene._startCameraOffsetTween === 'function') {
+                                            try {
+                                                const baseArea = (typeof this.scene.computeDrawArea === 'function') ? this.scene.computeDrawArea() : null;
+                                                const slice = Math.max(1, Number((this.scene && this.scene.currentSprite && this.scene.currentSprite.slicePx) || 16));
+                                                if (baseArea && typeof this.scene._worldPixelToDrawWorld === 'function') {
+                                                    const worldCenter = new Vector(0, 0);
+                                                    const centerDraw = this.scene._worldPixelToDrawWorld(worldCenter, baseArea.topLeft, baseArea.size, slice);
+                                                    if (centerDraw && this.scene.zoom && typeof this.scene.zoom.x === 'number') {
+                                                        const targetOffsetX = (1920 / (2 * this.scene.zoom.x)) - centerDraw.x;
+                                                        const targetOffsetY = (1080 / (2 * this.scene.zoom.y)) - centerDraw.y;
+                                                        this.scene._startCameraOffsetTween(new Vector(targetOffsetX, targetOffsetY), 0.28);
+                                                    } else {
+                                                        this.scene._startCameraOffsetTween(new Vector(1920/2, 1080/2), 0.28);
+                                                    }
+                                                } else {
+                                                    this.scene._startCameraOffsetTween(new Vector(1920/2, 1080/2), 0.28);
+                                                }
+                                            } catch (e) {
+                                                try { this.scene._startCameraOffsetTween(new Vector(1920/2, 1080/2), 0.28); } catch (e) {}
                                             }
-                                        } else {
-                                            this.scene._startCameraOffsetTween(new Vector(1920/2, 1080/2), 0.28);
-                                        }
-                                    } catch (e) {
-                                        try { this.scene._startCameraOffsetTween(new Vector(1920/2, 1080/2), 0.28); } catch (e) {}
-                                    }
-                                } else if (this.scene.offset) { this.scene.offset.x = 1920/2; this.scene.offset.y = 1080/2; }
+                                        } else if (this.scene.offset) { this.scene.offset.x = 1920/2; this.scene.offset.y = 1080/2; }
+                                    } catch (e) {}
+                                }
                             } catch (e) {}
-                        }
+                        };
+                        const onNo = () => {};
+                        this._confirm = { msg: 'Clear tilemap? This cannot be undone.', onYes, onNo };
                     } catch (e) {}
                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
                     return;
                 }
                 // Clear save button (wipes saved data) — emit debug signal then reload page
                 if (Geometry.pointInRect(this.mouse.pos, layout.clearSavePos, layout.btnSize)) {
+                    // confirm before wiping saved data
                     try {
-                        if (window && window.Debug) {
-                            if (typeof window.Debug.emit === 'function') {
-                                window.Debug.emit('clearSave');
-                            } else if (typeof window.Debug.clearSave === 'function') {
-                                window.Debug.clearSave();
-                            }
-                        }
+                        const onYes = () => {
+                            try {
+                                if (window && window.Debug) {
+                                    if (typeof window.Debug.emit === 'function') {
+                                        window.Debug.emit('clearSave');
+                                    } else if (typeof window.Debug.clearSave === 'function') {
+                                        window.Debug.clearSave();
+                                    }
+                                }
+                            } catch (e) {}
+                            try { setTimeout(() => { try { window.location.reload(); } catch (e) {} }, 150); } catch (e) {}
+                        };
+                        const onNo = () => {};
+                        this._confirm = { msg: 'Clear saved data and reload? This will wipe local save.', onYes, onNo };
                     } catch (e) {}
                     try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch (e) {}
-                    // Allow a short delay for saver/IndexedDB writes to settle, then reload
-                    try { setTimeout(() => { try { window.location.reload(); } catch (e) {} }, 150); } catch (e) {}
                     return;
                 }
             }
@@ -4246,7 +4318,9 @@ export default class FrameSelect {
             const contentSize = new Vector(this._previewSize, this._previewSize);
             const listX = contentPos.x;
             const listY = contentPos.y + contentSize.y + 8 + this._listYOffset;
-            const rowH = 28;
+            const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+            const baseRowH = 28;
+            const rowH = isTouch ? (baseRowH * 2) : baseRowH;
             const rows = (this._rightListMode === 'layers')
                 ? (((this.scene && typeof this.scene.getLayerNames === 'function') ? this.scene.getLayerNames(this._resolveLayerListType()) : []).map((n, idx) => ({ kind: 'layer', layerIndex: idx, displayName: n })))
                 : this._buildAnimationListRows();
@@ -4325,7 +4399,12 @@ export default class FrameSelect {
                                 if (this.scene && typeof this.scene.removeLayer === 'function') this.scene.removeLayer(layerType, i);
                             } catch (e) {}
                         } else {
-                            this.removeAnimation(animName);
+                            // confirm before deleting animation
+                            try {
+                                const onYes = () => { try { this.removeAnimation(animName); } catch (e) {} };
+                                const onNo = () => {};
+                                this._confirm = { msg: 'Delete animation "' + String(animName) + '"? This cannot be undone.', onYes, onNo };
+                            } catch (e) {}
                         }
                     } else {
                         if (this._rightListMode === 'layers') {
@@ -4586,7 +4665,9 @@ export default class FrameSelect {
             const contentSize = new Vector(this._previewSize, this._previewSize);
             const listX = contentPos.x;
             const listY = contentPos.y + contentSize.y + 8 + this._listYOffset;
-            const rowH = 28;
+            const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+            const baseRowH = 28;
+            const rowH = isTouch ? (baseRowH * 2) : baseRowH;
             const listLayerType = this._resolveLayerListType();
             const rows = (this._rightListMode === 'layers')
                 ? (((this.scene && typeof this.scene.getLayerNames === 'function') ? this.scene.getLayerNames(listLayerType) : []).map((n, idx) => ({ kind: 'layer', layerIndex: idx, displayName: n })))
@@ -4665,7 +4746,7 @@ export default class FrameSelect {
             // add button
             const addY = listY + rows.length * rowH + 6;
             const addPos = new Vector(listX, addY);
-            const addSize = new Vector(contentSize.x, 28);
+            const addSize = new Vector(contentSize.x, rowH);
             this.UIDraw.rect(addPos, addSize, '#225522');
             this.UIDraw.text(this._rightListMode === 'layers' ? 'Add Layer' : 'Add Animation', new Vector(addPos.x + addSize.x/2, addPos.y + addSize.y/2 + 6), '#FFFFFF', 0, 14, { align: 'center', font: 'monospace' });
         } catch(e){}
@@ -4674,6 +4755,28 @@ export default class FrameSelect {
         try{
             if (this._textInput && typeof this._textInput.draw === 'function') this._textInput.draw(this.UIDraw);
         } catch(e){}
+        // draw confirmation modal if present
+        try {
+            if (this._confirm) {
+                const w = 700; const h = 160;
+                const cx = 1920/2 - w/2; const cy = 1080/2 - h/2;
+                const bgPos = new Vector(cx, cy);
+                const bgSize = new Vector(w, h);
+                // dim background
+                this.UIDraw.rect(new Vector(0,0), new Vector(1920,1080), '#00000088');
+                this.UIDraw.rect(bgPos, bgSize, '#223344');
+                this.UIDraw.text(String(this._confirm.msg || ''), new Vector(cx + 20, cy + 36), '#FFFFFF', 0, 18, { align: 'left', font: 'monospace' });
+                // Yes / No buttons
+                const yesPos = new Vector(cx + 40, cy + h - 56);
+                const yesSize = new Vector(120, 40);
+                const noPos = new Vector(cx + w - 160, cy + h - 56);
+                const noSize = new Vector(120, 40);
+                this.UIDraw.rect(yesPos, yesSize, '#4B8B4B');
+                this.UIDraw.text('Yes', new Vector(yesPos.x + yesSize.x/2, yesPos.y + yesSize.y/2 + 6), '#FFFFFF', 0, 14, { align: 'center', font: 'monospace' });
+                this.UIDraw.rect(noPos, noSize, '#AA4444');
+                this.UIDraw.text('No', new Vector(noPos.x + noSize.x/2, noPos.y + noSize.y/2 + 6), '#FFFFFF', 0, 14, { align: 'center', font: 'monospace' });
+            }
+        } catch (e) {}
         // determine which animation to show (use scene selection as source of truth)
         const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
         const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];

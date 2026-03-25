@@ -59,5 +59,63 @@ export default function createHInput(id, pos, size, type = 'text', cssProps = {}
     updateInputPosition();
     if (!parent) parent = uiCanvas.parentNode;
     parent.appendChild(input);
+    // Improve mobile behavior: set input attributes to avoid unwanted browser features
+    // and keep the app layout/fullscreen stable while the virtual keyboard is shown.
+    try {
+        if (!input.hasAttribute('inputmode')) input.setAttribute('inputmode', (type === 'number' ? 'numeric' : 'text'));
+        input.setAttribute('autocapitalize', 'none');
+        input.setAttribute('autocomplete', 'off');
+        input.setAttribute('autocorrect', 'off');
+        input.setAttribute('spellcheck', 'false');
+    } catch (e) {}
+
+    const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+    let _preFocusDocHeight = '';
+    let _preBodyOverflow = '';
+    let _wasFullscreenBeforeFocus = false;
+
+    const onFocus = () => {
+        if (!isTouch) return;
+        _wasFullscreenBeforeFocus = !!document.fullscreenElement;
+        _preFocusDocHeight = document.documentElement.style.height || '';
+        _preBodyOverflow = document.body.style.overflow || '';
+        // Lock document height to current innerHeight to reduce layout shift when keyboard appears
+        try { document.documentElement.style.height = window.innerHeight + 'px'; } catch (e) {}
+        try { document.body.style.overflow = 'hidden'; } catch (e) {}
+        // Use visualViewport if available to keep the input positioned while keyboard animates
+        if (window.visualViewport) {
+            const vvhandler = () => updateInputPosition();
+            input.__vvhandler = vvhandler;
+            window.visualViewport.addEventListener('resize', vvhandler);
+            window.visualViewport.addEventListener('scroll', vvhandler);
+        }
+        // If focus causes fullscreen to be lost, attempt to re-request it once (best-effort)
+        input.__fullscreenHandler = () => {
+            if (_wasFullscreenBeforeFocus && !document.fullscreenElement) {
+                const el = document.getElementById('screen') || document.documentElement;
+                if (el && el.requestFullscreen) {
+                    setTimeout(() => { try { el.requestFullscreen(); } catch (e) {} }, 300);
+                }
+            }
+        };
+        document.addEventListener('fullscreenchange', input.__fullscreenHandler);
+    };
+
+    const onBlur = () => {
+        if (!isTouch) return;
+        try { document.documentElement.style.height = _preFocusDocHeight; } catch (e) {}
+        try { document.body.style.overflow = _preBodyOverflow; } catch (e) {}
+        if (window.visualViewport && input.__vvhandler) {
+            try { window.visualViewport.removeEventListener('resize', input.__vvhandler); } catch (e) {}
+            try { window.visualViewport.removeEventListener('scroll', input.__vvhandler); } catch (e) {}
+            input.__vvhandler = null;
+        }
+        if (input.__fullscreenHandler) { try { document.removeEventListener('fullscreenchange', input.__fullscreenHandler); } catch (e) {} input.__fullscreenHandler = null; }
+        // allow layout to settle and reposition the input
+        setTimeout(updateInputPosition, 50);
+    };
+
+    input.addEventListener('focus', onFocus, { passive: true });
+    input.addEventListener('blur', onBlur, { passive: true });
     return input;
 }
