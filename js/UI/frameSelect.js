@@ -4828,8 +4828,19 @@ export default class FrameSelect {
                     const i = item.index;
                     if (anim) {
                         const fr = this._getPreviewFrameCanvas(anim, i);
-                        if (fr) this.UIDraw.image(fr, new Vector(slotPos.x + 5, slotPos.y + 5), new Vector(180,180), null, 0, 1, false);
-                        else this.UIDraw.sheet(this.sprite, new Vector(slotPos.x + 5, slotPos.y + 5), new Vector(180,180), anim, i);
+                        const isPortrait = (typeof document !== 'undefined' && document.documentElement && document.documentElement.classList && document.documentElement.classList.contains('mobile-portrait'));
+                        const destPos = new Vector(slotPos.x + 5, slotPos.y + 5);
+                        const destSize = new Vector(180,180);
+                        if (isPortrait) {
+                            const center = destPos.clone().add(new Vector(destSize.x/2, destSize.y/2));
+                            try { this.UIDraw.rotate({ angle: Math.PI/2, origin: center }); } catch (e) {}
+                            if (fr) this.UIDraw.image(fr, destPos, destSize, null, 0, 1, false);
+                            else this.UIDraw.sheet(this.sprite, destPos, destSize, anim, i);
+                            try { this.UIDraw.popMatrix(); } catch (e) {}
+                        } else {
+                            if (fr) this.UIDraw.image(fr, destPos, destSize, null, 0, 1, false);
+                            else this.UIDraw.sheet(this.sprite, destPos, destSize, anim, i);
+                        }
                     }
                     const connKey = this._getFrameConnKey(anim, i);
                     this._drawFrameConnectionOverlay(slotPos, connKey);
@@ -4847,8 +4858,18 @@ export default class FrameSelect {
                                     if (src) tctx.drawImage(src, 0, 0);
                                 } catch (e) {}
                             }
-                            // draw composited thumbnail into the slot inner area
-                            this.UIDraw.image(tmp, new Vector(slotPos.x + 5, slotPos.y + 5), new Vector(180,180), null, 0, 1, false);
+                            // draw composited thumbnail into the slot inner area (rotate in portrait)
+                            const isPortrait = (typeof document !== 'undefined' && document.documentElement && document.documentElement.classList && document.documentElement.classList.contains('mobile-portrait'));
+                            const destPos = new Vector(slotPos.x + 5, slotPos.y + 5);
+                            const destSize = new Vector(180,180);
+                            if (isPortrait) {
+                                const center = destPos.clone().add(new Vector(destSize.x/2, destSize.y/2));
+                                try { this.UIDraw.rotate({ angle: Math.PI/2, origin: center }); } catch (e) {}
+                                this.UIDraw.image(tmp, destPos, destSize, null, 0, 1, false);
+                                try { this.UIDraw.popMatrix(); } catch (e) {}
+                            } else {
+                                this.UIDraw.image(tmp, destPos, destSize, null, 0, 1, false);
+                            }
                             // small layered indicator at bottom
                             this.UIDraw.text('Layered', new Vector(slotPos.x + slotSize.x/2, slotPos.y + slotSize.y - 16), '#FFFFFF', 0, 12, { align: 'center', font: 'monospace' });
                         } catch (e) { /* fallback to label below on error */ }

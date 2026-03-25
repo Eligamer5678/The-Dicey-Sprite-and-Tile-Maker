@@ -76,8 +76,30 @@ const releasePaste = () => {
 
 const makeButton = (label, onClick, extraCls='') => {
     const b = createEl('button', 'mobile-btn ' + extraCls, label);
-    b.addEventListener('touchstart', e => { e.preventDefault(); onClick(e); }, { passive: false });
-    b.addEventListener('mousedown', e => { e.preventDefault(); onClick(e); });
+    // Increase visual/touch size for easier tapping
+    try {
+        b.style.minHeight = '48px';
+        b.style.padding = '8px 6px';
+        b.style.display = 'flex';
+        b.style.alignItems = 'center';
+        b.style.justifyContent = 'center';
+    } catch (e) {}
+    // Press/release semantics: record press on start, invoke on release if not cancelled by a scroll/drag
+    let pressed = false;
+    const start = (e) => { pressed = true; try { e.preventDefault(); } catch (ex) {} };
+    const cancel = () => { pressed = false; };
+    const end = (e) => {
+        if (!pressed) return;
+        pressed = false;
+        const lastDrag = (window.mobileUI_lastRightDragTime || 0);
+        if (Date.now() - lastDrag < 350) return; // cancelled due to recent drag/scroll
+        try { onClick(e); } catch (ex) {}
+    };
+    b.addEventListener('touchstart', start, { passive: false });
+    b.addEventListener('mousedown', start);
+    b.addEventListener('touchend', end);
+    b.addEventListener('mouseup', end);
+    b.addEventListener('touchcancel', cancel);
     return b;
 };
 
@@ -96,6 +118,7 @@ const buildUI = () => {
             try { window.mobileKeyToggles['Shift'] = !!shiftMode; } catch (e) {}
     }, 'big');
     left.appendChild(btnSelect);
+    // (Rotate button moved to right panel)
     // H/K container occupying one quarter: contains two buttons stacked
     const hkContainer = createEl('div', 'hk-container');
     const btnH = makeButton('H', () => simulateKey('h'));
@@ -105,7 +128,7 @@ const buildUI = () => {
     hkContainer.classList.add('big');
     left.appendChild(hkContainer);
     // Eyedropper (toggle Control held state)
-    const btnEyedrop = makeButton('Eyedrop', () => {
+    const btnEyedrop = makeButton('Eyedrop \n (ctrl)', () => {
         ctrlMode = !ctrlMode;
         btnEyedrop.textContent = ctrlMode ? 'Eyedrop ✓' : 'Eyedrop';
             if (ctrlMode) simulateKey('Control', { down: true }); else simulateKey('Control', { up: true });
@@ -126,10 +149,29 @@ const buildUI = () => {
     // Right panel (scrollable)
     const right = createEl('div', 'mobile-right-panel');
     const sc = createEl('div', 'mobile-scroll');
+    // Brush size toggle 1-5 (cycles single button)
+    let brushSize = 1;
+    const btnBrush = makeButton('Brush:1', () => {
+        brushSize = brushSize % 5 + 1;
+        btnBrush.textContent = 'Brush:' + brushSize;
+        simulateKey(String(brushSize));
+    });
+    sc.appendChild(btnBrush);
+    
     // Undo (Z) — first/top button in right panel, single-tap like 'A'
     const btnZ = makeButton('Z', () => simulateKey('z'));
     btnZ.title = 'Undo';
     sc.appendChild(btnZ);
+
+    // Fill
+    let fMode = false;
+    const btnF = makeButton('F', () => {
+        fMode = !fMode;
+        btnF.textContent = fMode ? 'F ✓' : 'F';
+        if (fMode) simulateKey('f', { down: true }); else simulateKey('f', { up: true });
+            try { window.mobileKeyToggles['f'] = !!fMode; } catch (e) {}
+    });
+    sc.appendChild(btnF);
     // Copy
     sc.appendChild(makeButton('Copy', () => simulateKey('c')));
     // Cut
@@ -165,26 +207,12 @@ const buildUI = () => {
     }));
     // Ctrl+A (select all)
     // Replace Ctrl+A with F (toggle)
-    let fMode = false;
-    const btnF = makeButton('F', () => {
-        fMode = !fMode;
-        btnF.textContent = fMode ? 'F ✓' : 'F';
-        if (fMode) simulateKey('f', { down: true }); else simulateKey('f', { up: true });
-            try { window.mobileKeyToggles['f'] = !!fMode; } catch (e) {}
-    });
-    sc.appendChild(btnF);
+    
     // a key
     sc.appendChild(makeButton('A', () => simulateKey('a')));
     // Tile mode (t)
     sc.appendChild(makeButton('Tile', () => simulateKey('t')));
-    // Brush size toggle 1-5 (cycles single button)
-    let brushSize = 1;
-    const btnBrush = makeButton('Brush:1', () => {
-        brushSize = brushSize % 5 + 1;
-        btnBrush.textContent = 'Brush:' + brushSize;
-        simulateKey(String(brushSize));
-    });
-    sc.appendChild(btnBrush);
+    
     // Resize canvas (` key)
     sc.appendChild(makeButton('Resize `', () => simulateKey('`')));
     // +/- and color steps
@@ -198,6 +226,26 @@ const buildUI = () => {
         simulateKey(String(colorStep));
     });
     sc.appendChild(btnColorStepRight);
+
+    // Rotation toggle moved here: appears at end of the right panel
+    const btnRotate = makeButton('Landscape', () => {
+        const doc = document && document.documentElement;
+        if (!doc) return;
+        const enabled = doc.classList.toggle('mobile-portrait');
+        btnRotate.textContent = enabled ? 'Portrat' : 'Landscape';
+        // record recent interaction so buttons won't fallthrough to canvas
+        try { window.mobileUI_lastRightDragTime = Date.now(); } catch (e) {}
+        try { if (window.program && window.program.mouse && typeof window.program.mouse.addMask === 'function') window.program.mouse.addMask(1); } catch (e) {}
+        // Try to lock orientation to landscape (horizontal) while rotated to avoid auto-rotate
+        try {
+            if (enabled && screen && screen.orientation && typeof screen.orientation.lock === 'function') {
+                screen.orientation.lock('landscape-primary').catch(()=>{});
+            } else if (screen && screen.orientation && typeof screen.orientation.unlock === 'function') {
+                screen.orientation.unlock();
+            }
+        } catch (e) {}
+    });
+    sc.appendChild(btnRotate);
 
     right.appendChild(sc);
     uiRoot.appendChild(right);
@@ -230,7 +278,10 @@ const buildUI = () => {
         }, { passive: true });
 
         const finishDrag = (ev) => {
-            if (isDragging) lastDragTime = Date.now();
+            if (isDragging) {
+                lastDragTime = Date.now();
+                try { window.mobileUI_lastRightDragTime = lastDragTime; } catch (e) {}
+            }
             try { if (ev && ev.pointerId && sc.releasePointerCapture) sc.releasePointerCapture(ev.pointerId); } catch (e) {}
             isDragging = false; dragStartY = undefined; scrollStart = 0;
         };

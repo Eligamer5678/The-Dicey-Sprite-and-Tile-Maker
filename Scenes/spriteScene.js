@@ -1677,7 +1677,26 @@ export class SpriteScene extends Scene {
             let mx = sp.x || 0;
             let my = sp.y || 0;
 
-            // Apply inverse transforms first to get world coordinates, then test against areas
+            // If we applied a draw-level rotation (portrait mode), undo it first (inverse rotate around center)
+            try {
+                const isPortrait = (typeof document !== 'undefined' && document.documentElement && document.documentElement.classList && document.documentElement.classList.contains('mobile-portrait'));
+                if (isPortrait) {
+                    const angle = Math.PI/2; // rotation applied during draw
+                    const cx = 1920/2;
+                    const cy = 1080/2;
+                    // rotate point (mx,my) around center by -angle
+                    const dx = mx - cx;
+                    const dy = my - cy;
+                    const s = Math.sin(-angle);
+                    const c = Math.cos(-angle);
+                    const rx = dx * c - dy * s;
+                    const ry = dx * s + dy * c;
+                    mx = rx + cx;
+                    my = ry + cy;
+                }
+            } catch (e) {}
+
+            // Apply inverse scale/translate to get world coordinates
             mx = mx / this.zoom.x - this.offset.x;
             my = my / this.zoom.y - this.offset.y;
 
@@ -3984,11 +4003,24 @@ export class SpriteScene extends Scene {
 
                 // Integrate pan velocity into offset and apply damping
                 try {
-                    if (Math.abs(this.panVlos.x) > 1e-6) {
-                        this.offset.x += this.panVlos.x * dt;
+                    // If portrait rotation active, rotate pan velocity into world axes
+                    let pvx = this.panVlos.x, pvy = this.panVlos.y;
+                    try {
+                        const isPortrait = (typeof document !== 'undefined' && document.documentElement && document.documentElement.classList && document.documentElement.classList.contains('mobile-portrait'));
+                        if (isPortrait) {
+                            const angle = Math.PI / 2; // draw rotation angle
+                            const s = Math.sin(-angle);
+                            const c = Math.cos(-angle);
+                            const rx = pvx * c - pvy * s;
+                            const ry = pvx * s + pvy * c;
+                            pvx = rx; pvy = ry;
+                        }
+                    } catch (e) {}
+                    if (Math.abs(pvx) > 1e-6) {
+                        this.offset.x += pvx * dt;
                     }
-                    if (Math.abs(this.panVlos.y) > 1e-6) {
-                        this.offset.y += this.panVlos.y * dt;
+                    if (Math.abs(pvy) > 1e-6) {
+                        this.offset.y += pvy * dt;
                     }
                     const pdamp = Math.exp(-(this.panSmooth || 6) * dt);
                     this.panVlos.x *= pdamp;
@@ -16409,6 +16441,17 @@ export class SpriteScene extends Scene {
         this.Draw.pushMatrix()
         this.Draw.scale(this.zoom)
         this.Draw.translate(this.offset)
+        // If portrait mode, rotate the world by 90 degrees using the draw transform stack
+        try {
+            const isPortrait = (typeof document !== 'undefined' && document.documentElement && document.documentElement.classList && document.documentElement.classList.contains('mobile-portrait'));
+            if (isPortrait) {
+                // Rotate about the zoom origin (screen center converted to world coords)
+                const cx = 1920 / 2;
+                const cy = 1080 / 2;
+                const originWorld = new Vector(cx / (this.zoom.x || 1) - (this.offset.x || 0), cy / (this.zoom.y || 1) - (this.offset.y || 0));
+                this.Draw.rotate({ angle: Math.PI / 2, origin: originWorld });
+            }
+        } catch (e) {}
         
         // display the editable frame centered on the screen
         const size = this._mainDrawSize || (this._mainDrawSize = new Vector(384, 384));
