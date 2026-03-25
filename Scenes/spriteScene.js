@@ -107,12 +107,12 @@ export class SpriteScene extends Scene {
             if (this.stateController) this.stateController.setPenColor(this.penColor || '#000000');
             else this.penColor = this.penColor || '#000000';
             // place near the bottom-left, just right of the 200px-wide FrameSelect menu
-            const pickerPos = new Vector(208, 1040);
-            const pickerSize = new Vector(40, 28);
+            // Anchor the color picker at bottom-left and increase its size by 3x (explicit width/height)
+            const pickerSize = new Vector(40 * 3, 28 * 3); // 3x width/height (not CSS scale)
+            // Use UI canvas logical coordinate space (1080px height) to position near bottom-left
+            // Move it right to dodge the FrameSelect sidebar (200px) + padding
+            const pickerPos = new Vector(220, 1080 - 12 - pickerSize.y);
             const colorInput = createHInput('pen-color', pickerPos, pickerSize, 'color', { borderRadius: '4px', border: '1px solid #444', padding: '2px' }, 'UI');
-            // Make picker 2x bigger from its bottom-left corner.
-            colorInput.style.transformOrigin = '0% 100%';
-            colorInput.style.transform = 'scale(2)';
             colorInput.value = this.penColor || '#000000';
             colorInput.title = 'Pen color';
             colorInput.addEventListener('input', (e) => {
@@ -134,8 +134,17 @@ export class SpriteScene extends Scene {
             const label = document.createElement('div');
             label.textContent = '';
             label.style.position = 'absolute';
-            label.style.left = (pickerPos.x + pickerSize.x + 6) + 'px';
-            label.style.top = (pickerPos.y - 2) + 'px';
+            // Position label to the right of the created color input using its computed position
+            try {
+                const inLeft = parseFloat(colorInput.style.left) || colorInput.getBoundingClientRect().left || 12;
+                const inTop = parseFloat(colorInput.style.top) || colorInput.getBoundingClientRect().top || 12;
+                const inW = colorInput.offsetWidth || pickerSize.x;
+                label.style.left = (inLeft + inW + 6) + 'px';
+                label.style.top = inTop + 'px';
+            } catch (e) {
+                label.style.left = (12 + pickerSize.x + 6) + 'px';
+                label.style.top = '12px';
+            }
             label.style.color = '#FFFFFF';
             label.style.fontSize = '12px';
             label.style.zIndex = 1000;
@@ -486,6 +495,20 @@ export class SpriteScene extends Scene {
 
 
         this.isReady = true;
+    }
+
+    // Helper: robust draw-held check that requires a short hold on touch devices
+    _drawHeld(button, minHold = 0.05) {
+        try {
+            const isTouch = (typeof window !== 'undefined') && (('ontouchstart' in window) || (navigator.maxTouchPoints && navigator.maxTouchPoints > 0));
+            if (!isTouch) return !!(this.mouse && typeof this.mouse.held === 'function' && this.mouse.held(button));
+            // return held time compared against threshold
+            if (!(this.mouse && typeof this.mouse.held === 'function')) return false;
+            const t = this.mouse.held(button, true);
+            return !!(t && t >= Number(minHold) );
+        } catch (e) {
+            try { return !!(this.mouse && typeof this.mouse.held === 'function' && this.mouse.held(button)); } catch (ee) { return false; }
+        }
     }
 
     connectDebug(){
@@ -1582,8 +1605,9 @@ export class SpriteScene extends Scene {
 
 
         let wheelY = 0, wheelX = 0;
-        wheelY = this.mouse.wheel();
-        wheelX = this.mouse.wheelX();
+        // Use scroll() to capture vertical pan from touch gestures (two-finger pan)
+        try { wheelY = this.mouse.scroll(); } catch (e) { wheelY = this.mouse.wheel(); }
+        try { wheelX = this.mouse.wheelX(); } catch (e) { wheelX = 0; }
         
         // Convert wheel deltas to pan velocity impulses. We divide by zoom so panning speed feels consistent at different zoom levels.
         const zX = this.zoom.x;
@@ -4152,12 +4176,12 @@ export class SpriteScene extends Scene {
             const sheet = this.currentSprite;
             // If clipboard brush mode is active, paste (left) or erase (right) with clipboard shape instead of square brush
             if (this._clipboardBrushActive && this.clipboard) {
-                if (this.mouse.held('left')) {
+                if (this._drawHeld('left')) {
                     try { if (this.mouse.pressed('left')) this._playSfx('clipboard.paste'); } catch (e) {}
                     this.doPaste(this.mouse.pos, { playSfx: false });
                     return;
                 }
-                if (this.mouse.held('right')) {
+                if (this._drawHeld('right')) {
                     try { if (this.mouse.pressed('right')) this._playSfx('clipboard.erase'); } catch (e) {}
                     this.doClipboardErase(this.mouse.pos, { playSfx: false });
                     return;
@@ -4245,25 +4269,95 @@ export class SpriteScene extends Scene {
                 return pixels;
             };
 
-            // Reset pixel-perfect stroke bookkeeping when no buttons are held.
-            if (!this.mouse.held('left') && !this.mouse.held('right')) {
+            // Reset pixel-perfect stroke bookkeeping when no draw buttons are held.
+            if (!this._drawHeld('left') && !this._drawHeld('right')) {
                 this._pixelPerfectStrokeActive = false;
                 this._pixelPerfectHistory = [];
                 this._pixelPerfectOriginals = new Map();
             }
 
-            if (this.mouse.held('left')) { // draw an NxN square centered on cursor (top-left bias for even sizes)
-                const sx = pos.x - half;
-                const sy = pos.y - half;
-                const worldPixels = worldPixelsFromBrush(sx, sy, this._worldPixelBrushBuffer);
-                let _wpChanged = false;
-                try {
-                    _wpChanged = !!this._anyWorldPixelWouldChange(worldPixels, color);
-                    if (this.mouse.pressed('left') && _wpChanged) this._playSfx('pixel.place');
-                } catch (e) {}
-                if (_wpChanged) this._paintWorldPixels(worldPixels, color);
+            if (this._drawHeld('left')) {
+                // If mobile F-toggle is active, perform flood-fill on press instead of drawing
+                const mobileF = (typeof window !== 'undefined' && window.mobileKeyToggles && (window.mobileKeyToggles['f'] || window.mobileKeyToggles['F']));
+                if (mobileF && this.mouse.pressed('left')) {
+                    try {
+                        const sheet = this.currentSprite;
+                        if (!sheet) { /* nothing to fill */ }
+                        else {
+                            let anim = this.selectedAnimation;
+                            let frameIdx = this.selectedFrame;
+                            if (this.tilemode && pos && typeof pos.areaIndex === 'number') {
+                                const binding = this.getAreaBinding(pos.areaIndex);
+                                if (binding && binding.anim !== undefined && binding.index !== undefined) {
+                                    anim = binding.anim;
+                                    frameIdx = Number(binding.index);
+                                }
+                            }
+                            const frameCanvas = sheet.getFrame(anim, frameIdx);
+                            if (frameCanvas) {
+                                const w = frameCanvas.width;
+                                const h = frameCanvas.height;
+                                const ctx = frameCanvas.getContext('2d');
+                                const img = ctx.getImageData(0, 0, w, h);
+                                const data = img.data;
+                                const sx = pos.x;
+                                const sy = pos.y;
+                                if (!(sx < 0 || sy < 0 || sx >= w || sy >= h)) {
+                                    const startIdx = (sy * w + sx) * 4;
+                                    const srcR = data[startIdx], srcG = data[startIdx+1], srcB = data[startIdx+2], srcA = data[startIdx+3];
+                                    const fillCol = Color.convertColor(this.penColor || '#000000');
+                                    const fRgb = fillCol.toRgb();
+                                    const fillR = Math.round(fRgb.a || 0);
+                                    const fillG = Math.round(fRgb.b || 0);
+                                    const fillB = Math.round(fRgb.c || 0);
+                                    const fillA = Math.round((fRgb.d ?? 1) * 255);
+                                    if (!(srcR === fillR && srcG === fillG && srcB === fillB && srcA === fillA)) {
+                                        const changes = [];
+                                        const fillHex = this.rgbaToHex(fillR, fillG, fillB, fillA);
+                                        const wStride = w;
+                                        const stack = [sy * w + sx];
+                                        while (stack.length) {
+                                            const p = stack.pop();
+                                            const y = Math.floor(p / wStride);
+                                            const x = p % wStride;
+                                            const idx = (y * wStride + x) * 4;
+                                            if (data[idx] !== srcR || data[idx+1] !== srcG || data[idx+2] !== srcB || data[idx+3] !== srcA) continue;
+                                            changes.push({ x, y, color: fillHex, blendType: 'replace' });
+                                            data[idx] = fillR; data[idx+1] = fillG; data[idx+2] = fillB; data[idx+3] = fillA;
+                                            if (x > 0) stack.push(p - 1);
+                                            if (x < wStride - 1) stack.push(p + 1);
+                                            if (y > 0) stack.push(p - wStride);
+                                            if (y < h - 1) stack.push(p + wStride);
+                                        }
+                                        if (changes.length) {
+                                            try {
+                                                if (typeof this._animatePixelChanges === 'function') this._animatePixelChanges(changes, anim, frameIdx, sx, sy, 200);
+                                                else if (typeof sheet.modifyFrame === 'function') sheet.modifyFrame(anim, frameIdx, changes);
+                                                else for (const c of changes) try { sheet.setPixel(anim, frameIdx, c.x, c.y, c.color, 'replace'); } catch (e) {}
+                                            } catch (e) {
+                                                if (typeof sheet.modifyFrame === 'function') try { sheet.modifyFrame(anim, frameIdx, changes); } catch (e) {}
+                                                else for (const c of changes) try { sheet.setPixel(anim, frameIdx, c.x, c.y, c.color, 'replace'); } catch (e) {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) { console.warn('mobile F-fill failed', e); }
+                    // prevent normal pen draw this tick
+                } else {
+                    const sx = pos.x - half;
+                    const sy = pos.y - half;
+                    const worldPixels = worldPixelsFromBrush(sx, sy, this._worldPixelBrushBuffer);
+                    let _wpChanged = false;
+                    try {
+                        _wpChanged = !!this._anyWorldPixelWouldChange(worldPixels, color);
+                        if (this.mouse.pressed('left') && _wpChanged) this._playSfx('pixel.place');
+                    } catch (e) {}
+                    if (_wpChanged) this._paintWorldPixels(worldPixels, color);
+                }
             }
-            if (this.mouse.held('right')) { // erase NxN square
+            if (this._drawHeld('right')) { // erase NxN square
                 const eraseColor = '#00000000';
                 const sx = pos.x - half;
                 const sy = pos.y - half;
@@ -4352,7 +4446,7 @@ export class SpriteScene extends Scene {
             const baseBinding = this._tileBrushBinding || { anim: this.selectedAnimation, index: this.selectedFrame };
             const baseTransform = this._tileBrushTransform ? { ...this._tileBrushTransform } : null;
 
-            if (this.mouse.held('left')) {
+            if (this._drawHeld('left')) {
                 const updateSet = this._autotileNeighborCoordSet || (this._autotileNeighborCoordSet = new Set());
                 if (this.autotile) updateSet.clear();
                 for (const t of tiles) {
@@ -4396,7 +4490,7 @@ export class SpriteScene extends Scene {
                         this._applyAutotileAt(p.col, p.row, logical);
                     }
                 }
-            } else if (this.mouse.held('right')) {
+            } else if (this._drawHeld('right')) {
                 // If tiles are selected, right-drag acts as deselect instead of erase
                 if (this._tileSelection && this._tileSelection.size > 0) {
                     for (const t of tiles) this._tileSelection.delete(this._tileKey(t.col, t.row));
@@ -7201,16 +7295,16 @@ export class SpriteScene extends Scene {
                     // Tile selection in render-only tilemode
                     if (!this._tileSelection) this._tileSelection = new Set();
                     const tileBrush = this._tileBrushTiles(pos.tileCol ?? 0, pos.tileRow ?? 0, this.brushSize || 1, this._tileBrushTilesBuffer);
-                    if (this.mouse.held('left')) {
+                    if (this._drawHeld('left')) {
                         for (const t of tileBrush) this._tileSelection.add(this._tileKey(t.col, t.row));
-                    } else if (this.mouse.held('right')) {
+                    } else if (this._drawHeld('right')) {
                         for (const t of tileBrush) this._tileSelection.delete(this._tileKey(t.col, t.row));
                     }
                     return;
                 }
                 const posSel = this.getPos(this.mouse.pos);
                 if (posSel && posSel.inside) {
-                    if (this.mouse.held('left')) {
+                    if (this._drawHeld('left')) {
                         const side = Math.max(1, Math.min(15, this.brushSize || 1));
                         const half = Math.floor((side - 1) / 2);
                         const areaIndex = (typeof posSel.areaIndex === 'number') ? posSel.areaIndex : null;
@@ -7245,7 +7339,7 @@ export class SpriteScene extends Scene {
                                 }
                             }
                         }
-                    } else if (this.mouse.held('right')) {
+                    } else if (this._drawHeld('right')) {
                         const side = Math.max(1, Math.min(15, this.brushSize || 1));
                         const half = Math.floor((side - 1) / 2);
                         const areaIndex = (typeof posSel.areaIndex === 'number') ? posSel.areaIndex : null;
@@ -13829,8 +13923,9 @@ export class SpriteScene extends Scene {
     computeDrawArea() {
         const drawCtx = this.Draw && this.Draw.ctx;
         if (!drawCtx || !drawCtx.canvas) return null;
-        const uiW = drawCtx.canvas.width / this.Draw.Scale.x;
-        const uiH = drawCtx.canvas.height / this.Draw.Scale.y;
+        const rect = drawCtx.canvas.getBoundingClientRect();
+        const uiW = rect.width / this.Draw.Scale.x;
+        const uiH = rect.height / this.Draw.Scale.y;
         const size = new Vector(384, 384);
         const topLeft = new Vector((uiW - size.x) / 2, (uiH - size.y) / 2);
         const padding = 0;
@@ -14911,8 +15006,9 @@ export class SpriteScene extends Scene {
     computeAreaInfo(pos, size) {
         const drawCtx = this.Draw && this.Draw.ctx;
         if (!drawCtx || !drawCtx.canvas || !pos || !size) return null;
-        const uiW = drawCtx.canvas.width / this.Draw.Scale.x;
-        const uiH = drawCtx.canvas.height / this.Draw.Scale.y;
+        const rect = drawCtx.canvas.getBoundingClientRect();
+        const uiW = rect.width / this.Draw.Scale.x;
+        const uiH = rect.height / this.Draw.Scale.y;
         const padding = 0;
         const dstW = Math.max(1, size.x - padding * 2);
         const dstH = Math.max(1, size.y - padding * 2);

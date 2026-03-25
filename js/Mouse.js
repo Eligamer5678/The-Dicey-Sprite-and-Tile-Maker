@@ -33,26 +33,19 @@ export default class Mouse {
         };
 
         // Use Pointer Events (covers mouse, touch, pen)
-        window.addEventListener("pointermove", e => this._onMove(e));
+        // Track multiple pointers so touch multi-finger interactions don't confuse state.
+        this.pointers = new Map(); // pointerId => {x,y,button,pointerType}
+        this._primaryPointerId = null;
+        this.gestureActive = false;
+        this._gesturePrevDist = null;
+        this._gesturePrevCenter = null;
+        window.addEventListener("pointermove", e => this._onPointerMove(e));
         // Prevent browser navigation from extra mouse buttons (X1/X2). Some browsers
         // map the back/forward buttons to button values 3 and 4. Intercept pointerdown
         // and auxclick to call preventDefault so the browser doesn't navigate.
-        window.addEventListener("pointerdown", e => {
-            try {
-                if (typeof e.button === 'number' && (e.button === 3 || e.button === 4)) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                }
-                // If user does shift + right-click, prevent default browser behavior
-                if (typeof e.button === 'number' && e.button === 2 && e.shiftKey) {
-                    e.preventDefault();
-                    e.stopImmediatePropagation();
-                }
-            } catch (ex) {}
-            this._onMove(e);
-            this._setButton(e.button, 1);
-        });
-        window.addEventListener("pointerup", e => this._setButton(e.button, 0));
+        window.addEventListener("pointerdown", e => this._onPointerDown(e));
+        window.addEventListener("pointerup", e => this._onPointerUp(e));
+        window.addEventListener("pointercancel", e => this._onPointerUp(e));
         // auxclick is fired for non-primary buttons in some browsers; block back/forward here as well
         window.addEventListener('auxclick', e => {
             try {
@@ -114,26 +107,116 @@ export default class Mouse {
             this._lastWheelDeltaX += e.deltaX;
             this._lastWheelCtrl = !!e.ctrlKey;
         }, { passive: false });
-        window.addEventListener("touchstart", e => {
-            const touch = e.changedTouches[0];
-            this._tapStart = e.timeStamp;
-            this._tapStartX = touch.clientX;
-            this._tapStartY = touch.clientY;
-            this._setButton('left', 1);
-            this.pos.x = this._tapStartX
-            this.pos.y = this._tapStartY
-            
-        });
-        window.addEventListener("touchend", e => {
-            const touch = e.changedTouches[0];
-            const tapDuration = e.timeStamp - this._tapStart;
-            const moveX = Math.abs(touch.clientX - this._tapStartX);
-            const moveY = Math.abs(touch.clientY - this._tapStartY);
-            if (tapDuration < this._TAP_THRESHOLD && moveX < this._MOVE_THRESHOLD && moveY < this._MOVE_THRESHOLD) {
-                setTimeout(() => this._setButton(0, 0), 10); // Release after short delay
-                this._setButton('left', 0);
+        // Note: older touch listeners removed — pointer events handle touch reliably.
+    }
+
+    _onPointerDown(e) {
+        try {
+            if (typeof e.button === 'number' && (e.button === 3 || e.button === 4)) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
             }
-        });
+            if (typeof e.button === 'number' && e.button === 2 && e.shiftKey) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+            }
+        } catch (ex) {}
+        // track pointer
+        const x = e.clientX; const y = e.clientY;
+        this.pointers.set(e.pointerId, { x, y, button: e.button, pointerType: e.pointerType });
+        if (this._primaryPointerId === null) this._primaryPointerId = e.pointerId;
+        // update pos from primary
+        if (this._primaryPointerId === e.pointerId) {
+            this._onMove(e);
+        }
+        // For touch, prevent default to avoid scrolling
+        try { if (e.pointerType === 'touch') e.preventDefault(); } catch (err) {}
+        // Update button states: left should be true while any pointer exists
+        if (e.button === 1) this._setButton(1, 1);
+        if (e.button === 2) this._setButton(2, 1);
+        // left mouse/touch
+        if (typeof e.button !== 'number' || e.button === 0) {
+            this._setButton(0, 1);
+        }
+    }
+
+    _onPointerMove(e) {
+        // update tracked pointer
+        if (this.pointers.has(e.pointerId)) {
+            this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, button: e.button, pointerType: e.pointerType });
+        }
+        if (this._primaryPointerId === null) this._primaryPointerId = e.pointerId;
+        // If there are two or more pointers, handle pinch/drag gesture
+        if (this.pointers.size >= 2) {
+            const pts = Array.from(this.pointers.values());
+            const a = pts[0], b = pts[1];
+            const cx = (a.x + b.x) / 2;
+            const cy = (a.y + b.y) / 2;
+            const dist = Math.hypot(a.x - b.x, a.y - b.y);
+            if (!this.gestureActive) {
+                this.gestureActive = true;
+                this._gesturePrevDist = dist;
+                this._gesturePrevCenter = { x: cx, y: cy };
+                // block drawing/UI interactions while gesturing
+                this.uiBlockedByOverlay = true;
+                // release left button state to avoid stray drawing
+                this._setButton(0, 0);
+            } else {
+                // compute zoom delta
+                const delta = dist - (this._gesturePrevDist || dist);
+                // scale factor for wheel-like delta; tune as needed
+                const ZOOM_SENSITIVITY = 2;
+                this._lastWheelDelta += -delta * ZOOM_SENSITIVITY;
+                this._lastWheelCtrl = true; // mark as a ctrl-like zoom so consumers can opt-in
+
+                // compute pan delta from gesture center movement
+                const pdx = cx - this._gesturePrevCenter.x;
+                const pdy = cy - this._gesturePrevCenter.y;
+                const PAN_SENSITIVITY = 20.0;
+                // horizontal pan -> wheelX
+                this._lastWheelDeltaX += -pdx * PAN_SENSITIVITY;
+                // vertical pan -> scrollDelta
+                this.scrollDelta += -pdy * PAN_SENSITIVITY;
+
+                this._gesturePrevDist = dist;
+                this._gesturePrevCenter = { x: cx, y: cy };
+            }
+            return; // don't call primary pointer move while gesturing
+        }
+
+        if (this._primaryPointerId === e.pointerId) this._onMove(e);
+    }
+
+    _onPointerUp(e) {
+        // remove pointer from map
+        try { this.pointers.delete(e.pointerId); } catch (ex) {}
+        // if primary was removed, pick another
+        if (this._primaryPointerId === e.pointerId) {
+            const it = this.pointers.keys();
+            const next = it.next();
+            this._primaryPointerId = next.done ? null : next.value;
+            if (this._primaryPointerId !== null) {
+                const p = this.pointers.get(this._primaryPointerId);
+                if (p) {
+                    // synthesize a simple event-like object for _onMove
+                    this._onMove({ clientX: p.x, clientY: p.y });
+                }
+            }
+        }
+        // update buttons: middle/right cleared if their event matched, left cleared only if no pointers remain
+        if (e.button === 1) this._setButton(1, 0);
+        if (e.button === 2) this._setButton(2, 0);
+        if (this.pointers.size === 0) this._setButton(0, 0);
+
+        // if gesture ended (now fewer than 2 pointers), clear gesture state and re-enable UI
+        if (this.gestureActive && this.pointers.size < 2) {
+            this.gestureActive = false;
+            this._gesturePrevDist = null;
+            this._gesturePrevCenter = null;
+            // small pause to avoid immediate drawing
+            this.uiBlockedByOverlay = false;
+            this.pause(0.05);
+        }
     }
 
     _onMove(e) {
@@ -185,9 +268,44 @@ export default class Mouse {
 
     _setButton(code, val) {
         // Chromebook/Touch: treat button -1 or undefined as left click
-        if (code === 0 || code === -1 || code === undefined) this.buttons.left.state = val;
+        // If emulateRight is enabled, map left-button to right-button instead.
+        if (code === 0 || code === -1 || code === undefined) {
+            if (this.emulateRight) this.buttons.right.state = val;
+            else this.buttons.left.state = val;
+        }
         if (code === 1) this.buttons.middle.state = val;
         if (code === 2) this.buttons.right.state = val;
+    }
+
+    // Toggle mapping of left inputs to right inputs (used by mobile UI)
+    setEmulateRight(v) {
+        const want = !!v;
+        if (this.emulateRight === want) return;
+        // Transfer current button state so toggling doesn't leave inputs stuck
+        try {
+            if (want) {
+                // map any existing left state to right and clear left
+                this.buttons.right.state = this.buttons.left.state;
+                this.buttons.right.time = this.buttons.left.time;
+                this.buttons.right.prev = this.buttons.left.prev;
+                this.buttons.right.justReleased = this.buttons.left.justReleased;
+                this.buttons.left.state = 0;
+                this.buttons.left.time = 0;
+                this.buttons.left.prev = 0;
+                this.buttons.left.justReleased = 0;
+            } else {
+                // map any existing right state back to left and clear right
+                this.buttons.left.state = this.buttons.right.state;
+                this.buttons.left.time = this.buttons.right.time;
+                this.buttons.left.prev = this.buttons.right.prev;
+                this.buttons.left.justReleased = this.buttons.right.justReleased;
+                this.buttons.right.state = 0;
+                this.buttons.right.time = 0;
+                this.buttons.right.prev = 0;
+                this.buttons.right.justReleased = 0;
+            }
+        } catch (e) { /* ignore mapping errors */ }
+        this.emulateRight = want;
     }
 
     update(delta) {

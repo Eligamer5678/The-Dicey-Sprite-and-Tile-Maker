@@ -73,3 +73,55 @@ html, body {
     color:#FFF;
     user-select: none;
 }
+
+/* Mobile UI panels */
+.mobile-left-panel, .mobile-right-panel {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 240px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    box-sizing: border-box;
+    z-index: 200;
+    pointer-events: auto;
+}
+.mobile-left-panel { align-items: stretch; }
+.mobile-right-panel { align-items: stretch; }
+.hk-container { display: flex; flex-direction: column; gap:6px; }
+.brush-group { display:flex; gap:6px; }
+.mobile-btn {
+    background: rgba(0,0,0,0.6);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.08);
+    padding: 8px 10px;
+    font-size: 14px;
+    border-radius: 6px;
+    touch-action: manipulation;
+    width: 50px;
+    max-width: none;
+}
+.mobile-btn.big { width: 100%; max-width: none; }
+.hk-container > button { width: 100%; }
+.mobile-right-panel .mobile-scroll { overflow-y: auto; -webkit-overflow-scrolling: touch; max-height: 100%; display:flex; flex-direction:column; gap:8px; pointer-events: auto; }
+
+/* Right panel buttons wider (approx 4x) */
+.mobile-right-panel .mobile-btn { width: 200px; max-width: calc(100% - 16px); }
+
+/* Make left-side H/K buttons match big button widths */
+.mobile-left-panel .hk-container > button { width: 100%; }
+
+/* Shift panels slightly away from center (left goes left, right goes right) */
+.mobile-left-panel { left: 0; transform: translateX(-1vw); }
+.mobile-right-panel { right: 0; transform: translateX(1vw); }
+
+/* Ensure scroll container uses pointer-based handling (we'll use JS drag-to-scroll) */
+.mobile-right-panel .mobile-scroll { touch-action: none; }
+
+/* compact layout for narrow screens */
+@media (max-width: 900px) {
+    .mobile-left-panel, .mobile-right-panel { width: 160px; padding:6px; }
+    .mobile-btn { font-size: 12px; padding:6px 8px; }
+}

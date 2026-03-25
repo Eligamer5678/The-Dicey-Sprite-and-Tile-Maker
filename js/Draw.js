@@ -613,7 +613,7 @@ export default class Draw {
             designWidth = null,
             designHeight = null,
             outputQuantizePx = 'auto',
-            outputMinFontPx = 11,
+            outputMinFontPx = 0,
         } = options || {};
 
         let sx = this.Scale.x;

@@ -146,6 +146,10 @@ export default class Keys { // Key input
         if(window.Debug.visible) return 0;
         if(passcode!==this.passcode) return 0;
         if (this.pauseTime > 0) return returnTime ? 0 : false;
+        // Mobile toggles override held state when present
+        try {
+            if (window.mobileKeyToggles && window.mobileKeyToggles[key]) return returnTime ? 1e9 : true;
+        } catch (e) {}
         if (key === 'any') {
             for (const k in this.keys) {
                 if (this.keys[k] && this.keys[k].state) {
@@ -181,6 +185,14 @@ export default class Keys { // Key input
         for (const k in this.keys) {
             if (this.keys[k] && this.keys[k].state) out.push(k);
         }
+        // include mobile toggle keys
+        try {
+            if (window.mobileKeyToggles) {
+                for (const mk in window.mobileKeyToggles) {
+                    if (window.mobileKeyToggles[mk] && out.indexOf(mk) === -1) out.push(mk);
+                }
+            }
+        } catch (e) {}
         return out;
     }
 

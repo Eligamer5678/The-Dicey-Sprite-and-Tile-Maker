@@ -47,7 +47,8 @@ export default class FrameSelect {
             if(this._animFps === 0) this._animIndex = this.selectedFrame
         });
         this.menu = new Menu(this.mouse, this.keys, new Vector(0, 0), new Vector(200, 1080), this.layer, '#FFFFFF22');
-        this.menu.addElement('fpsSlider', fpsSlider)
+        this._fpsSlider = fpsSlider;
+        this.menu.addElement('fpsSlider', this._fpsSlider)
 
         // inline text input for renaming/adding animations
         this._textInput = null;
@@ -63,10 +64,12 @@ export default class FrameSelect {
     // Rebuild palette entries from scene.tileTypes (array of {sheetId,row,col})
     rebuild() {
         // clear existing
+        const fps = this._fpsSlider;
         this.menu.elements.clear();
         this._entries = [];
 
-        
+        // Preserve the FPS slider element across rebuilds
+        try { if (fps) this.menu.addElement('fpsSlider', fps); } catch (e) {}
 
         return true;
     }

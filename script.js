@@ -852,24 +852,27 @@ class Program {
         const canvasTop = Math.round((targetHeight - height) / 2);
 
         // Resize and position every canvas (pixel size + CSS size + left/top)
+        const dpr = window.devicePixelRatio || 1;
         this.layers.forEach(layer => {
-            layer.canvas.width = width;
-            layer.canvas.height = height;
-            layer.canvas.style.width = width + "px";   // CSS pixels -> ensures 1:1 mapping
+            layer.canvas.width = Math.round(width * dpr);
+            layer.canvas.height = Math.round(height * dpr);
+            layer.canvas.style.width = width + "px";   // CSS pixels -> ensures correct display size
             layer.canvas.style.height = height + "px";
             layer.canvas.style.left = canvasLeft + "px";
             layer.canvas.style.top = canvasTop + "px";
+            try { if (layer.ctx && typeof layer.ctx.setTransform === 'function') layer.ctx.setTransform(dpr, 0, 0, dpr, 0, 0); } catch (e) {}
         });
 
         this.uiLayers.forEach(layer => {
             if (layer.canvas) {
-                layer.canvas.width = width;
-                layer.canvas.height = height;
+                layer.canvas.width = Math.round(width * dpr);
+                layer.canvas.height = Math.round(height * dpr);
                 layer.canvas.style.width = width + "px";
                 layer.canvas.style.height = height + "px";
                 // position canvas inside the container at 0,0 and position the container in the page
                 layer.canvas.style.left = '0px';
                 layer.canvas.style.top = '0px';
+                try { if (layer.ctx && typeof layer.ctx.setTransform === 'function') layer.ctx.setTransform(dpr, 0, 0, dpr, 0, 0); } catch (e) {}
             }
             if (layer.container) {
                 layer.container.style.width = width + 'px';
@@ -916,4 +919,5 @@ class Program {
     }
 }
 
-new Program();
+// Expose program globally so UI helpers can access input/handlers
+window.program = new Program();
