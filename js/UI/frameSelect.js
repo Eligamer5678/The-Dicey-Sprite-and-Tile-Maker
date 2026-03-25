@@ -59,6 +59,119 @@ export default class FrameSelect {
         this._exportBtn = null;
         this._jsZipCtor = null;
         this._createImportExportUI();
+        // drag/scroll state
+        this._scrollDragging = false;
+        this._scrollDragStartY = 0;
+        this._scrollStart = 0;
+        this._pressContext = null; // {type: 'frame'|'menu', slotIndex, pressX, pressY, pressTime}
+        this._scrollMoveThreshold = 12; // px movement to consider as scroll
+        this._autoScrollMargin = 60; // px from top/bottom to trigger auto-scroll during drag
+        this._autoScrollSpeed = 900; // px/sec auto-scroll speed when dragging near edges
+        // frame drag/reorder state
+        this._dragCandidate = null; // { index, pressY, pressTime }
+        this._draggingFrame = null; // { index, physElem, ghostCanvas, offset }
+        this._dragStartThreshold = 0.5; // seconds before long-press starts drag
+        this._lastTapTime = 0;
+        this._lastTapPos = null;
+        this._frameContextMenu = null;
+    }
+
+    // Map logical frame index to physical array index in sprite._frames[anim]
+    _logicalToPhysical(anim, logicalIndex) {
+        try {
+            if (!this.sprite || !this.sprite._frames || !this.sprite._frames.has(anim)) return -1;
+            const arr = this.sprite._frames.get(anim);
+            let logical = Math.max(0, Math.floor(logicalIndex || 0));
+            for (let i = 0; i < arr.length; i++){
+                const e = arr[i];
+                if (!e) continue;
+                if (e.__groupStart || e.__groupEnd) continue;
+                if (logical === 0) return i;
+                logical--;
+            }
+            return arr.length;
+        } catch (e) { return -1; }
+    }
+
+    // Compute physical insertion position for a target logical index
+    _physicalInsertPosForLogical(anim, logicalIndex) {
+        try {
+            if (!this.sprite || !this.sprite._frames || !this.sprite._frames.has(anim)) return 0;
+            const arr = this.sprite._frames.get(anim);
+            let logical = Math.max(0, Math.floor(logicalIndex || 0));
+            let physPos = arr.length;
+            let found = false;
+            for (let i = 0; i < arr.length; i++){
+                const e = arr[i];
+                if (!e) continue;
+                if (e.__groupStart || e.__groupEnd) continue;
+                if (logical === 0) { physPos = i; found = true; break; }
+                logical--;
+            }
+            if (!found) physPos = arr.length;
+            return physPos;
+        } catch (e) { return 0; }
+    }
+
+    _openFrameContextMenu(slotPos, logicalIndex) {
+        try {
+            // close existing
+            try { if (this._frameContextMenu) { this._frameContextMenu.visible = false; } } catch (e) {}
+            // position menu to the right of the slot, but keep inside viewport
+            const menuW = 170; const menuH = 80;
+            const x = Math.min((this.menu.pos.x + this.menu.size.x - menuW - 8), slotPos.x + 200 + 8);
+            const y = Math.max(8, Math.min(slotPos.y, (this.menu.pos.y + this.menu.size.y) - menuH - 8));
+            const menu = new Menu(this.mouse, this.keys, new Vector(x, y), new Vector(menuW, menuH), this.layer + 2, '#222222DD');
+            // delete button
+            const btnH = 36; const btnW = menuW - 12;
+            const del = new UIButton(this.mouse, this.keys, new Vector(6,6), new Vector(btnW, btnH), this.layer + 3, null, '#00000000', '#AA4444', '#660000');
+            del.onPressed.left.connect(() => {
+                try {
+                    const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                    if (anim && this.sprite && typeof this.sprite.popFrame === 'function') {
+                        const beforeRefs = this._snapshotLogicalFrameRefs(anim);
+                        this.sprite.popFrame(anim, logicalIndex);
+                        this._syncFrameReferenceRemap(anim, beforeRefs);
+                        const arr = (this.sprite._frames && this.sprite._frames.get(anim)) || [];
+                        if (arr.length === 0) this.scene.selectedFrame = 0;
+                        else this.scene.selectedFrame = Math.max(0, Math.min(logicalIndex, arr.length - 1));
+                        try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.delete'); } catch (e) {}
+                    }
+                } catch (e) {}
+                menu.visible = false;
+                try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+            });
+            // duplicate button
+            const dup = new UIButton(this.mouse, this.keys, new Vector(6, 12 + btnH), new Vector(btnW, btnH), this.layer + 3, null, '#00000000', '#6666AA', '#222244');
+            dup.onPressed.left.connect(() => {
+                try {
+                    const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                    if (!anim || !this.sprite) return;
+                    const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, logicalIndex) : null;
+                    if (src && typeof this.sprite.insertFrame === 'function') {
+                        this._ensureAnimationListed(anim);
+                        this.sprite.insertFrame(anim); // append
+                        const arrNow = (this.sprite._frames && this.sprite._frames.get(anim)) || [];
+                        let logicalCount = 0;
+                        for (let i = 0; i < arrNow.length; i++) {
+                            const e = arrNow[i]; if (!e) continue; if (e.__groupStart || e.__groupEnd) continue; logicalCount++;
+                        }
+                        const newLogical = Math.max(0, logicalCount - 1);
+                        try { this._copyCanvasToFrame(anim, newLogical, src); } catch (e) {}
+                        if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                        if (this.scene) this.scene.selectedFrame = newLogical;
+                        try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.duplicate'); } catch (e) {}
+                    }
+                } catch (e) {}
+                menu.visible = false;
+                try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+            });
+            menu.addElement('del', del);
+            menu.addElement('dup', dup);
+            // attach labels for the buttons so they render over the button boxes
+            // labels will be drawn in drawOverlay() when the context menu exists
+            this._frameContextMenu = menu;
+        } catch (e) { console.warn('openFrameContextMenu failed', e); }
     }
 
     // Rebuild palette entries from scene.tileTypes (array of {sheetId,row,col})
@@ -2956,6 +3069,120 @@ export default class FrameSelect {
     update(delta) {
         this.menu.update(delta);
 
+        // drag-scroll handling for the frame sidebar
+        try {
+            const menuPos = (this.menu && this.menu.pos) ? this.menu.pos : new Vector(0,0);
+            const menuSize = (this.menu && this.menu.size) ? this.menu.size : new Vector(200,1080);
+            // On press: determine if press is on a frame slot or on menu body
+            if (this.mouse && this.mouse.pressed && this.mouse.pressed('left')) {
+                // compute visible slots to test hit quickly
+                const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
+                const groups = this._getFrameGroups(anim);
+                const slots = [];
+                for (const g of groups){ g.firstIndex = Math.min.apply(null, g.indices); }
+                for (let i = 0; i < framesArr.length; i++){
+                    const groupAtFirst = groups.find(g => g.firstIndex === i);
+                    if (groupAtFirst){
+                        slots.push({ type: 'group', group: groupAtFirst, posIndex: i });
+                        if (groupAtFirst.collapsed){ i = Math.max.apply(null, groupAtFirst.indices); continue; }
+                    }
+                    slots.push({ type: 'frame', index: i, posIndex: i });
+                }
+                slots.push({ type: 'add', posIndex: framesArr.length });
+
+                let hitFrame = null;
+                for (let s = 0; s < slots.length; s++){
+                    const item = slots[s];
+                    const pos = new Vector(5, 100 + (180 + 20) * s + this.scrollPos);
+                    const size = new Vector(190, 190);
+                    if (Geometry.pointInRect(this.mouse.pos, pos, size) && item.type === 'frame') { hitFrame = item; break; }
+                }
+                if (hitFrame) {
+                    this._pressContext = { type: 'frame', slotIndex: hitFrame.index, pressX: this.mouse.pos.x, pressY: this.mouse.pos.y, pressTime: (typeof performance !== 'undefined' ? performance.now()/1000 : Date.now()/1000) };
+                    this._dragCandidate = { index: hitFrame.index, pressY: this.mouse.pos.y, pressTime: this._pressContext.pressTime };
+                    this._didDrag = false;
+                } else if (Geometry.pointInRect(this.mouse.pos, menuPos, menuSize)) {
+                    this._pressContext = { type: 'menu', pressX: this.mouse.pos.x, pressY: this.mouse.pos.y, pressTime: (typeof performance !== 'undefined' ? performance.now()/1000 : Date.now()/1000) };
+                    this._scrollDragging = true;
+                    this._scrollDragStartY = this.mouse.pos.y;
+                    this._scrollStart = this.scrollPos;
+                    this._didDrag = false;
+                } else {
+                    this._pressContext = null;
+                }
+            }
+
+            // update scroll during hold when in menu-press mode
+            if (this._pressContext && this._pressContext.type === 'menu' && this._scrollDragging && this.mouse && this.mouse.held && this.mouse.held('left')) {
+                const dy = this.mouse.pos.y - this._scrollDragStartY;
+                if (Math.abs(dy) > 4) this._didDrag = true;
+                this.scrollPos = this._scrollStart + dy;
+            }
+
+            // if press was on a frame, detect quick move -> convert to scroll, otherwise after threshold start drag
+            if (this._pressContext && this._pressContext.type === 'frame') {
+                const now = (typeof performance !== 'undefined') ? performance.now()/1000 : Date.now()/1000;
+                const heldT = Math.max(0, now - (this._pressContext.pressTime || now));
+                const dy = this.mouse.pos.y - (this._pressContext.pressY || 0);
+                const dx = this.mouse.pos.x - (this._pressContext.pressX || 0);
+                const moveDist = Math.hypot(dx, dy);
+
+                // quick/flick movement before threshold -> treat as scroll
+                if (!this._scrollDragging && moveDist > this._scrollMoveThreshold && heldT < this._dragStartThreshold) {
+                    this._pressContext.type = 'menu';
+                    this._scrollDragging = true;
+                    this._scrollDragStartY = this.mouse.pos.y;
+                    this._scrollStart = this.scrollPos;
+                    this._didDrag = true;
+                    this._dragCandidate = null;
+                }
+
+                // start dragging after hold threshold if movement small
+                if (!this._draggingFrame && this._dragCandidate && heldT >= this._dragStartThreshold && moveDist < (this._scrollMoveThreshold * 2)) {
+                    // begin dragging: create ghost canvas copy
+                    try {
+                        const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                        const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, this._dragCandidate.index) : null;
+                        let ghost = null;
+                        if (src && src.getContext) {
+                            ghost = document.createElement('canvas'); ghost.width = src.width; ghost.height = src.height;
+                            const gctx = ghost.getContext('2d'); gctx.clearRect(0,0,ghost.width,ghost.height); gctx.drawImage(src,0,0);
+                        }
+                        const physIdx = this._logicalToPhysical(anim, this._dragCandidate.index);
+                        this._draggingFrame = { index: this._dragCandidate.index, physIdx: physIdx, ghostCanvas: ghost, offset: { x: 0, y: 0 } };
+                        this._didDrag = true;
+                        try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                        try { this.mouse.pause && this.mouse.pause(); } catch (e) {}
+                    } catch (e) { this._dragCandidate = null; }
+                }
+
+                // if released without starting drag, clear candidate
+                if (this._dragCandidate && this.mouse.released && this.mouse.released('left') && !this._draggingFrame) {
+                    this._dragCandidate = null;
+                    this._pressContext = null;
+                }
+            }
+
+            // end scroll drag
+            if (this._scrollDragging && this.mouse && this.mouse.released && this.mouse.released('left')) {
+                this._scrollDragging = false;
+                if (this._didDrag) try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+            }
+            // If clicking anywhere outside the floating frame context menu, close it
+            try {
+                if (this._frameContextMenu && this.mouse && this.mouse.pressed && this.mouse.pressed('left')) {
+                    const mp = this.mouse.pos;
+                    const mpos = this._frameContextMenu.pos || null;
+                    const msize = this._frameContextMenu.size || null;
+                    if (!(mpos && msize && Geometry.pointInRect(mp, mpos, msize))) {
+                        this._frameContextMenu.visible = false;
+                        this._frameContextMenu = null;
+                    }
+                }
+            } catch (e) {}
+        } catch (e) {}
+
         try {
             if (this.mouse && this.mouse.released && this.mouse.released('left')) {
                 const layout = this._getImportExportButtonLayout();
@@ -3202,9 +3429,109 @@ export default class FrameSelect {
             // ignore
         }
 
-        // handle click selection: if left button was released over a frame slot (frames + groups)
+        // handle press/drag for frames: start drag candidate on press, long-press+move to reorder
+        try {
+            const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+            const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
+            const slots = [];
+            const groups = this._getFrameGroups(anim);
+            for (const g of groups){ g.firstIndex = Math.min.apply(null, g.indices); }
+            for (let i = 0; i < framesArr.length; i++){
+                const groupAtFirst = groups.find(g => g.firstIndex === i);
+                if (groupAtFirst){
+                    slots.push({ type: 'group', group: groupAtFirst, posIndex: i });
+                    if (groupAtFirst.collapsed){ i = Math.max.apply(null, groupAtFirst.indices); continue; }
+                }
+                slots.push({ type: 'frame', index: i, posIndex: i });
+            }
+            slots.push({ type: 'add', posIndex: framesArr.length });
 
-        if (this.mouse.released('left') || this.mouse.pressed('right')) {
+            // Pressed: record candidate for potential drag/reorder
+            if (this.mouse.pressed && this.mouse.pressed('left')) {
+                for (let s = 0; s < slots.length; s++){
+                    const item = slots[s];
+                    const pos = new Vector(5, 100 + (180 + 20) * s + this.scrollPos);
+                    const size = new Vector(190, 190);
+                    if (Geometry.pointInRect(this.mouse.pos, pos, size) && item.type === 'frame'){
+                        this._dragCandidate = { index: item.index, pressY: this.mouse.pos.y, pressTime: (typeof performance !== 'undefined') ? performance.now() / 1000 : Date.now() / 1000 };
+                        break;
+                    }
+                }
+            }
+
+            // If candidate present and held long enough + moved -> start dragging
+            if (this._dragCandidate && this.mouse.held && this.mouse.held('left')) {
+                const now = (typeof performance !== 'undefined') ? performance.now() / 1000 : Date.now() / 1000;
+                const heldT = Math.max(0, now - (this._dragCandidate.pressTime || now));
+                const dy = Math.abs(this.mouse.pos.y - (this._dragCandidate.pressY || 0));
+                if (!this._draggingFrame && (heldT >= this._dragStartThreshold || dy > 8)) {
+                    // begin dragging: create ghost canvas copy
+                    try {
+                        const src = (typeof this.sprite.getFrame === 'function') ? this.sprite.getFrame(anim, this._dragCandidate.index) : null;
+                        let ghost = null;
+                        if (src && src.getContext) {
+                            ghost = document.createElement('canvas'); ghost.width = src.width; ghost.height = src.height;
+                            const gctx = ghost.getContext('2d'); gctx.clearRect(0,0,ghost.width,ghost.height); gctx.drawImage(src,0,0);
+                        }
+                        const physIdx = this._logicalToPhysical(anim, this._dragCandidate.index);
+                        this._draggingFrame = { index: this._dragCandidate.index, physIdx: physIdx, ghostCanvas: ghost, offset: { x: 0, y: 0 } };
+                        this._didDrag = true;
+                        try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                        try { this.mouse.pause && this.mouse.pause(); } catch (e) {}
+                    } catch (e) { this._dragCandidate = null; }
+                }
+            }
+
+            // On release: if we were dragging a frame, compute drop position and reorder
+            if (this._draggingFrame && this.mouse.released && this.mouse.released('left')) {
+                try {
+                    // compute drop logical index from mouse position
+                    const relY = this.mouse.pos.y - 100 - this.scrollPos;
+                    const targetSlot = Math.max(0, Math.round(relY / (180 + 20)));
+                    const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
+                    if (anim && this.sprite && this.sprite._frames && this.sprite._frames.has(anim)) {
+                        const arr = this.sprite._frames.get(anim);
+                        const fromPhys = this._draggingFrame.physIdx;
+                        const toLogical = Math.max(0, Math.min((this.sprite._frames.get(anim).length || 0), targetSlot));
+                        const toPhys = this._physicalInsertPosForLogical(anim, toLogical);
+                        if (fromPhys >= 0 && toPhys >= 0 && fromPhys !== toPhys) {
+                            const item = arr.splice(fromPhys, 1)[0];
+                            // adjust toPhys if removal came before insert
+                            let insertAt = toPhys;
+                            if (fromPhys < toPhys) insertAt = Math.max(0, toPhys - 1);
+                            arr.splice(insertAt, 0, item);
+                            if (typeof this.sprite._rebuildSheetCanvas === 'function') this.sprite._rebuildSheetCanvas();
+                            if (this.scene) this.scene.selectedFrame = Math.max(0, Math.min(arr.length - 1, toLogical));
+                            try { this.scene && this.scene.sfx && this.scene.sfx.play('frame.move'); } catch (e) {}
+                        }
+                    }
+                } catch (e) {}
+                this._draggingFrame = null;
+                this._dragCandidate = null;
+                // keep a short mask to avoid click fallthrough
+                try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+            }
+            // While dragging, support auto-scroll when pointer near top/bottom
+            if (this._draggingFrame) {
+                // use upper/lower 10% of the screen height to trigger auto-scroll (more reliable on varied layouts)
+                const screenH = 1080;
+                if (this.mouse.pos.y < 300) {
+                    this.scrollPos += 2 * 300/((this.mouse.pos.y+10));
+                } else if (this.mouse.pos.y > 1080-300) {
+                    this.scrollPos -= 2 * 300/(1080-(this.mouse.pos.y-10));
+                }
+                if(this.scrollPos > 0) this.scrollPos = 0
+                if(this.scrollPos < minScroll) this.scrollPos = minScroll
+                
+            }
+        } catch (e) {}
+
+        // handle click selection: if left button was released over a frame slot (frames + groups)
+        // Skip selection if we just performed a drag so we don't open menus or change selection
+        if (this._didDrag || this._draggingFrame) {
+            // reset drag flag after consuming
+            if (this._didDrag && this.mouse.released && this.mouse.released('left')) this._didDrag = false;
+        } else if (this.mouse.released('left') || this.mouse.pressed('right')) {
             const anim = (this.scene && this.scene.selectedAnimation) ? this.scene.selectedAnimation : null;
             const framesArr = (this.sprite && this.sprite._frames && anim) ? (this.sprite._frames.get(anim) || []) : [];
             // compute slots combining groups and frames
@@ -3234,6 +3561,29 @@ export default class FrameSelect {
                 if (Geometry.pointInRect(this.mouse.pos, pos, size)){
                     if (!anim) break;
                     if (item.type === 'frame'){
+                        // right-click -> open small context menu
+                        if (this.mouse.pressed && this.mouse.pressed('right')) {
+                            try { this._openFrameContextMenu(pos, item.index); } catch (e) {}
+                            try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                            break;
+                        }
+                        // double-tap / double-click detection: open context menu on rapid second tap
+                        try {
+                            const now = (typeof performance !== 'undefined') ? performance.now() / 1000 : Date.now() / 1000;
+                            const last = this._lastTapTime || 0;
+                            const lastPos = this._lastTapPos || null;
+                            if (this.mouse.released && this.mouse.released('left')) {
+                                if (last && (now - last) < 0.35 && lastPos && Math.hypot(lastPos.x - this.mouse.pos.x, lastPos.y - this.mouse.pos.y) < 24) {
+                                    try { this._openFrameContextMenu(pos, item.index); } catch (e) {}
+                                    this._lastTapTime = 0; this._lastTapPos = null;
+                                    try { if (this.mouse && typeof this.mouse.addMask === 'function') this.mouse.addMask(1); } catch(e){}
+                                    break;
+                                } else {
+                                    this._lastTapTime = now;
+                                    this._lastTapPos = { x: this.mouse.pos.x, y: this.mouse.pos.y };
+                                }
+                            }
+                        } catch (e) {}
                         try {
                             const i = item.index;
                             let handledConnectionToggle = false;
@@ -3871,6 +4221,8 @@ export default class FrameSelect {
         try{
             if (this._textInput && typeof this._textInput.update === 'function') this._textInput.update(delta);
         } catch(e){}
+        // update floating context menu if present
+        try { if (this._frameContextMenu && typeof this._frameContextMenu.update === 'function') this._frameContextMenu.update(delta); } catch (e) {}
 
         // animation list interactions (click/select/rename/remove/add)
         try{
@@ -4426,6 +4778,38 @@ export default class FrameSelect {
             }
         } catch(e){}
         this.UIDraw.text(this._animFps,new Vector(1875,40),'#FFFFFF')
+        // overlay (drag ghost, context menus)
+        try { this.drawOverlay(); } catch (e) {}
 
+    }
+
+    // draw overlay elements (ghost during drag)
+    drawOverlay() {
+        try {
+            if (this._draggingFrame && this._draggingFrame.ghostCanvas) {
+                const g = this._draggingFrame.ghostCanvas;
+                const ms = new Vector(this.mouse.pos.x - 90, this.mouse.pos.y - 90);
+                // white outline to indicate drop preview
+                this.UIDraw.rect(ms.clone().add(new Vector(0,0)), new Vector(180,180), '#00000000', false, true, 4, '#FFFFFFFF');
+                this.UIDraw.image(g, ms.clone().add(new Vector(5,5)), new Vector(180,180), null, 0, 0.92, false);
+            }
+            // draw frame context menu if present
+            if (this._frameContextMenu) {
+                this._frameContextMenu.draw(this.UIDraw);
+                try {
+                    // draw button labels centered on each button
+                    const delEl = this._frameContextMenu.elements.get && this._frameContextMenu.elements.get('del');
+                    const dupEl = this._frameContextMenu.elements.get && this._frameContextMenu.elements.get('dup');
+                    if (delEl) {
+                        const delCenter = delEl.offset.add(delEl.pos).add(new Vector(delEl.size.x/2, delEl.size.y/2));
+                        this.UIDraw.text('Remove', new Vector(delCenter.x, delCenter.y + 6), '#FFFFFF', 0, 14, { align: 'center', baseline: 'middle', font: 'monospace' });
+                    }
+                    if (dupEl) {
+                        const dupCenter = dupEl.offset.add(dupEl.pos).add(new Vector(dupEl.size.x/2, dupEl.size.y/2));
+                        this.UIDraw.text('Copy', new Vector(dupCenter.x, dupCenter.y + 6), '#FFFFFF', 0, 14, { align: 'center', baseline: 'middle', font: 'monospace' });
+                    }
+                } catch (e) {}
+            }
+        } catch (e) {}
     }
 }

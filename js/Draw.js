@@ -272,7 +272,21 @@ export default class Draw {
 
     clear() {
         const ctx = this._assertCtx('clear');
-        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        // Compute visible CSS/client size (fall back to pixel size / DPR)
+        const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 1;
+        const cssW = (typeof ctx.canvas.clientWidth === 'number' && ctx.canvas.clientWidth > 0)
+            ? ctx.canvas.clientWidth
+            : (ctx.canvas.width / dpr);
+        const cssH = (typeof ctx.canvas.clientHeight === 'number' && ctx.canvas.clientHeight > 0)
+            ? ctx.canvas.clientHeight
+            : (ctx.canvas.height / dpr);
+
+        // Convert to Draw logical units (matching background behaviour)
+        const w = cssW / (this.Scale.x || 1);
+        const h = cssH / (this.Scale.y || 1);
+
+        // Use rect erase path which clears the underlying pixels correctly
+        this.rect(new Vector(0, 0), new Vector(w, h), null, true, false, 1, null, true);
     }
     /**
      * Rectangular mask. If invert=true, everything OUTSIDE the rect is kept (even-odd rule).
@@ -450,7 +464,21 @@ export default class Draw {
     
     background(color = '#000000FF') {
         const ctx = this._assertCtx('background');
-        this.rect(new Vector(0, 0), new Vector(ctx.canvas.width / this.Scale.x, ctx.canvas.height / this.Scale.y), color, true);
+        // Use the canvas CSS/client size (in CSS pixels) to determine the
+        // visible area. Fall back to internal pixel size divided by DPR
+        // if clientWidth/clientHeight are not available.
+        const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 1;
+        const cssW = (typeof ctx.canvas.clientWidth === 'number' && ctx.canvas.clientWidth > 0)
+            ? ctx.canvas.clientWidth
+            : (ctx.canvas.width / dpr);
+        const cssH = (typeof ctx.canvas.clientHeight === 'number' && ctx.canvas.clientHeight > 0)
+            ? ctx.canvas.clientHeight
+            : (ctx.canvas.height / dpr);
+
+        const w = cssW / (this.Scale.x || 1);
+        const h = cssH / (this.Scale.y || 1);
+
+        this.rect(new Vector(0, 0), new Vector(w, h), color, true);
     }
 
     /**
