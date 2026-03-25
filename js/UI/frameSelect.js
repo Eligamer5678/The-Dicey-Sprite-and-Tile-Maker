@@ -7,6 +7,7 @@ import UISlider from './Slider.js';
 import Geometry from '../Geometry.js';
 import UITextInput from './UITextInput.js';
 import SpriteSheet from '../Spritesheet.js';
+import AnimationPreviewMenu from './AnimationPreviewMenu.js';
 
 export default class FrameSelect {
     constructor(scene,sprite, mouse, keys, UIDraw, layer = 1) {
@@ -74,6 +75,7 @@ export default class FrameSelect {
         this._lastTapTime = 0;
         this._lastTapPos = null;
         this._frameContextMenu = null;
+        this._animPreviewMenu = null;
     }
 
     // Map logical frame index to physical array index in sprite._frames[anim]
@@ -3068,6 +3070,7 @@ export default class FrameSelect {
 
     update(delta) {
         this.menu.update(delta);
+        try { if (this._animPreviewMenu) this._animPreviewMenu.update(delta); } catch (e) {}
 
         // drag-scroll handling for the frame sidebar
         try {
@@ -3185,6 +3188,18 @@ export default class FrameSelect {
 
         try {
             if (this.mouse && this.mouse.released && this.mouse.released('left')) {
+                // handle click on the top-left preview to open the animation preview menu
+                try {
+                    const outerPos = new Vector(1920 - this._previewBuffer * 3 - this._previewSize, this._previewBuffer);
+                    const contentPos = outerPos.clone().add(new Vector(this._previewBuffer, this._previewBuffer));
+                    const contentSize = new Vector(this._previewSize, this._previewSize);
+                    if (Geometry.pointInRect(this.mouse.pos, contentPos, contentSize)) {
+                        try {
+                            if (!this._animPreviewMenu || !this._animPreviewMenu._open) this._animPreviewMenu = new AnimationPreviewMenu(this.mouse, this.keys, this.UIDraw, this.scene, this.sprite, this.layer + 100);
+                        } catch (e) {}
+                        return;
+                    }
+                } catch (e) {}
                 const layout = this._getImportExportButtonLayout();
                 if (Geometry.pointInRect(this.mouse.pos, layout.importPos, layout.btnSize)) {
                     try { if (this._importInput) this._importInput.click(); } catch (e) {}
@@ -4780,6 +4795,7 @@ export default class FrameSelect {
         this.UIDraw.text(this._animFps,new Vector(1875,40),'#FFFFFF')
         // overlay (drag ghost, context menus)
         try { this.drawOverlay(); } catch (e) {}
+        try { if (this._animPreviewMenu) this._animPreviewMenu.draw(); } catch (e) {}
 
     }
 

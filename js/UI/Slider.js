@@ -21,7 +21,8 @@ export default class UISlider {
      */
     constructor(
         mouse,keys, pos, size, layer = 0, type = 'scalar', value = 0, min = 0, max = 1,
-        baseColor = '#444', hoverColor = '#555', pressedColor = '#222', knobColor = '#aaa', keybind = null
+        baseColor = '#444', hoverColor = '#555', pressedColor = '#222', knobColor = '#aaa', keybind = null,
+        options = {}
     ) {
         this.mouse = mouse;
         this.keys = keys;
@@ -38,6 +39,11 @@ export default class UISlider {
         this.min = min;
         this.colorMode = 'a';
         this.max = max;
+
+        // options: { orientation: 'horizontal'|'vertical', step: number|null, ticks: boolean|number }
+        this.orientation = options.orientation || 'horizontal';
+        this.step = (typeof options.step === 'number') ? options.step : null;
+        this.ticks = options.ticks || false; // can be true or a number (count)
 
         // Colors
         this.baseColor = baseColor;
@@ -96,8 +102,19 @@ export default class UISlider {
                 const relX = Math.min(Math.max(mousePos.x - pos.x, 0), this.size.x) / this.size.x;
                 if (this.value.toRgb) this.value[this.colorMode] = relX;
             } else if (this.type === 'scalar') {
-                const relX = Math.min(Math.max(mousePos.x - pos.x, 0), this.size.x);
-                this.value = this.min + (relX / this.size.x) * (this.max - this.min);
+                const range = (this.max - this.min) || 1;
+                if (this.orientation === 'horizontal'){
+                    const relX = Math.min(Math.max(mousePos.x - pos.x, 0), this.size.x);
+                    let newVal = this.min + (relX / (this.size.x || 1)) * range;
+                    if (this.step) newVal = Math.round(newVal / this.step) * this.step;
+                    this.value = newVal;
+                } else {
+                    // vertical: origin at top, map bottom->top so bottom = max
+                    const relY = Math.min(Math.max(mousePos.y - pos.y, 0), this.size.y);
+                    let newVal = this.max - (relY / (this.size.y || 1)) * range;
+                    if (this.step) newVal = Math.round(newVal / this.step) * this.step;
+                    this.value = newVal;
+                }
             } else if (this.type === 'vector') {
                 const rel = new Vector(
                     Math.min(Math.max(mousePos.x - pos.x, 0), this.size.x) / this.size.x,
@@ -126,12 +143,23 @@ export default class UISlider {
 
         // Draw fill / knob
         if (this.type === 'scalar') {
-            const width = ((this.value - this.min) / (this.max - this.min)) * this.size.x;
-            Draw.rect(pos, new Vector(width, this.size.y), this.knobColor);
+            const range = (this.max - this.min) || 1;
+            if (this.orientation === 'horizontal'){
+                const width = ((this.value - this.min) / range) * (this.size.x || 0);
+                if (this.size.x > 0) Draw.rect(pos, new Vector(width, this.size.y), this.knobColor);
+                const knobX = pos.x + width - 6;
+                Draw.rect(new Vector(knobX, pos.y), new Vector(12, this.size.y), '#00000055');
+            } else {
+                const height = ((this.value - this.min) / range) * (this.size.y || 0);
+                const fillPos = new Vector(pos.x, pos.y + (this.size.y - height));
+                if (this.size.y > 0) Draw.rect(fillPos, new Vector(this.size.x, height), this.knobColor);
+                Draw.rect(new Vector(pos.x, fillPos.y - 6), new Vector(this.size.x, 12), '#00000055');
+            }
         } else if (this.type === 'vector') {
+            const range = (this.max - this.min) || 1;
             const dotPos = new Vector(
-                pos.x + ((this.value.x - this.min) / (this.max - this.min)) * this.size.x - 5,
-                pos.y + ((this.value.y - this.min) / (this.max - this.min)) * this.size.y - 5
+                pos.x + ((this.value.x - this.min) / range) * (this.size.x || 0) - 5,
+                pos.y + ((this.value.y - this.min) / range) * (this.size.y || 0) - 5
             );
             Draw.rect(dotPos, new Vector(10, 10), this.knobColor);
         } else if (this.type === 'color') {
@@ -164,6 +192,29 @@ export default class UISlider {
             const knobPos = new Vector(pos.x + fillWidth - 5, pos.y);
             Draw.rect(knobPos, new Vector(10, this.size.y), this.knobColor);
         }
+
+        // draw ticks if requested
+        try {
+            if (this.ticks) {
+                const count = (typeof this.ticks === 'number') ? this.ticks : 5;
+                const tickW = 6;
+                const tickH = Math.min(18, Math.floor(this.size.y * 0.6));
+                for (let i=0;i<count;i++){
+                    const rel = i/(count-1);
+                    if (this.orientation === 'horizontal'){
+                        if (this.size.x <= 0) continue;
+                        const tx = Math.floor(pos.x + rel * this.size.x - tickW/2);
+                        const ty = Math.floor(pos.y + (this.size.y/2) - tickH/2);
+                        Draw.rect(new Vector(tx, ty), new Vector(tickW, tickH), '#000000', true);
+                    } else {
+                        if (this.size.y <= 0) continue;
+                        const ty = Math.floor(pos.y + (1-rel) * this.size.y - tickW/2);
+                        const tx = Math.floor(pos.x + (this.size.x/2) - tickH/2);
+                        Draw.rect(new Vector(tx, ty), new Vector(tickH, tickW), '#000000', true);
+                    }
+                }
+            }
+        } catch (e) {}
 
         // Border
         Draw.rect(pos, this.size, '#222222', false, true, 5,'#222222');
