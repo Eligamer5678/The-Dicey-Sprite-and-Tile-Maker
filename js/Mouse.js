@@ -198,11 +198,15 @@ export default class Mouse {
                 this._setButton(0, 0);
             } else {
                 // compute zoom delta
+                // compute zoom delta and ignore tiny jitter to avoid accidental zoom while panning
                 const delta = dist - (this._gesturePrevDist || dist);
-                // scale factor for wheel-like delta; tune as needed
+                const PINCH_JITTER_THRESHOLD = 2; // pixels
                 const ZOOM_SENSITIVITY = 2;
-                this._lastWheelDelta += -delta * ZOOM_SENSITIVITY;
-                this._lastWheelCtrl = true; // mark as a ctrl-like zoom so consumers can opt-in
+                if (Math.abs(delta) > PINCH_JITTER_THRESHOLD) {
+                    this._lastWheelDelta += -delta * ZOOM_SENSITIVITY;
+                    this._lastWheelCtrl = true; // mark as a ctrl-like zoom so consumers can opt-in
+                    this._gesturePrevDist = dist;
+                }
 
                 // compute pan delta from gesture center movement
                 const pdx = cx - this._gesturePrevCenter.x;
@@ -213,9 +217,17 @@ export default class Mouse {
                 // vertical pan -> scrollDelta
                 this.scrollDelta += -pdy * PAN_SENSITIVITY;
 
-                this._gesturePrevDist = dist;
                 this._gesturePrevCenter = { x: cx, y: cy };
             }
+            // while gesturing, update mouse position to the gesture center so zoom anchors correctly
+            try {
+                this.prevPos = this.pos.clone();
+                this.pos = new Vector(
+                    (cx - this.rect.left + this.offset.x) * this.scale/this.canvasScale.x,
+                    (cy - this.rect.top + this.offset.y) * this.scale/this.canvasScale.y
+                );
+                this._updateOffCanvasState();
+            } catch (e) {}
             return; // don't call primary pointer move while gesturing
         }
 
